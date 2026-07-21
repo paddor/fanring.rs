@@ -1,0 +1,37 @@
+[package]
+name = "fanring"
+version = "0.1.0"
+edition = "2024"
+license = "ISC"
+description = "Bounded sharded MPSC channel built from SPSC rings"
+
+[lints.rust]
+missing_debug_implementations = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[dependencies]
+plotters = { version = "0.3", optional = true, default-features = false, features = ["svg_backend", "line_series"] }
+serde = { version = "1", optional = true, features = ["derive"] }
+serde_json = { version = "1", optional = true }
+yring = "0.3.9"
+
+[dev-dependencies]
+concurrent-queue = "2.5"
+crossbeam-channel = "0.5"
+flume = "0.12"
+kanal = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thingbuf = "0.1"
+
+[features]
+charts = ["dep:plotters", "dep:serde", "dep:serde_json"]
+
+[[bench]]
+name = "comparison"
+harness = false
+
+[[bin]]
+name = "fanring-chart"
+path = "src/bin/chart.rs"
+required-features = ["charts"]
