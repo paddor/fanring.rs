@@ -4,11 +4,13 @@
 
 ```sh
 cargo test
+RUSTFLAGS="--cfg loom" cargo test --test loom
 cargo clippy --all-targets --features charts
 ```
 
 The test suite covers per-sender FIFO, per-sender backpressure, disconnect
 behavior, drop cleanup, sparse shard use, and the 64-bit ready mask.
+The Loom test models the ready-bit race and receiver drop handoff.
 
 `fanring` contains no direct `unsafe` code. Slot safety is delegated to
 `yring`, which has its own Miri/Loom coverage.

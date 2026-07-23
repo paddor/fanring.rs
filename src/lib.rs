@@ -8,8 +8,10 @@
 //! relaxed.
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+
+mod compat;
+
+use compat::{Arc, AtomicBool, AtomicU64, AtomicUsize, Mutex, Ordering};
 
 const MAX_SENDERS: usize = u64::BITS as usize;
 const PREFETCH_LIMIT: usize = 64;
@@ -192,14 +194,9 @@ impl<T> Sender<T> {
     #[inline]
     fn mark_ready(&self) {
         let flag = &self.shared.shard_ready[self.shard];
-        if flag.load(Ordering::Acquire) {
-            return;
-        }
-
-        if flag
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
+        // Publish the flush even when the shard was already ready. The
+        // receiver's matching swap synchronizes before its second prefetch.
+        if !flag.swap(true, Ordering::AcqRel) {
             self.shared.ready.fetch_or(self.bit, Ordering::Release);
         }
     }
@@ -276,7 +273,7 @@ impl<T> Receiver<T> {
             return Some(self.pop_cached_from_shard(shard));
         }
 
-        self.shared.shard_ready[shard].store(false, Ordering::Release);
+        self.shared.shard_ready[shard].swap(false, Ordering::AcqRel);
 
         let prefetched = self.consumers[shard].prefetch();
         if prefetched > 0 {
@@ -388,24 +385,13 @@ impl ReadyFlag {
     }
 
     #[inline]
-    fn load(&self, ordering: Ordering) -> bool {
-        self.0.load(ordering)
-    }
-
-    #[inline]
     fn store(&self, value: bool, ordering: Ordering) {
         self.0.store(value, ordering);
     }
 
     #[inline]
-    fn compare_exchange(
-        &self,
-        current: bool,
-        new: bool,
-        success: Ordering,
-        failure: Ordering,
-    ) -> Result<bool, bool> {
-        self.0.compare_exchange(current, new, success, failure)
+    fn swap(&self, value: bool, ordering: Ordering) -> bool {
+        self.0.swap(value, ordering)
     }
 }
 
