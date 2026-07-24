@@ -10,26 +10,77 @@
 use std::fmt;
 
 mod compat;
+mod error;
+mod ready;
 
 use compat::{Arc, AtomicBool, AtomicU64, AtomicUsize, Mutex, Ordering};
+use ready::{ReadyMask, ReadySet, shard_bit};
 
-const MAX_SENDERS: usize = u64::BITS as usize;
+pub use error::{ChannelError, RecvError, SendError, TryRegisterError};
+
+/// Maximum number of senders supported by the ready bitmask.
+pub const MAX_SENDERS: usize = u64::BITS as usize;
+
+/// Maximum per-sender capacity accepted by [`channel`] and [`try_channel`].
+///
+/// `yring` rounds capacity up to a power of two and requires the rounded value
+/// to fit in half the cursor range.
+pub const MAX_CAPACITY_PER_SENDER: usize = 1usize << (usize::BITS - 2);
+
 const PREFETCH_LIMIT: usize = 64;
 
 /// Create a bounded sharded MPSC channel.
 ///
-/// `max_senders` includes the initial sender. It must be in `1..=64`.
-/// `capacity_per_sender` is rounded up by `yring` to the next power of two.
+/// `max_senders` includes the initial sender. It must be in
+/// `1..=`[`MAX_SENDERS`]. `capacity_per_sender` must be in
+/// `1..=`[`MAX_CAPACITY_PER_SENDER`] and is rounded up by `yring` to the next
+/// power of two.
 ///
 /// Cloning a sender is fallible: [`Sender::try_clone`] returns `None` when
 /// all sender rings are already claimed.
 pub fn channel<T>(max_senders: usize, capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
-    assert!(max_senders > 0, "max_senders must be > 0");
-    assert!(
-        max_senders <= MAX_SENDERS,
-        "max_senders must be <= 64 for the ready bitmask"
-    );
+    try_channel(max_senders, capacity_per_sender).unwrap_or_else(|error| panic!("{error}"))
+}
 
+/// Try to create a bounded sharded MPSC channel.
+///
+/// This is the fallible version of [`channel`]. It returns a [`ChannelError`]
+/// instead of panicking when the configuration is invalid.
+pub fn try_channel<T>(
+    max_senders: usize,
+    capacity_per_sender: usize,
+) -> Result<(Sender<T>, Receiver<T>), ChannelError> {
+    validate_channel_config(max_senders, capacity_per_sender)?;
+    Ok(build_channel(max_senders, capacity_per_sender))
+}
+
+fn validate_channel_config(
+    max_senders: usize,
+    capacity_per_sender: usize,
+) -> Result<(), ChannelError> {
+    if max_senders == 0 {
+        return Err(ChannelError::ZeroSenders);
+    }
+    if max_senders > MAX_SENDERS {
+        return Err(ChannelError::TooManySenders {
+            requested: max_senders,
+            max: MAX_SENDERS,
+        });
+    }
+    if capacity_per_sender == 0 {
+        return Err(ChannelError::ZeroCapacity);
+    }
+    if capacity_per_sender > MAX_CAPACITY_PER_SENDER {
+        return Err(ChannelError::CapacityTooLarge {
+            requested: capacity_per_sender,
+            max: MAX_CAPACITY_PER_SENDER,
+        });
+    }
+
+    Ok(())
+}
+
+fn build_channel<T>(max_senders: usize, capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
     let mut producers = Vec::with_capacity(max_senders);
     let mut consumers = Vec::with_capacity(max_senders);
 
@@ -44,8 +95,7 @@ pub fn channel<T>(max_senders: usize, capacity_per_sender: usize) -> (Sender<T>,
         .expect("initial producer must be present");
     let shared = Arc::new(Shared {
         unclaimed: Mutex::new(producers),
-        ready: AtomicU64::new(0),
-        shard_ready: (0..max_senders).map(|_| ReadyFlag::new(false)).collect(),
+        ready: ReadySet::new(max_senders),
         claimed: AtomicU64::new(1),
         live_senders: AtomicUsize::new(1),
         receiver_alive: AtomicBool::new(true),
@@ -57,14 +107,13 @@ pub fn channel<T>(max_senders: usize, capacity_per_sender: usize) -> (Sender<T>,
             shared: shared.clone(),
             producer,
             shard: 0,
-            bit: 1,
         },
         Receiver {
             shared,
             consumers,
             cached_available: vec![0; max_senders],
             unreleased: vec![0; max_senders],
-            ready_cache: 0,
+            ready_cache: ReadyMask::empty(),
             next_shard: 0,
         },
     )
@@ -72,8 +121,7 @@ pub fn channel<T>(max_senders: usize, capacity_per_sender: usize) -> (Sender<T>,
 
 struct Shared<T> {
     unclaimed: Mutex<Vec<Option<yring::Producer<T>>>>,
-    ready: AtomicU64,
-    shard_ready: Box<[ReadyFlag]>,
+    ready: ReadySet,
     claimed: AtomicU64,
     live_senders: AtomicUsize,
     receiver_alive: AtomicBool,
@@ -81,9 +129,12 @@ struct Shared<T> {
 }
 
 impl<T> Shared<T> {
-    fn claim_sender(&self, start_shard: usize) -> Option<(usize, yring::Producer<T>)> {
+    fn claim_sender(
+        &self,
+        start_shard: usize,
+    ) -> Result<(usize, yring::Producer<T>), TryRegisterError> {
         if !self.receiver_alive.load(Ordering::Acquire) {
-            return None;
+            return Err(TryRegisterError::Disconnected);
         }
 
         let mut unclaimed = match self.unclaimed.lock() {
@@ -96,20 +147,28 @@ impl<T> Shared<T> {
             let Some(producer) = unclaimed[shard].take() else {
                 continue;
             };
-            let bit = bit(shard);
+            if !self.receiver_alive.load(Ordering::Acquire) {
+                unclaimed[shard] = Some(producer);
+                return Err(TryRegisterError::Disconnected);
+            }
+            let bit = shard_bit(shard);
             self.claimed.fetch_or(bit, Ordering::Release);
             self.live_senders.fetch_add(1, Ordering::AcqRel);
-            return Some((shard, producer));
+            return Ok((shard, producer));
         }
 
-        None
+        if self.receiver_alive.load(Ordering::Acquire) {
+            Err(TryRegisterError::NoSenderSlot)
+        } else {
+            Err(TryRegisterError::Disconnected)
+        }
     }
 }
 
 impl<T> fmt::Debug for Shared<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Shared")
-            .field("ready", &self.ready.load(Ordering::Relaxed))
+            .field("ready", &self.ready)
             .field("claimed", &self.claimed.load(Ordering::Relaxed))
             .field("live_senders", &self.live_senders.load(Ordering::Relaxed))
             .field(
@@ -125,13 +184,13 @@ impl<T> fmt::Debug for Shared<T> {
 ///
 /// A `Sender` owns exactly one SPSC ring producer. It is `Send` when `T` is
 /// `Send`, but it is not `Sync` and cannot be cloned infallibly. Use
-/// [`try_clone`](Self::try_clone) to register another sender.
+/// [`try_clone`](Self::try_clone) or [`try_register`](Self::try_register) to
+/// register another sender.
 #[derive(Debug)]
 pub struct Sender<T> {
     shared: Arc<Shared<T>>,
     producer: yring::Producer<T>,
     shard: usize,
-    bit: u64,
 }
 
 impl<T> Sender<T> {
@@ -141,13 +200,20 @@ impl<T> Sender<T> {
     /// already claimed. Dropped sender slots are not reused in this initial
     /// design.
     pub fn try_clone(&self) -> Option<Self> {
+        self.try_register().ok()
+    }
+
+    /// Try to register another sender and report why registration failed.
+    ///
+    /// Prefer this over [`try_clone`](Self::try_clone) when the caller needs to
+    /// distinguish a closed receiver from an exhausted sender limit.
+    pub fn try_register(&self) -> Result<Self, TryRegisterError> {
         let start = self.shard.wrapping_add(1);
         let (shard, producer) = self.shared.claim_sender(start)?;
-        Some(Self {
+        Ok(Self {
             shared: self.shared.clone(),
             producer,
             shard,
-            bit: bit(shard),
         })
     }
 
@@ -193,12 +259,7 @@ impl<T> Sender<T> {
 
     #[inline]
     fn mark_ready(&self) {
-        let flag = &self.shared.shard_ready[self.shard];
-        // Publish the flush even when the shard was already ready. The
-        // receiver's matching swap synchronizes before its second prefetch.
-        if !flag.swap(true, Ordering::AcqRel) {
-            self.shared.ready.fetch_or(self.bit, Ordering::Release);
-        }
+        self.shared.ready.mark_ready(self.shard);
     }
 }
 
@@ -219,7 +280,7 @@ pub struct Receiver<T> {
     consumers: Vec<yring::Consumer<T>>,
     cached_available: Vec<usize>,
     unreleased: Vec<usize>,
-    ready_cache: u64,
+    ready_cache: ReadyMask,
     next_shard: usize,
 }
 
@@ -228,9 +289,9 @@ impl<T> Receiver<T> {
     #[inline]
     pub fn try_recv(&mut self) -> Result<T, RecvError> {
         loop {
-            if self.ready_cache == 0 {
-                self.ready_cache = self.shared.ready.swap(0, Ordering::AcqRel);
-                if self.ready_cache == 0 {
+            if self.ready_cache.is_empty() {
+                self.ready_cache = self.shared.ready.take_ready();
+                if self.ready_cache.is_empty() {
                     return if self.is_disconnected() {
                         Err(RecvError::Disconnected)
                     } else {
@@ -247,22 +308,21 @@ impl<T> Receiver<T> {
                     self.next_shard = 0;
                 }
 
-                let bit = bit(shard);
-                if self.ready_cache & bit == 0 {
+                if !self.ready_cache.contains(shard) {
                     continue;
                 }
 
-                if let Some(value) = self.try_recv_from_shard(shard, bit) {
+                if let Some(value) = self.try_recv_from_shard(shard) {
                     return Ok(value);
                 }
             }
 
-            self.ready_cache = 0;
+            self.ready_cache = ReadyMask::empty();
         }
     }
 
     #[inline]
-    fn try_recv_from_shard(&mut self, shard: usize, bit: u64) -> Option<T> {
+    fn try_recv_from_shard(&mut self, shard: usize) -> Option<T> {
         if self.cached_available[shard] > 0 {
             return Some(self.pop_cached_from_shard(shard));
         }
@@ -273,16 +333,16 @@ impl<T> Receiver<T> {
             return Some(self.pop_cached_from_shard(shard));
         }
 
-        self.shared.shard_ready[shard].swap(false, Ordering::AcqRel);
+        self.shared.ready.clear_shard(shard);
 
         let prefetched = self.consumers[shard].prefetch();
         if prefetched > 0 {
-            self.shared.shard_ready[shard].store(true, Ordering::Release);
+            self.shared.ready.restore_shard(shard);
             self.cached_available[shard] += prefetched;
             return Some(self.pop_cached_from_shard(shard));
         }
 
-        self.ready_cache &= !bit;
+        self.ready_cache.remove(shard);
         None
     }
 
@@ -309,7 +369,7 @@ impl<T> Receiver<T> {
 
         let claimed = self.shared.claimed.load(Ordering::Acquire);
         for shard in 0..self.consumers.len() {
-            if claimed & bit(shard) != 0 && !self.consumers[shard].is_disconnected() {
+            if claimed & shard_bit(shard) != 0 && !self.consumers[shard].is_disconnected() {
                 return false;
             }
         }
@@ -320,6 +380,12 @@ impl<T> Receiver<T> {
     #[inline]
     pub fn max_senders(&self) -> usize {
         self.consumers.len()
+    }
+
+    /// Return per-shard capacity after `yring` rounding.
+    #[inline]
+    pub fn capacity_per_sender(&self) -> usize {
+        self.consumers[0].capacity()
     }
 }
 
@@ -338,60 +404,8 @@ impl<T> fmt::Debug for Receiver<T> {
             .field("ready_cache", &self.ready_cache)
             .field("next_shard", &self.next_shard)
             .field("max_senders", &self.max_senders())
+            .field("capacity_per_sender", &self.capacity_per_sender())
             .finish_non_exhaustive()
-    }
-}
-
-/// Error from [`Sender::try_send`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SendError<T> {
-    /// This sender's ring is full.
-    Full(T),
-    /// The receiver has been dropped.
-    Disconnected(T),
-}
-
-impl<T> SendError<T> {
-    /// Return the unsent value.
-    #[inline]
-    pub fn into_inner(self) -> T {
-        match self {
-            Self::Full(value) | Self::Disconnected(value) => value,
-        }
-    }
-}
-
-/// Error from [`Receiver::try_recv`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecvError {
-    /// No claimed sender ring has visible data right now.
-    Empty,
-    /// All senders are gone and all claimed rings are drained.
-    Disconnected,
-}
-
-#[inline]
-fn bit(shard: usize) -> u64 {
-    1u64 << shard
-}
-
-#[repr(align(128))]
-struct ReadyFlag(AtomicBool);
-
-impl ReadyFlag {
-    #[inline]
-    fn new(value: bool) -> Self {
-        Self(AtomicBool::new(value))
-    }
-
-    #[inline]
-    fn store(&self, value: bool, ordering: Ordering) {
-        self.0.store(value, ordering);
-    }
-
-    #[inline]
-    fn swap(&self, value: bool, ordering: Ordering) -> bool {
-        self.0.swap(value, ordering)
     }
 }
 
@@ -409,6 +423,76 @@ mod tests {
         assert_eq!(rx.try_recv(), Ok(1));
         assert_eq!(rx.try_recv(), Ok(2));
         assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+    }
+
+    #[test]
+    fn try_channel_validates_config() {
+        assert_eq!(
+            try_channel::<u8>(0, 1).unwrap_err(),
+            ChannelError::ZeroSenders
+        );
+        assert_eq!(
+            try_channel::<u8>(MAX_SENDERS + 1, 1).unwrap_err(),
+            ChannelError::TooManySenders {
+                requested: MAX_SENDERS + 1,
+                max: MAX_SENDERS,
+            }
+        );
+        assert_eq!(
+            try_channel::<u8>(1, 0).unwrap_err(),
+            ChannelError::ZeroCapacity
+        );
+        assert_eq!(
+            try_channel::<u8>(1, MAX_CAPACITY_PER_SENDER + 1).unwrap_err(),
+            ChannelError::CapacityTooLarge {
+                requested: MAX_CAPACITY_PER_SENDER + 1,
+                max: MAX_CAPACITY_PER_SENDER,
+            }
+        );
+    }
+
+    #[test]
+    fn capacity_reports_yring_rounding() {
+        let (tx, rx) = try_channel::<u8>(1, 3).unwrap();
+
+        assert_eq!(tx.capacity(), 4);
+        assert_eq!(rx.capacity_per_sender(), 4);
+    }
+
+    #[test]
+    fn try_register_reports_failure_cause() {
+        let (tx, rx) = channel::<u8>(1, 1);
+        assert_eq!(
+            tx.try_register().unwrap_err(),
+            TryRegisterError::NoSenderSlot
+        );
+        drop(rx);
+        assert_eq!(
+            tx.try_register().unwrap_err(),
+            TryRegisterError::Disconnected
+        );
+        assert!(tx.try_clone().is_none());
+    }
+
+    #[test]
+    fn public_errors_implement_std_error() {
+        fn assert_error<E: std::error::Error>() {}
+
+        assert_error::<ChannelError>();
+        assert_error::<TryRegisterError>();
+        assert_error::<SendError<u8>>();
+        assert_error::<RecvError>();
+
+        assert_eq!(
+            ChannelError::ZeroSenders.to_string(),
+            "max_senders must be > 0"
+        );
+        assert_eq!(
+            TryRegisterError::NoSenderSlot.to_string(),
+            "all sender slots are already claimed"
+        );
+        assert_eq!(SendError::Full(1).to_string(), "sender ring is full");
+        assert_eq!(RecvError::Empty.to_string(), "channel is empty");
     }
 
     #[test]

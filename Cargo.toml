@@ -2,11 +2,14 @@
 name = "fanring"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 license = "ISC"
 description = "Bounded sharded MPSC channel built from SPSC rings"
+repository = "https://github.com/paddor/fanring.rs"
 
 [lints.rust]
 missing_debug_implementations = "deny"
+unsafe_code = "forbid"
 unsafe_op_in_unsafe_fn = "deny"
 
 [lints.rust.unexpected_cfgs]
@@ -37,6 +40,7 @@ charts = ["dep:plotters", "dep:serde", "dep:serde_json"]
 [[bench]]
 name = "comparison"
 harness = false
+test = false
 
 [[bin]]
 name = "fanring-chart"

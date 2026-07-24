@@ -52,7 +52,7 @@ Ordering is FIFO per sender. Ordering across senders is intentionally relaxed.
 ## Limitations
 
 - MPSC only. No MPMC receiver set yet.
-- Max 64 senders because the ready set is a `u64`.
+- Max `fanring::MAX_SENDERS` senders because the ready set is a `u64`.
 - Dropped sender slots are not reused.
 - Capacity is per sender, so total capacity can fragment under uneven load.
 - Received slots are released back to the producer after a receive batch or when
@@ -60,7 +60,7 @@ Ordering is FIFO per sender. Ordering across senders is intentionally relaxed.
 - Global FIFO is not provided.
 - Fairness is best-effort round-robin, not strict or weighted.
 - No blocking or async API yet.
-- `fanring` itself contains no `unsafe`; it relies on `yring` for the ring
+- `fanring` itself forbids `unsafe`; it relies on `yring` for the ring
   implementation.
 
 ## Performance
