@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
+use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
@@ -12,6 +14,8 @@ const GRID_COLOR: RGBColor = RGBColor(55, 65, 81);
 const AXIS_COLOR: RGBColor = RGBColor(156, 163, 175);
 const TEXT_COLOR: RGBColor = RGBColor(229, 231, 235);
 const MUTED_TEXT_COLOR: RGBColor = RGBColor(156, 163, 175);
+
+type ChartResult<T> = Result<T, ChartError>;
 
 const SERIES: &[(&str, &str, RGBColor)] = &[
     ("fanring", "fanring", RGBColor(250, 204, 21)),
@@ -43,7 +47,73 @@ struct Row {
     msgs_per_sec: f64,
 }
 
+#[derive(Debug)]
+enum ChartError {
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Json {
+        path: PathBuf,
+        line: usize,
+        source: serde_json::Error,
+    },
+    Draw(String),
+    MissingRunId,
+    NoRows {
+        path: PathBuf,
+    },
+    NoRenderableRows,
+    RunNotFound(String),
+}
+
+impl fmt::Display for ChartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
+            Self::Json { path, line, source } => {
+                write!(f, "{}:{line}: {source}", path.display())
+            }
+            Self::Draw(error) => write!(f, "draw chart: {error}"),
+            Self::MissingRunId => f.write_str("missing benchmark run id"),
+            Self::NoRows { path } => write!(f, "no benchmark rows in {}", path.display()),
+            Self::NoRenderableRows => f.write_str("no benchmark rows to render"),
+            Self::RunNotFound(run_id) => write!(f, "benchmark run id not found: {run_id}"),
+        }
+    }
+}
+
+impl Error for ChartError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Json { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+trait DrawResultExt<T> {
+    fn chart(self) -> ChartResult<T>;
+}
+
+impl<T, E> DrawResultExt<T> for Result<T, E>
+where
+    E: fmt::Debug,
+{
+    fn chart(self) -> ChartResult<T> {
+        self.map_err(|error| ChartError::Draw(format!("{error:?}")))
+    }
+}
+
 fn main() {
+    if let Err(error) = run() {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> ChartResult<()> {
     let input = arg_value("--input")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/fanring-bench/results.jsonl"));
@@ -51,44 +121,65 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("doc/charts/mpsc.svg"));
 
-    let rows = read_rows(&input);
+    let rows = read_rows(&input)?;
     if rows.is_empty() {
-        panic!("no benchmark rows in {}", input.display());
+        return Err(ChartError::NoRows { path: input });
     }
 
     let run_id = arg_value("--run")
         .or_else(|| rows.last().map(|row| row.run_id.clone()))
-        .expect("missing run id");
+        .ok_or(ChartError::MissingRunId)?;
     let rows: Vec<Row> = rows
         .into_iter()
         .filter(|row| row.run_id == run_id)
         .collect();
     if rows.is_empty() {
-        panic!("run id not found");
+        return Err(ChartError::RunNotFound(run_id));
     }
 
     if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent).expect("create chart output dir");
+        std::fs::create_dir_all(parent).map_err(|source| ChartError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
 
-    draw_chart(&rows, &output);
+    draw_chart(&rows, &output)?;
     println!("wrote {}", output.display());
+    Ok(())
 }
 
-fn read_rows(path: &PathBuf) -> Vec<Row> {
-    let file = File::open(path).expect("open benchmark JSONL");
+fn read_rows(path: &Path) -> ChartResult<Vec<Row>> {
+    let file = File::open(path).map_err(|source| ChartError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
     let mut rows = Vec::new();
-    for line in BufReader::new(file).lines() {
-        let line = line.expect("read benchmark JSONL line");
+    for (i, line) in BufReader::new(file).lines().enumerate() {
+        let line_number = i + 1;
+        let line = line.map_err(|source| ChartError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
         if line.trim().is_empty() {
             continue;
         }
-        rows.push(serde_json::from_str(&line).expect("parse benchmark JSONL row"));
+        rows.push(
+            serde_json::from_str(&line).map_err(|source| ChartError::Json {
+                path: path.to_path_buf(),
+                line: line_number,
+                source,
+            })?,
+        );
     }
-    rows
+    Ok(rows)
 }
 
-fn draw_chart(rows: &[Row], output: &PathBuf) {
+fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
+    let Some(first_row) = rows.first() else {
+        return Err(ChartError::NoRenderableRows);
+    };
+
     let mut payloads: Vec<(String, usize)> = rows
         .iter()
         .map(|row| (row.payload.clone(), row.payload_bytes))
@@ -111,7 +202,7 @@ fn draw_chart(rows: &[Row], output: &PathBuf) {
     let total_h = header_h + panel_h * payloads.len() as u32 + legend_h;
 
     let root = SVGBackend::new(output, (width, total_h)).into_drawing_area();
-    root.fill(&BACKGROUND_COLOR).unwrap();
+    root.fill(&BACKGROUND_COLOR).chart()?;
 
     let title_style = ("sans-serif", 15)
         .into_font()
@@ -127,9 +218,9 @@ fn draw_chart(rows: &[Row], output: &PathBuf) {
         (width as i32 / 2, 17),
         title_style,
     ))
-    .unwrap();
+    .chart()?;
 
-    let cap = rows[0].capacity_per_sender;
+    let cap = first_row.capacity_per_sender;
     root.draw(&Text::new(
         format!(
             "X-axis: producer threads. Y-axis: million messages/sec. Higher is better. Capacity: {cap}/sender.",
@@ -137,16 +228,16 @@ fn draw_chart(rows: &[Row], output: &PathBuf) {
         (width as i32 / 2, 35),
         subtitle_style.clone(),
     ))
-    .unwrap();
+    .chart()?;
     root.draw(&Text::new(
         format!(
             "run: {}   shared-queue baselines use total capacity = producers * {cap}",
-            rows[0].run_id
+            first_row.run_id
         ),
         (width as i32 / 2, 51),
         subtitle_style,
     ))
-    .unwrap();
+    .chart()?;
 
     let (_, body) = root.split_vertically(header_h);
     let (chart_area, legend_area) = body.split_vertically(panel_h * payloads.len() as u32);
@@ -172,7 +263,7 @@ fn draw_chart(rows: &[Row], output: &PathBuf) {
                 ("sans-serif", 12).into_font().color(&TEXT_COLOR),
             )
             .build_cartesian_2d(0.0..x_max, 0.0..y_max)
-            .unwrap();
+            .chart()?;
 
         chart
             .configure_mesh()
@@ -189,9 +280,9 @@ fn draw_chart(rows: &[Row], output: &PathBuf) {
             })
             .y_label_formatter(&|y| fmt_mmsgs(*y))
             .draw()
-            .unwrap();
+            .chart()?;
 
-        draw_axis_labels(area, &producers, y_max, y_ticks);
+        draw_axis_labels(area, &producers, y_max, y_ticks)?;
 
         for (key, label, color) in SERIES {
             let by_producer: BTreeMap<usize, f64> = payload_rows
@@ -210,7 +301,7 @@ fn draw_chart(rows: &[Row], output: &PathBuf) {
 
             chart
                 .draw_series(LineSeries::new(points.clone(), color.stroke_width(3)))
-                .unwrap()
+                .chart()?
                 .label(*label)
                 .legend(|(x, y)| {
                     PathElement::new(vec![(x, y), (x + 18, y)], color.stroke_width(3))
@@ -221,11 +312,12 @@ fn draw_chart(rows: &[Row], output: &PathBuf) {
                         .into_iter()
                         .map(|point| Circle::new(point, 2, color.filled())),
                 )
-                .unwrap();
+                .chart()?;
         }
     }
 
-    draw_legend(&legend_area, rows);
+    draw_legend(&legend_area, rows)?;
+    Ok(())
 }
 
 fn draw_axis_labels(
@@ -233,7 +325,7 @@ fn draw_axis_labels(
     producers: &[usize],
     y_max: f64,
     y_ticks: usize,
-) {
+) -> ChartResult<()> {
     let tick_style = ("sans-serif", 11)
         .into_font()
         .color(&TEXT_COLOR)
@@ -266,14 +358,14 @@ fn draw_axis_labels(
             (x, plot_bottom + 17),
             tick_style.clone(),
         ))
-        .unwrap();
+        .chart()?;
     }
     area.draw(&Text::new(
         "producer threads",
         ((plot_left + plot_right) / 2, plot_bottom + 34),
         axis_style,
     ))
-    .unwrap();
+    .chart()?;
 
     for tick in 0..=y_ticks {
         let y = plot_bottom - plot_h * tick as i32 / y_ticks.max(1) as i32;
@@ -283,10 +375,11 @@ fn draw_axis_labels(
             (plot_left - 9, y),
             right_tick_style.clone(),
         ))
-        .unwrap();
+        .chart()?;
     }
     area.draw(&Text::new("M msg/s", (12, plot_top - 14), y_axis_style))
-        .unwrap();
+        .chart()?;
+    Ok(())
 }
 
 fn payload_title(rows: &[&Row]) -> String {
@@ -305,7 +398,10 @@ fn payload_title(rows: &[&Row]) -> String {
     }
 }
 
-fn draw_legend(area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>, rows: &[Row]) {
+fn draw_legend(
+    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    rows: &[Row],
+) -> ChartResult<()> {
     let present: Vec<(&str, &str, RGBColor)> = SERIES
         .iter()
         .copied()
@@ -315,7 +411,7 @@ fn draw_legend(area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>, rows:
     let label_style = ("sans-serif", 11).into_font().color(&TEXT_COLOR);
     let dim_style = ("sans-serif", 10).into_font().color(&MUTED_TEXT_COLOR);
 
-    area.draw_text("legend", &dim_style, (46, 2)).unwrap();
+    area.draw_text("legend", &dim_style, (46, 2)).chart()?;
 
     for (i, (_, label, color)) in present.iter().enumerate() {
         let col = i % 3;
@@ -326,9 +422,10 @@ fn draw_legend(area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>, rows:
             vec![(x, y + 6), (x + 18, y + 6)],
             color.stroke_width(3),
         ))
-        .unwrap();
-        area.draw_text(label, &label_style, (x + 26, y)).unwrap();
+        .chart()?;
+        area.draw_text(label, &label_style, (x + 26, y)).chart()?;
     }
+    Ok(())
 }
 
 fn fmt_mmsgs(v: f64) -> String {
