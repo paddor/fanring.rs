@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(dead_code, unused_imports))]
+
 use std::fs::{self, OpenOptions};
 use std::hint::black_box;
 use std::io::{BufWriter, Write};
@@ -43,6 +45,10 @@ struct Row {
 
 const TIME_CHECK_INTERVAL: u64 = 1024;
 
+#[cfg(test)]
+fn main() {}
+
+#[cfg(not(test))]
 fn main() {
     let duration = Duration::from_secs_f64(
         std::env::var("FANRING_BENCH_SECS")

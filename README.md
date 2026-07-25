@@ -9,14 +9,16 @@ shared queue tail.
 ## Contract
 
 - Bounded, non-blocking MPSC.
+- `try_channel` validates configuration; `channel` panics on invalid arguments.
 - `try_send` returns immediately with `Full` instead of blocking.
 - `try_recv` returns immediately with `Empty` instead of blocking or awaiting.
 - FIFO per sender.
 - Relaxed ordering across senders.
 - Best-effort round-robin across ready senders.
-- Fixed sender limit, currently `<= 64`.
+- Fixed sender limit, currently `<= fanring::MAX_SENDERS`.
+- `try_register` reports sender-slot exhaustion vs receiver drop.
 - Capacity is per sender: `max_senders * capacity_per_sender`.
-- No `unsafe` in this crate; ring storage is delegated to `yring`.
+- `unsafe` is forbidden in this crate; ring storage is delegated to `yring`.
 
 ## Good Fit
 
