@@ -6,6 +6,8 @@ rust-version = "1.85"
 license = "ISC"
 description = "Bounded sharded MPSC channel built from SPSC rings"
 repository = "https://github.com/paddor/fanring.rs"
+keywords = ["mpsc", "ring-buffer", "lock-free", "zero-copy", "batching"]
+categories = ["concurrency", "data-structures"]
 
 [lints.rust]
 missing_debug_implementations = "deny"
