@@ -6,6 +6,33 @@ Each sender writes to its own ring. One receiver polls ready rings with a
 bitmask and round-robin cursor. This avoids producer-vs-producer contention on a
 shared queue tail.
 
+## Example
+
+```rust
+use fanring::{RecvError, SendError, channel};
+
+let (mut tx0, mut rx) = channel(2, 8);
+let mut tx1 = tx0.try_clone().expect("sender slot available");
+
+tx0.try_send("from sender 0").unwrap();
+tx1.try_send("from sender 1").unwrap();
+
+for _ in 0..2 {
+    match rx.try_recv() {
+        Ok(message) => println!("{message}"),
+        Err(RecvError::Empty) => std::thread::yield_now(),
+        Err(RecvError::Disconnected) => break,
+    }
+}
+
+assert_eq!(tx0.try_send("still open"), Ok(()));
+drop(rx);
+assert_eq!(
+    tx0.try_send("closed"),
+    Err(SendError::Disconnected("closed"))
+);
+```
+
 ## Contract
 
 - Bounded, non-blocking MPSC.

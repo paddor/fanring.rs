@@ -1,88 +1,57 @@
 # Design
 
-`fanring` is a bounded, sharded MPSC channel built from SPSC rings. Each
-registered sender owns one `yring::Producer`; the receiver owns all matching
-`yring::Consumer`s.
+`fanring` is one fixed SPSC ring per registered sender. The receiver owns all
+consumers and polls ready shards.
 
-## Fundamentals
+## Shared State
 
-Hot send path:
+- `unclaimed`: mutex-protected producer slots used only during registration.
+- `claimed`: bitmask of ever-claimed shards.
+- `live_senders`: count used for disconnect detection.
+- `receiver_alive`: close flag checked by send and registration.
+- `ready`: per-shard ready flags plus one global ready bitmask.
 
-1. Push into this sender's private ring.
-2. Flush the ring tail so the receiver can see the value.
-3. Mark the shard ready.
+## Send Path
 
-The shared ready state has two layers:
+1. Check `receiver_alive`.
+2. Push into this sender's `yring::Producer`.
+3. Flush the producer.
+4. Mark this shard ready.
 
-- one padded per-shard `AtomicBool`
-- one global `AtomicU64` ready bitmask
+Send returns `Full` when the shard ring has no capacity and `Disconnected` when
+the receiver is gone.
 
-Senders only set the global bit on an empty-to-ready transition. While a shard is
-already marked ready, sending only needs a cheap load of the per-shard flag. This
-keeps producer fan-in away from a shared queue tail.
+## Ready Protocol
 
-The receiver swaps the global ready bitmask into a local cache, then polls ready
-shards round-robin. It resumes from `next_shard` on each receive, so continuously
-ready shards do not suffer fixed-priority starvation. This is best-effort
-fairness, not strict fairness: empty shards are skipped, a hot shard can still
-produce more total messages than cold shards, and ready-bit races can change the
-exact interleaving.
+Each shard has a padded `AtomicBool`. Senders set it with `swap(true, AcqRel)`.
+Only a false-to-true transition publishes the shard bit into the global
+`AtomicU64`.
 
-For each ready shard, the receiver pops from the already-prefetched window first.
-When that window is empty, it calls `prefetch()`, tracks the visible item count
-locally, then serves future `try_recv` calls from that window. `release()` runs
-after 64 popped items or when the prefetched window drains, so producer capacity
-is returned in batches rather than one item at a time.
+The receiver swaps the global mask into `ready_cache`, then polls ready bits with
+`next_shard`. A shard is removed only after:
 
-The receiver clears a shard's ready flag only after a failed prefetch. After
-clearing, it prefetches once more before dropping the bit; this closes the race
-with a concurrent sender.
+1. `prefetch()` finds no items.
+2. The shard flag is cleared.
+3. A second `prefetch()` still finds no items.
 
-Ordering is FIFO per sender. Ordering across senders is intentionally relaxed.
+If the second prefetch finds data, the receiver restores the shard flag. This
+closes the race with a sender that publishes while the receiver is clearing.
 
-## Strengths
+## Receive Path
 
-- Lock-free hot path for sending and receiving.
-- No producer-vs-producer contention on a shared queue tail.
-- Bounded memory and explicit sender count.
-- FIFO per sender.
-- Cheap receive-side scheduling via ready bitmask and round-robin cursor.
-- Registration uses a mutex, but only when cloning/registering senders.
+The receiver serves prefetched items from `cached_available`. It calls
+`release()` after `PREFETCH_LIMIT` popped items or when the prefetched window
+drains. Capacity therefore returns to senders in batches.
 
-## Limitations
+Ordering is FIFO per shard. Cross-shard order is whatever the ready mask and
+round-robin cursor produce.
 
-- MPSC only. No MPMC receiver set yet.
-- Max `fanring::MAX_SENDERS` senders because the ready set is a `u64`.
-- Dropped sender slots are not reused.
-- Capacity is per sender, so total capacity can fragment under uneven load.
-- Received slots are released back to the producer after a receive batch or when
-  an internal prefetch window drains, not necessarily after every `try_recv`.
-- Global FIFO is not provided.
-- Fairness is best-effort round-robin, not strict or weighted.
-- No blocking or async API yet.
-- `fanring` itself forbids `unsafe`; it relies on `yring` for the ring
-  implementation.
+## Drop
 
-## Performance
+Sender drop closes its producer, marks the shard ready, then decrements
+`live_senders`.
 
-Benchmark chart: [doc/charts/mpsc.svg](doc/charts/mpsc.svg)
+Receiver drop clears `receiver_alive` and closes all consumers.
 
-Chart axes:
-
-- X-axis: producer threads (`1`, `2`, `4`, `8`)
-- Y-axis: million messages/sec, higher is better
-
-Latest 2s comparison run on this VM (`capacity_per_sender = 1024`):
-
-| Payload | Producers | fanring | next best baseline |
-|---|---:|---:|---:|
-| `u64` | 1 | 184M/s | 30M/s (`crossbeam-channel`) |
-| `u64` | 8 | 116M/s | 18M/s (`crossbeam-channel`) |
-| 64 B | 1 | 100M/s | 36M/s (`crossbeam-channel`) |
-| 64 B | 8 | 84M/s | 10M/s (`crossbeam-channel`) |
-| 256 B | 1 | 40M/s | 30M/s (`concurrent-queue`) |
-| 256 B | 8 | 37M/s | 9M/s (`crossbeam-channel`) |
-
-These numbers favor fanring when producers are registered up front and send at
-high rate. They do not measure blocking wakeups, async integration, or workloads
-where one producer needs to borrow unused capacity from another producer's shard.
+`RecvError::Disconnected` is returned after `live_senders == 0` and all claimed
+rings report disconnected.

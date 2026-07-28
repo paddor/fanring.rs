@@ -45,10 +45,12 @@ struct Row {
 
 const TIME_CHECK_INTERVAL: u64 = 1024;
 
-#[cfg(test)]
+// Cargo sets `cfg(test)` for bench targets. Keep `cargo test --all-targets`
+// from running the full benchmark, while normal optimized `cargo bench` runs.
+#[cfg(all(test, debug_assertions))]
 fn main() {}
 
-#[cfg(not(test))]
+#[cfg(not(all(test, debug_assertions)))]
 fn main() {
     let duration = Duration::from_secs_f64(
         std::env::var("FANRING_BENCH_SECS")
