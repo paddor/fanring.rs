@@ -33,8 +33,7 @@ Defaults:
 
 - duration: 2 seconds per configuration
 - producers: 1, 2, 4, 8
-- capacity: 1024 per producer for `fanring`, same total capacity for
-  shared-queue baselines
+- capacity: 8192 total items
 - payloads: `u64`, `[u8; 64]`, `[u8; 256]`
 
 Output is appended to `target/fanring-bench/results.jsonl`.
