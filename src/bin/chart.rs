@@ -24,27 +24,28 @@ const SERIES: &[(&str, &str, RGBColor)] = &[
         "crossbeam-channel",
         RGBColor(96, 165, 250),
     ),
-    ("flume", "flume", RGBColor(167, 139, 250)),
-    ("kanal", "kanal", RGBColor(52, 211, 153)),
     (
         "concurrent-queue",
         "concurrent-queue",
         RGBColor(248, 113, 113),
     ),
     ("thingbuf", "thingbuf", RGBColor(251, 146, 60)),
+    ("flume", "flume", RGBColor(167, 139, 250)),
+    ("kanal", "kanal", RGBColor(52, 211, 153)),
 ];
 
 #[derive(Debug, Deserialize)]
 struct Row {
     run_id: String,
+    #[serde(default = "unknown_cpu")]
+    cpu: String,
     implementation: String,
     payload: String,
     payload_bytes: usize,
     producers: usize,
-    capacity_per_sender: usize,
     total_capacity: usize,
-    seconds: f64,
-    msgs_per_sec: f64,
+    #[serde(alias = "msgs_per_sec")]
+    items_per_sec: f64,
 }
 
 #[derive(Debug)]
@@ -176,9 +177,9 @@ fn read_rows(path: &Path) -> ChartResult<Vec<Row>> {
 }
 
 fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
-    let Some(first_row) = rows.first() else {
+    if rows.is_empty() {
         return Err(ChartError::NoRenderableRows);
-    };
+    }
 
     let mut payloads: Vec<(String, usize)> = rows
         .iter()
@@ -195,9 +196,9 @@ fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
         .into_iter()
         .collect();
 
-    let width = 950;
+    let width = 1024;
     let panel_h = 250;
-    let header_h = 66;
+    let header_h = 56;
     let legend_h = 74;
     let total_h = header_h + panel_h * payloads.len() as u32 + legend_h;
 
@@ -219,22 +220,9 @@ fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
         title_style,
     ))
     .chart()?;
-
-    let cap = first_row.capacity_per_sender;
     root.draw(&Text::new(
-        format!(
-            "X-axis: producer threads. Y-axis: million messages/sec. Higher is better. Capacity: {cap}/sender.",
-        ),
+        chart_subtitle(rows),
         (width as i32 / 2, 35),
-        subtitle_style.clone(),
-    ))
-    .chart()?;
-    root.draw(&Text::new(
-        format!(
-            "run: {}   shared-queue baselines use total capacity = producers * {cap}",
-            first_row.run_id
-        ),
-        (width as i32 / 2, 51),
         subtitle_style,
     ))
     .chart()?;
@@ -247,11 +235,16 @@ fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
         let payload_rows: Vec<&Row> = rows.iter().filter(|row| &row.payload == payload).collect();
         let y_raw = payload_rows
             .iter()
-            .map(|row| row.msgs_per_sec / 1_000_000.0)
+            .map(|row| row.items_per_sec / 1_000_000.0)
             .fold(0.0_f64, f64::max)
             .max(1.0);
         let (y_max, y_ticks) = nice_axis(y_raw, 5);
-        let x_max = (producers.len().saturating_sub(1)).max(1) as f64;
+        let x_max = producers.len().max(1) as f64;
+        let present_series: Vec<(&str, &str, RGBColor)> = SERIES
+            .iter()
+            .copied()
+            .filter(|(key, _, _)| payload_rows.iter().any(|row| row.implementation == *key))
+            .collect();
 
         let mut chart = ChartBuilder::on(area)
             .margin_top(22)
@@ -267,52 +260,47 @@ fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
 
         chart
             .configure_mesh()
-            .x_labels(producers.len())
+            .x_labels(producers.len() + 1)
             .y_labels(y_ticks + 1)
             .light_line_style(TRANSPARENT)
             .bold_line_style(GRID_COLOR)
             .axis_style(AXIS_COLOR)
             .label_style(("sans-serif", 0).into_font().color(&TEXT_COLOR))
-            .x_label_formatter(&|x| {
-                producers
-                    .get(x.round() as usize)
-                    .map_or(String::new(), usize::to_string)
-            })
+            .x_label_formatter(&|_| String::new())
             .y_label_formatter(&|y| fmt_mmsgs(*y))
             .draw()
             .chart()?;
 
         draw_axis_labels(area, &producers, y_max, y_ticks)?;
 
-        for (key, label, color) in SERIES {
+        let group_pad = 0.12;
+        let inner_gap = 0.012;
+        let slot_width = (1.0 - group_pad * 2.0) / present_series.len().max(1) as f64;
+
+        for (series_index, (key, _, color)) in present_series.iter().enumerate() {
             let by_producer: BTreeMap<usize, f64> = payload_rows
                 .iter()
                 .filter(|row| row.implementation == *key)
-                .map(|row| (row.producers, row.msgs_per_sec / 1_000_000.0))
-                .collect();
-            if by_producer.is_empty() {
-                continue;
-            }
-            let points: Vec<(f64, f64)> = producers
-                .iter()
-                .enumerate()
-                .filter_map(|(i, producer)| by_producer.get(producer).map(|v| (i as f64, *v)))
+                .map(|row| (row.producers, row.items_per_sec / 1_000_000.0))
                 .collect();
 
-            chart
-                .draw_series(LineSeries::new(points.clone(), color.stroke_width(3)))
-                .chart()?
-                .label(*label)
-                .legend(|(x, y)| {
-                    PathElement::new(vec![(x, y), (x + 18, y)], color.stroke_width(3))
+            let bars = producers
+                .iter()
+                .enumerate()
+                .filter_map(|(group_index, producer)| {
+                    by_producer.get(producer).map(|value| {
+                        let x0 = group_index as f64
+                            + group_pad
+                            + series_index as f64 * slot_width
+                            + inner_gap;
+                        let x1 =
+                            group_index as f64 + group_pad + (series_index + 1) as f64 * slot_width
+                                - inner_gap;
+                        Rectangle::new([(x0, 0.0), (x1, *value)], color.filled())
+                    })
                 });
-            chart
-                .draw_series(
-                    points
-                        .into_iter()
-                        .map(|point| Circle::new(point, 2, color.filled())),
-                )
-                .chart()?;
+
+            chart.draw_series(bars).chart()?;
         }
     }
 
@@ -343,16 +331,17 @@ fn draw_axis_labels(
         .color(&MUTED_TEXT_COLOR)
         .pos(Pos::new(HPos::Left, VPos::Center));
 
+    let width = area.dim_in_pixel().0 as i32;
     let plot_left = 76;
-    let plot_right = 927;
+    let plot_right = width - 23;
     let plot_top = 42;
     let plot_bottom = 213;
     let plot_w = plot_right - plot_left;
     let plot_h = plot_bottom - plot_top;
-    let x_count = producers.len().saturating_sub(1).max(1);
+    let x_count = producers.len().max(1);
 
     for (i, producer) in producers.iter().enumerate() {
-        let x = plot_left + plot_w * i as i32 / x_count as i32;
+        let x = plot_left + plot_w * (2 * i + 1) as i32 / (2 * x_count) as i32;
         area.draw(&Text::new(
             producer.to_string(),
             (x, plot_bottom + 17),
@@ -377,25 +366,43 @@ fn draw_axis_labels(
         ))
         .chart()?;
     }
-    area.draw(&Text::new("M msg/s", (12, plot_top - 14), y_axis_style))
+    area.draw(&Text::new("M items/s", (12, plot_top - 14), y_axis_style))
         .chart()?;
     Ok(())
 }
 
 fn payload_title(rows: &[&Row]) -> String {
     if let Some(row) = rows.first() {
-        let max_total_capacity = rows
-            .iter()
-            .map(|row| row.total_capacity)
-            .max()
-            .unwrap_or(row.total_capacity);
-        format!(
-            "{} payload ({} B), {:.2}s/sample, max total capacity {}",
-            row.payload, row.payload_bytes, row.seconds, max_total_capacity
-        )
+        format!("{} ({} B)", row.payload, row.payload_bytes)
     } else {
         "payload".to_string()
     }
+}
+
+fn chart_subtitle(rows: &[Row]) -> String {
+    let Some(row) = rows.first() else {
+        return "unknown CPU".to_string();
+    };
+
+    format!(
+        "{}; capacity {} items",
+        simplify_cpu_name(&row.cpu),
+        row.total_capacity
+    )
+}
+
+fn simplify_cpu_name(cpu: &str) -> String {
+    cpu.replace("(R)", "")
+        .replace("(TM)", "")
+        .replace("CPU ", "")
+        .replace(" @ 3.20GHz", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn unknown_cpu() -> String {
+    "unknown CPU".to_string()
 }
 
 fn draw_legend(
@@ -418,9 +425,9 @@ fn draw_legend(
         let row = i / 3;
         let x = 46 + col as i32 * 300;
         let y = 22 + row as i32 * 21;
-        area.draw(&PathElement::new(
-            vec![(x, y + 6), (x + 18, y + 6)],
-            color.stroke_width(3),
+        area.draw(&Rectangle::new(
+            [(x, y + 2), (x + 18, y + 14)],
+            color.filled(),
         ))
         .chart()?;
         area.draw_text(label, &label_style, (x + 26, y)).chart()?;

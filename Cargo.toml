@@ -2,10 +2,12 @@
 name = "fanring"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.93"
 license = "ISC"
 description = "Bounded sharded MPSC channel built from SPSC rings"
 repository = "https://github.com/paddor/fanring.rs"
+keywords = ["mpsc", "ring-buffer", "lock-free", "zero-copy", "batching"]
+categories = ["concurrency", "data-structures"]
 
 [lints.rust]
 missing_debug_implementations = "deny"
@@ -20,7 +22,7 @@ check-cfg = ["cfg(loom)"]
 plotters = { version = "0.3", optional = true, default-features = false, features = ["svg_backend", "line_series"] }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
-yring = "0.3.9"
+yring = "0.3.10"
 
 [target.'cfg(all(loom, target_pointer_width = "64"))'.dependencies]
 loom = "0.7"

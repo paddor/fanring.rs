@@ -18,6 +18,12 @@ struct Config {
     duration: Duration,
 }
 
+#[derive(Debug)]
+struct RunContext {
+    run_id: String,
+    cpu: String,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Payload<T> {
     label: &'static str,
@@ -32,6 +38,7 @@ struct Filter {
 #[derive(Debug, Serialize)]
 struct Row {
     run_id: String,
+    cpu: String,
     implementation: &'static str,
     payload: &'static str,
     payload_bytes: usize,
@@ -39,16 +46,18 @@ struct Row {
     capacity_per_sender: usize,
     total_capacity: usize,
     seconds: f64,
-    messages: u64,
-    msgs_per_sec: f64,
+    items: u64,
+    items_per_sec: f64,
 }
 
 const TIME_CHECK_INTERVAL: u64 = 1024;
 
-#[cfg(test)]
+// Cargo sets `cfg(test)` for bench targets. Keep `cargo test --all-targets`
+// from running the full benchmark, while normal optimized `cargo bench` runs.
+#[cfg(all(test, debug_assertions))]
 fn main() {}
 
-#[cfg(not(test))]
+#[cfg(not(all(test, debug_assertions)))]
 fn main() {
     let duration = Duration::from_secs_f64(
         std::env::var("FANRING_BENCH_SECS")
@@ -61,11 +70,14 @@ fn main() {
         .unwrap_or_else(|| PathBuf::from("target/fanring-bench/results.jsonl"));
     let payload_filter = Filter::from_env("FANRING_BENCH_PAYLOADS");
     let impl_filter = Filter::from_env("FANRING_BENCH_IMPLS");
-    let run_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before Unix epoch")
-        .as_nanos()
-        .to_string();
+    let context = RunContext {
+        run_id: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos()
+            .to_string(),
+        cpu: cpu_name(),
+    };
 
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent).expect("create benchmark output dir");
@@ -78,23 +90,25 @@ fn main() {
     let mut out = BufWriter::new(file);
 
     println!(
-        "MPSC comparison ({:.2}s per config, output {})\n",
+        "MPSC comparison ({:.2}s per config, capacity {} items, output {})\n",
         duration.as_secs_f64(),
+        total_capacity(),
         out_path.display()
     );
 
+    let total_capacity = total_capacity();
     let configs: Vec<Config> = producer_counts()
         .into_iter()
         .map(|producers| Config {
             producers,
-            capacity_per_sender: 1024,
+            capacity_per_sender: capacity_per_sender(total_capacity, producers),
             duration,
         })
         .collect();
 
     if payload_filter.matches("u64") {
         run_payload(
-            &run_id,
+            &context,
             &mut out,
             &configs,
             &impl_filter,
@@ -106,7 +120,7 @@ fn main() {
     }
     if payload_filter.matches("bytes64") {
         run_payload(
-            &run_id,
+            &context,
             &mut out,
             &configs,
             &impl_filter,
@@ -118,7 +132,7 @@ fn main() {
     }
     if payload_filter.matches("bytes256") {
         run_payload(
-            &run_id,
+            &context,
             &mut out,
             &configs,
             &impl_filter,
@@ -133,7 +147,7 @@ fn main() {
 }
 
 fn run_payload<T>(
-    run_id: &str,
+    context: &RunContext,
     out: &mut impl Write,
     configs: &[Config],
     impl_filter: &Filter,
@@ -145,30 +159,35 @@ fn run_payload<T>(
     for config in configs {
         let mut rows = Vec::new();
         if impl_filter.matches("fanring") {
-            rows.push(bench_fanring(run_id, *config, payload));
+            rows.push(bench_fanring(context, *config, payload));
         }
         if impl_filter.matches("crossbeam-channel") {
-            rows.push(bench_crossbeam_channel(run_id, *config, payload));
+            rows.push(bench_crossbeam_channel(context, *config, payload));
         }
         if impl_filter.matches("flume") {
-            rows.push(bench_flume(run_id, *config, payload));
+            rows.push(bench_flume(context, *config, payload));
         }
         if impl_filter.matches("kanal") {
-            rows.push(bench_kanal(run_id, *config, payload));
+            rows.push(bench_kanal(context, *config, payload));
         }
         if impl_filter.matches("concurrent-queue") {
-            rows.push(bench_concurrent_queue(run_id, *config, payload));
+            rows.push(bench_concurrent_queue(context, *config, payload));
         }
         if impl_filter.matches("thingbuf") {
-            rows.push(bench_thingbuf(run_id, *config, payload));
+            rows.push(bench_thingbuf(context, *config, payload));
         }
 
-        println!("  producers={:<2}", config.producers);
+        println!(
+            "  producers={:<2} capacity_per_sender={:<4} total_capacity={}",
+            config.producers,
+            config.capacity_per_sender,
+            config.total_capacity()
+        );
         for row in rows {
             println!(
-                "    {:<18} {:>8.2}M msg/s",
+                "    {:<18} {:>8.2}M items/s",
                 row.implementation,
-                row.msgs_per_sec / 1_000_000.0
+                row.items_per_sec / 1_000_000.0
             );
             serde_json::to_writer(&mut *out, &row).expect("write benchmark row");
             writeln!(out).expect("write benchmark newline");
@@ -177,7 +196,7 @@ fn run_payload<T>(
     }
 }
 
-fn bench_fanring<T>(run_id: &str, config: Config, payload: Payload<T>) -> Row
+fn bench_fanring<T>(context: &RunContext, config: Config, payload: Payload<T>) -> Row
 where
     T: Copy + Send + 'static,
 {
@@ -223,7 +242,7 @@ where
         handle.join().expect("fanring producer thread");
     }
     row(
-        run_id,
+        context,
         "fanring",
         payload,
         config,
@@ -232,7 +251,7 @@ where
     )
 }
 
-fn bench_crossbeam_channel<T>(run_id: &str, config: Config, payload: Payload<T>) -> Row
+fn bench_crossbeam_channel<T>(context: &RunContext, config: Config, payload: Payload<T>) -> Row
 where
     T: Copy + Send + 'static,
 {
@@ -273,7 +292,7 @@ where
         handle.join().expect("crossbeam producer thread");
     }
     row(
-        run_id,
+        context,
         "crossbeam-channel",
         payload,
         config,
@@ -282,7 +301,7 @@ where
     )
 }
 
-fn bench_flume<T>(run_id: &str, config: Config, payload: Payload<T>) -> Row
+fn bench_flume<T>(context: &RunContext, config: Config, payload: Payload<T>) -> Row
 where
     T: Copy + Send + 'static,
 {
@@ -322,10 +341,10 @@ where
     for handle in handles {
         handle.join().expect("flume producer thread");
     }
-    row(run_id, "flume", payload, config, start.elapsed(), messages)
+    row(context, "flume", payload, config, start.elapsed(), messages)
 }
 
-fn bench_kanal<T>(run_id: &str, config: Config, payload: Payload<T>) -> Row
+fn bench_kanal<T>(context: &RunContext, config: Config, payload: Payload<T>) -> Row
 where
     T: Copy + Send + 'static,
 {
@@ -366,10 +385,10 @@ where
     for handle in handles {
         handle.join().expect("kanal producer thread");
     }
-    row(run_id, "kanal", payload, config, start.elapsed(), messages)
+    row(context, "kanal", payload, config, start.elapsed(), messages)
 }
 
-fn bench_concurrent_queue<T>(run_id: &str, config: Config, payload: Payload<T>) -> Row
+fn bench_concurrent_queue<T>(context: &RunContext, config: Config, payload: Payload<T>) -> Row
 where
     T: Copy + Send + 'static,
 {
@@ -411,7 +430,7 @@ where
         handle.join().expect("concurrent-queue producer thread");
     }
     row(
-        run_id,
+        context,
         "concurrent-queue",
         payload,
         config,
@@ -420,7 +439,7 @@ where
     )
 }
 
-fn bench_thingbuf<T>(run_id: &str, config: Config, payload: Payload<T>) -> Row
+fn bench_thingbuf<T>(context: &RunContext, config: Config, payload: Payload<T>) -> Row
 where
     T: Copy + Default + Send + Sync + 'static,
 {
@@ -461,7 +480,7 @@ where
         handle.join().expect("thingbuf producer thread");
     }
     row(
-        run_id,
+        context,
         "thingbuf",
         payload,
         config,
@@ -471,15 +490,16 @@ where
 }
 
 fn row<T>(
-    run_id: &str,
+    context: &RunContext,
     implementation: &'static str,
     payload: Payload<T>,
     config: Config,
     elapsed: Duration,
-    messages: u64,
+    items: u64,
 ) -> Row {
     Row {
-        run_id: run_id.to_string(),
+        run_id: context.run_id.clone(),
+        cpu: context.cpu.clone(),
         implementation,
         payload: payload.label,
         payload_bytes: size_of::<T>(),
@@ -487,8 +507,8 @@ fn row<T>(
         capacity_per_sender: config.capacity_per_sender,
         total_capacity: config.total_capacity(),
         seconds: elapsed.as_secs_f64(),
-        messages,
-        msgs_per_sec: messages as f64 / elapsed.as_secs_f64(),
+        items,
+        items_per_sec: items as f64 / elapsed.as_secs_f64(),
     }
 }
 
@@ -532,4 +552,32 @@ fn producer_counts() -> Vec<usize> {
                 .collect()
         })
         .unwrap_or_else(|| vec![1, 2, 4, 8])
+}
+
+fn total_capacity() -> usize {
+    std::env::var("FANRING_BENCH_CAPACITY")
+        .ok()
+        .map(|value| value.parse().expect("invalid total capacity"))
+        .unwrap_or(8192)
+}
+
+fn capacity_per_sender(total_capacity: usize, producers: usize) -> usize {
+    assert!(producers > 0, "producer count must be > 0");
+    assert!(
+        total_capacity.is_multiple_of(producers),
+        "total capacity must divide producer count"
+    );
+    total_capacity / producers
+}
+
+fn cpu_name() -> String {
+    let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") else {
+        return "unknown CPU".to_string();
+    };
+
+    cpuinfo
+        .lines()
+        .find_map(|line| line.strip_prefix("model name\t: "))
+        .unwrap_or("unknown CPU")
+        .to_string()
 }
