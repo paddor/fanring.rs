@@ -6,6 +6,8 @@ Each sender writes to its own ring. One receiver polls ready rings with a
 bitmask and round-robin cursor. This avoids producer-vs-producer contention on a
 shared queue tail.
 
+![Benchmark chart](doc/charts/mpsc.svg)
+
 ## Example
 
 ```rust
@@ -78,7 +80,5 @@ The speed comes from a narrower contract:
 - no dynamic capacity sharing
 - no immediate per-message capacity release
 - no built-in parking/waking
-
-Benchmark chart: [doc/charts/mpsc.svg](doc/charts/mpsc.svg)
 
 More detail: [DESIGN.md](DESIGN.md)
