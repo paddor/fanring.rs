@@ -267,6 +267,23 @@ fn mpmc_receiver_drop_preserves_prefetched_work() {
 }
 
 #[test]
+fn mpmc_receiver_drop_racing_steal_preserves_prefetched_work() {
+    loom::model(|| {
+        let (mut tx, mut rx0) = mpmc::channel(2);
+        let mut rx1 = rx0.clone();
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        assert_eq!(rx0.try_recv(), Ok(1));
+        drop(tx);
+
+        let receiver = thread::spawn(move || rx1.recv());
+        thread::yield_now();
+        drop(rx0);
+        assert_eq!(receiver.join().unwrap(), Ok(2));
+    });
+}
+
+#[test]
 fn mpmc_blocking_send_does_not_lose_space_wakeup() {
     loom::model(|| {
         let (mut tx, mut rx) = mpmc::channel(1);
@@ -290,5 +307,29 @@ fn mpmc_blocking_send_wakes_on_last_receiver_drop() {
         drop(rx0);
         drop(rx1);
         assert_eq!(sender.join().unwrap(), Err(mpmc::SendError(2)));
+    });
+}
+
+#[test]
+fn mpmc_register_race_with_last_receiver_drop_reports_disconnected() {
+    loom::model(|| {
+        let (mut tx, rx0) = mpmc::channel::<u8>(1);
+        let rx1 = rx0.clone();
+        drop(rx0);
+
+        let dropper = thread::spawn(move || {
+            thread::yield_now();
+            drop(rx1);
+        });
+        let registered = tx.try_register();
+        dropper.join().unwrap();
+
+        match registered {
+            Ok(mut tx1) => {
+                assert_eq!(tx1.try_send(1), Err(mpmc::TrySendError::Disconnected(1)));
+            }
+            Err(mpmc::TryRegisterError::Disconnected) => {}
+        }
+        assert_eq!(tx.try_send(2), Err(mpmc::TrySendError::Disconnected(2)));
     });
 }

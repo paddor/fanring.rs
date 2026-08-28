@@ -220,3 +220,41 @@ fn four_small_blocking_lanes_do_not_lose_readiness() {
         assert_eq!(seen, vec![MESSAGES_PER_SENDER * 10; senders]);
     });
 }
+
+#[test]
+fn sender_slots_reuse_across_ready_page_boundaries() {
+    const DYNAMIC_SENDERS: usize = 129;
+    const ROUNDS: usize = 4;
+
+    let (root, mut rx) = channel(2);
+    let mut expected_slots = None;
+
+    for round in 0..ROUNDS {
+        let mut senders = (0..DYNAMIC_SENDERS)
+            .map(|_| root.try_clone().unwrap())
+            .collect::<Vec<_>>();
+        let mut slots = senders.iter().map(|tx| tx.shard()).collect::<Vec<_>>();
+        slots.sort_unstable();
+        assert!(slots.last().copied().unwrap() >= 129);
+        if let Some(expected) = &expected_slots {
+            assert_eq!(&slots, expected);
+        } else {
+            expected_slots = Some(slots);
+        }
+
+        for (sender, tx) in senders.iter_mut().enumerate() {
+            tx.send(round * DYNAMIC_SENDERS + sender).unwrap();
+        }
+        drop(senders);
+
+        let mut values = (0..DYNAMIC_SENDERS)
+            .map(|_| rx.recv().unwrap())
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        assert_eq!(
+            values,
+            (round * DYNAMIC_SENDERS..(round + 1) * DYNAMIC_SENDERS).collect::<Vec<_>>()
+        );
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    }
+}

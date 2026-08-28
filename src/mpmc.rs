@@ -645,13 +645,22 @@ impl<T> Receiver<T> {
     #[inline]
     fn try_recv_inner(&mut self) -> (Result<T, TryRecvError>, Effects) {
         loop {
-            if let Some(value) = self.pop_work() {
-                return (Ok(value), Effects::default());
-            }
+            let work_generation = match self.pop_work() {
+                WorkPop::Item(value) => return (Ok(value), Effects::default()),
+                WorkPop::Empty { generation } => generation,
+            };
 
             let Some(lane) = self.acquire_lane() else {
+                let disconnected = self.is_disconnected();
+                // Receiver drop publishes local work before changing this
+                // generation. Retry if the first work scan raced that handoff.
+                if disconnected
+                    && work_generation != self.shared.stealer_generation.load(Ordering::Acquire)
+                {
+                    continue;
+                }
                 return (
-                    Err(if self.is_disconnected() {
+                    Err(if disconnected {
                         TryRecvError::Disconnected
                     } else {
                         TryRecvError::Empty
@@ -782,20 +791,21 @@ impl<T> Receiver<T> {
         }
     }
 
-    fn pop_work(&mut self) -> Option<T> {
+    fn pop_work(&mut self) -> WorkPop<T> {
         if let Some(value) = self.local.pop() {
-            return Some(value);
+            return WorkPop::Item(value);
         }
 
+        let generation = self.shared.stealer_generation.load(Ordering::Acquire);
         loop {
             match self.shared.injector.steal_batch_and_pop(&self.local) {
-                Steal::Success(value) => return Some(value),
+                Steal::Success(value) => return WorkPop::Item(value),
                 Steal::Retry => continue,
                 Steal::Empty => break,
             }
         }
 
-        self.refresh_stealers();
+        self.refresh_stealers(generation);
         let len = self.stealers.len();
         for offset in 0..len {
             let index = (self.steal_cursor + offset) % len;
@@ -807,18 +817,17 @@ impl<T> Receiver<T> {
                 match stealer.steal_batch_and_pop(&self.local) {
                     Steal::Success(value) => {
                         self.steal_cursor = index.wrapping_add(1);
-                        return Some(value);
+                        return WorkPop::Item(value);
                     }
                     Steal::Retry => continue,
                     Steal::Empty => break,
                 }
             }
         }
-        None
+        WorkPop::Empty { generation }
     }
 
-    fn refresh_stealers(&mut self) {
-        let generation = self.shared.stealer_generation.load(Ordering::Acquire);
+    fn refresh_stealers(&mut self, generation: usize) {
         if generation == self.seen_stealer_generation {
             return;
         }
@@ -1139,6 +1148,11 @@ enum FinishLane<T> {
 enum LaneDrain<T> {
     Item { value: T, effects: Effects },
     Empty(Effects),
+}
+
+enum WorkPop<T> {
+    Item(T),
+    Empty { generation: usize },
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
