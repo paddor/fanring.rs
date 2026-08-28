@@ -1,13 +1,13 @@
 # Design
 
-`fanring` assigns one SPSC `yring` to each registered sender. The sender owns
-the producer. The receiver owns every consumer. Registration and retirement
-use a mutex. Successful try operations use no locks unless they must wake an
-already-registered blocking peer.
+`fanring` assigns one SPSC `yring` to each registered sender. Each sender owns
+its producer. The receive side owns the consumers. Registration and retirement
+use a mutex. Common try operations use no locks unless they cross a lane idle
+boundary or must wake an already-registered blocking peer.
 
 ## Dynamic Registry
 
-The shared registry contains:
+The MPSC registry contains:
 
 - pending consumers awaiting receiver adoption
 - reusable lane slots with generation counters
@@ -17,6 +17,11 @@ Registration allocates a yring, assigns a slot, and publishes its consumer to
 the pending list. The receiver imports pending consumers when the registry
 generation changes. A disconnected empty lane returns its slot to the free
 list. The number of producers is limited only by available memory.
+
+The MPMC registry stores idle consumers directly in lane slots. A ready page
+activation moves matching consumers into a lock-free ready-lane queue. It also
+tracks one work stealer per live receiver. Receiver creation, receiver drop,
+and stealer-list refresh use the registry mutex.
 
 ## Send Path
 
@@ -44,7 +49,7 @@ swap queues the lane. If the recheck finds data while the signal remains idle,
 the receiver claims the lane locally. This closes the empty-boundary race
 without scanning every registered lane.
 
-## Receive Path
+## MPSC Receive Path
 
 The receiver takes ready page IDs, swaps each page's bits to zero, and appends
 those lanes to a local active deque. It serves up to 64 items from one lane
@@ -57,13 +62,34 @@ or when the lane reaches visible empty. A full release batch can span several
 prefetch windows. Empty-lane release prevents a producer and receiver from
 parking while partial credits remain unpublished.
 
+## MPMC Receive Path
+
+Each receiver owns a FIFO work deque. A receive operation checks its local
+deque, the shared injector, and other receivers' stealers before claiming a
+ready sender lane.
+
+After claiming a lane, it prefetches and removes at most 64 values. The first
+value satisfies the current receive. Remaining values move to the receiver's
+local deque and are immediately stealable in batches. The lane token is then
+requeued or returned to the registry; no receiver retains a sender lane between
+API calls.
+
+Draining a receiver's local work before claiming another lane preserves
+batching. Requeuing every sender lane after at most 64 values bounds domination
+by an always-busy lane. Receiver drop moves its remaining local values to the
+shared injector and wakes competitors. This is one topology for all receiver
+counts; there is no single-consumer specialization.
+
+MPMC ordering is relaxed. This permits batches from one sender lane to execute
+concurrently and permits later sender batches to overtake earlier local work.
+
 ## Blocking Waits
 
-The channel has one receiver data wait cell. Each lane has one producer space
-wait cell. A wait cell combines an atomic notification generation and waiter
-bit with a mutex and condition variable. Notifications increment the
-generation. Registration and clearing change only the waiter bit, so a later
-notification cannot be erased by an earlier wakeup completing.
+Each sender lane has one producer space wait cell. MPSC has a single-waiter
+receiver data cell; MPMC has a generation-counted multi-waiter data cell. Wait
+cells combine atomics with a mutex and condition variable. Notifications first
+advance the generation. With no registered waiter, notification stays atomic
+only.
 
 `send` first calls the non-blocking send path. On `Full`, it registers its lane
 waiter, retries, then sleeps only if the ring is still full. `recv` does the
@@ -84,12 +110,14 @@ Sender drop closes and activates its lane, decrements the live-sender count,
 then wakes a blocked receiver. The receiver drains buffered values before
 retiring the lane.
 
-Receiver drop marks the channel closed and closes installed and pending
-consumers. It wakes blocked lane senders; later sends return `Disconnected`.
+MPSC receiver drop marks the channel closed and closes installed and pending
+consumers. MPMC closes the channel when its last receiver drops. Earlier MPMC
+receiver drops republish local work. Closing wakes blocked lane senders; later
+sends return `Disconnected`.
 
 ## Ordering And Capacity
 
-Ordering is FIFO within one sender lane. Ordering across lanes is relaxed.
-Capacity is per sender, like a per-pipe ZMQ HWM. Adding a sender adds another
-ring and another capacity allocation. No shared global credit counter appears
-on the send path.
+MPSC ordering is FIFO within one sender lane and relaxed across lanes. MPMC
+ordering is fully relaxed. Capacity is per sender, like a per-pipe ZMQ HWM.
+Adding a sender adds another ring and another capacity allocation. No shared
+global credit counter appears on the send path.

@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
 license = "ISC"
-description = "Dynamic sharded MPSC channel built from SPSC rings"
+description = "Dynamic sharded MPSC and MPMC channels built from SPSC rings"
 repository = "https://github.com/paddor/fanring.rs"
-keywords = ["mpsc", "ring-buffer", "lock-free", "zero-copy", "batching"]
+keywords = ["mpsc", "mpmc", "ring-buffer", "lock-free", "batching"]
 categories = ["concurrency", "data-structures"]
 
 [lints.rust]
@@ -20,6 +20,7 @@ check-cfg = ["cfg(loom)"]
 
 [dependencies]
 concurrent-queue = { version = "2.5", features = ["loom"] }
+crossbeam-deque = "0.8.7"
 plotters = { version = "0.3", optional = true, default-features = false, features = ["svg_backend", "line_series"] }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
@@ -46,6 +47,11 @@ test = false
 
 [[bench]]
 name = "wake_latency"
+harness = false
+test = false
+
+[[bench]]
+name = "mpmc"
 harness = false
 test = false
 

@@ -1,12 +1,11 @@
 use std::fmt;
 
-/// Invalid channel configuration.
+/// Invalid channel configuration shared by both channel variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelError {
     /// `capacity_per_sender` was zero.
     ZeroCapacity,
-    /// `capacity_per_sender` exceeded
-    /// [`crate::mpsc::MAX_CAPACITY_PER_SENDER`].
+    /// `capacity_per_sender` exceeded the reported maximum.
     CapacityTooLarge {
         /// Requested capacity.
         requested: usize,
@@ -28,24 +27,24 @@ impl fmt::Display for ChannelError {
 
 impl std::error::Error for ChannelError {}
 
-/// Error from [`crate::mpsc::Sender::try_register`].
+/// Sender registration failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TryRegisterError {
-    /// The receiver has been dropped.
+    /// All receivers have been dropped.
     Disconnected,
 }
 
 impl fmt::Display for TryRegisterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Disconnected => f.write_str("receiver has been dropped"),
+            Self::Disconnected => f.write_str("all receivers have been dropped"),
         }
     }
 }
 
 impl std::error::Error for TryRegisterError {}
 
-/// Error from [`crate::mpsc::Sender::send`].
+/// Blocking send failed because the receiving side disconnected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SendError<T>(pub T);
 
@@ -59,18 +58,18 @@ impl<T> SendError<T> {
 
 impl<T> fmt::Display for SendError<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("receiver has been dropped")
+        f.write_str("all receivers have been dropped")
     }
 }
 
 impl<T: fmt::Debug> std::error::Error for SendError<T> {}
 
-/// Error from [`crate::mpsc::Sender::try_send`].
+/// Non-blocking send failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrySendError<T> {
     /// This sender's ring is full.
     Full(T),
-    /// The receiver has been dropped.
+    /// All receivers have been dropped.
     Disconnected(T),
 }
 
@@ -88,19 +87,19 @@ impl<T> fmt::Display for TrySendError<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Full(_) => f.write_str("sender ring is full"),
-            Self::Disconnected(_) => f.write_str("receiver has been dropped"),
+            Self::Disconnected(_) => f.write_str("all receivers have been dropped"),
         }
     }
 }
 
 impl<T: fmt::Debug> std::error::Error for TrySendError<T> {}
 
-/// Error from [`crate::mpsc::Sender::send_timeout`].
+/// Timed send failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendTimeoutError<T> {
     /// The timeout elapsed while this sender's ring remained full.
     Timeout(T),
-    /// The receiver was dropped.
+    /// All receivers were dropped.
     Disconnected(T),
 }
 
@@ -118,14 +117,14 @@ impl<T> fmt::Display for SendTimeoutError<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Timeout(_) => f.write_str("timed out waiting for sender capacity"),
-            Self::Disconnected(_) => f.write_str("receiver has been dropped"),
+            Self::Disconnected(_) => f.write_str("all receivers have been dropped"),
         }
     }
 }
 
 impl<T: fmt::Debug> std::error::Error for SendTimeoutError<T> {}
 
-/// Error from [`crate::mpsc::Receiver::recv`].
+/// Blocking receive failed because the sending side disconnected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecvError;
 
@@ -137,7 +136,7 @@ impl fmt::Display for RecvError {
 
 impl std::error::Error for RecvError {}
 
-/// Error from [`crate::mpsc::Receiver::try_recv`].
+/// Non-blocking receive failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TryRecvError {
     /// No sender ring has visible data right now.
@@ -157,7 +156,7 @@ impl fmt::Display for TryRecvError {
 
 impl std::error::Error for TryRecvError {}
 
-/// Error from [`crate::mpsc::Receiver::recv_timeout`].
+/// Timed receive failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecvTimeoutError {
     /// The timeout elapsed while the channel remained empty.

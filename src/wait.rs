@@ -128,3 +128,136 @@ impl Drop for WaitRegistration<'_> {
         }
     }
 }
+
+/// Multi-waiter condition cell.
+///
+/// Waiters snapshot a notification generation while holding the condition
+/// mutex. Notifications advance the generation before taking that mutex, so a
+/// waiter either observes the change or is asleep when the condition variable
+/// is signaled.
+pub(crate) struct MultiWaitCell {
+    generation: PaddedWaitState,
+    waiters: AtomicUsize,
+    mutex: Mutex<()>,
+    condvar: Condvar,
+}
+
+impl MultiWaitCell {
+    pub(crate) fn new() -> Self {
+        Self {
+            generation: PaddedWaitState(AtomicUsize::new(0)),
+            waiters: AtomicUsize::new(0),
+            mutex: Mutex::new(()),
+            condvar: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn prepare(&self) -> MultiWaitRegistration<'_> {
+        let guard = match self.mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let snapshot = self.generation.0.fetch_add(0, Ordering::AcqRel);
+        self.waiters.fetch_add(1, Ordering::AcqRel);
+        MultiWaitRegistration {
+            cell: self,
+            guard: Some(guard),
+            snapshot,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn notify_one(&self) {
+        self.generation.0.fetch_add(1, Ordering::Release);
+        if self.waiters.fetch_add(0, Ordering::AcqRel) == 0 {
+            return;
+        }
+
+        let _guard = match self.mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if self.waiters.load(Ordering::Relaxed) != 0 {
+            self.condvar.notify_one();
+        }
+    }
+
+    pub(crate) fn notify_all(&self) {
+        self.generation.0.fetch_add(1, Ordering::Release);
+        if self.waiters.fetch_add(0, Ordering::AcqRel) == 0 {
+            return;
+        }
+
+        let _guard = match self.mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if self.waiters.load(Ordering::Relaxed) != 0 {
+            self.condvar.notify_all();
+        }
+    }
+}
+
+impl fmt::Debug for MultiWaitCell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MultiWaitCell")
+            .field("generation", &self.generation.0.load(Ordering::Relaxed))
+            .field("waiters", &self.waiters.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+pub(crate) struct MultiWaitRegistration<'a> {
+    cell: &'a MultiWaitCell,
+    guard: Option<MutexGuard<'a, ()>>,
+    snapshot: usize,
+}
+
+impl MultiWaitRegistration<'_> {
+    pub(crate) fn wait(mut self) {
+        if self.cell.generation.0.fetch_add(0, Ordering::AcqRel) != self.snapshot {
+            self.clear();
+            return;
+        }
+        let guard = self.guard.take().expect("wait registration is active");
+        let guard = match self.cell.condvar.wait(guard) {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        self.guard = Some(guard);
+        self.clear();
+    }
+
+    pub(crate) fn wait_timeout(mut self, timeout: Duration) -> bool {
+        if self.cell.generation.0.fetch_add(0, Ordering::AcqRel) != self.snapshot {
+            self.clear();
+            return false;
+        }
+        let guard = self.guard.take().expect("wait registration is active");
+        let (guard, result) = match self.cell.condvar.wait_timeout(guard, timeout) {
+            Ok(result) => result,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let timed_out = result.timed_out();
+        self.guard = Some(guard);
+        self.clear();
+        timed_out
+    }
+
+    pub(crate) fn cancel(mut self) {
+        self.clear();
+    }
+
+    fn clear(&mut self) {
+        self.cell.waiters.fetch_sub(1, Ordering::AcqRel);
+        self.guard.take();
+    }
+}
+
+impl Drop for MultiWaitRegistration<'_> {
+    fn drop(&mut self) {
+        if self.guard.is_some() {
+            self.clear();
+        }
+    }
+}

@@ -2,6 +2,7 @@
 
 mod compat;
 mod error;
+pub mod mpmc;
 pub mod mpsc;
 mod ready;
 mod wait;

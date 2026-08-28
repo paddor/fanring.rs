@@ -1,5 +1,6 @@
 #![cfg(all(loom, target_pointer_width = "64"))]
 
+use fanring::mpmc;
 use fanring::mpsc::{RecvError, SendError, TryRecvError, TryRegisterError, TrySendError, channel};
 use loom::sync::Arc;
 use loom::sync::atomic::{AtomicBool, Ordering};
@@ -218,5 +219,76 @@ fn blocking_send_wakes_on_receiver_disconnect() {
 
         drop(rx);
         assert_eq!(sender.join().unwrap(), Err(SendError(2)));
+    });
+}
+
+#[test]
+fn mpmc_two_receivers_take_distinct_messages() {
+    loom::model(|| {
+        let (mut tx, mut rx0) = mpmc::channel(2);
+        let mut rx1 = rx0.clone();
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+
+        let first = thread::spawn(move || rx0.recv().unwrap());
+        let second = thread::spawn(move || rx1.recv().unwrap());
+        let mut values = [first.join().unwrap(), second.join().unwrap()];
+        values.sort_unstable();
+        assert_eq!(values, [1, 2]);
+    });
+}
+
+#[test]
+fn mpmc_disconnect_wakes_all_receivers() {
+    loom::model(|| {
+        let (tx, mut rx0) = mpmc::channel::<u8>(1);
+        let mut rx1 = rx0.clone();
+        let first = thread::spawn(move || rx0.recv());
+        let second = thread::spawn(move || rx1.recv());
+
+        drop(tx);
+        assert_eq!(first.join().unwrap(), Err(mpmc::RecvError));
+        assert_eq!(second.join().unwrap(), Err(mpmc::RecvError));
+    });
+}
+
+#[test]
+fn mpmc_receiver_drop_preserves_prefetched_work() {
+    loom::model(|| {
+        let (mut tx, mut rx0) = mpmc::channel(2);
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        assert_eq!(rx0.try_recv(), Ok(1));
+
+        let mut rx1 = rx0.clone();
+        drop(rx0);
+        assert_eq!(rx1.recv(), Ok(2));
+    });
+}
+
+#[test]
+fn mpmc_blocking_send_does_not_lose_space_wakeup() {
+    loom::model(|| {
+        let (mut tx, mut rx) = mpmc::channel(1);
+        tx.try_send(1).unwrap();
+        let sender = thread::spawn(move || tx.send(2));
+
+        assert_eq!(rx.recv(), Ok(1));
+        assert_eq!(sender.join().unwrap(), Ok(()));
+        assert_eq!(rx.recv(), Ok(2));
+    });
+}
+
+#[test]
+fn mpmc_blocking_send_wakes_on_last_receiver_drop() {
+    loom::model(|| {
+        let (mut tx, rx0) = mpmc::channel(1);
+        let rx1 = rx0.clone();
+        tx.try_send(1).unwrap();
+        let sender = thread::spawn(move || tx.send(2));
+
+        drop(rx0);
+        drop(rx1);
+        assert_eq!(sender.join().unwrap(), Err(mpmc::SendError(2)));
     });
 }
