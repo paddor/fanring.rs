@@ -33,15 +33,15 @@ trait BlockingReceiver: Send {
     fn recv(&mut self) -> Option<u64>;
 }
 
-impl BlockingSender for fanring::Sender<u64> {
+impl BlockingSender for fanring::mpsc::Sender<u64> {
     fn send(&mut self, value: u64) -> bool {
-        fanring::Sender::send(self, value).is_ok()
+        fanring::mpsc::Sender::send(self, value).is_ok()
     }
 }
 
-impl BlockingReceiver for fanring::Receiver<u64> {
+impl BlockingReceiver for fanring::mpsc::Receiver<u64> {
     fn recv(&mut self) -> Option<u64> {
-        fanring::Receiver::recv(self).ok()
+        fanring::mpsc::Receiver::recv(self).ok()
     }
 }
 
@@ -138,7 +138,7 @@ fn main() {
             warmup,
             settle,
             &mut out,
-            || fanring::channel(1),
+            || fanring::mpsc::channel(1),
         );
     }
     if filter.matches("crossbeam-channel") {

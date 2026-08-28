@@ -5,7 +5,8 @@ use std::fmt;
 pub enum ChannelError {
     /// `capacity_per_sender` was zero.
     ZeroCapacity,
-    /// `capacity_per_sender` exceeded [`crate::MAX_CAPACITY_PER_SENDER`].
+    /// `capacity_per_sender` exceeded
+    /// [`crate::mpsc::MAX_CAPACITY_PER_SENDER`].
     CapacityTooLarge {
         /// Requested capacity.
         requested: usize,
@@ -27,7 +28,7 @@ impl fmt::Display for ChannelError {
 
 impl std::error::Error for ChannelError {}
 
-/// Error from [`crate::Sender::try_register`].
+/// Error from [`crate::mpsc::Sender::try_register`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TryRegisterError {
     /// The receiver has been dropped.
@@ -44,7 +45,7 @@ impl fmt::Display for TryRegisterError {
 
 impl std::error::Error for TryRegisterError {}
 
-/// Error from [`crate::Sender::send`].
+/// Error from [`crate::mpsc::Sender::send`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SendError<T>(pub T);
 
@@ -64,7 +65,7 @@ impl<T> fmt::Display for SendError<T> {
 
 impl<T: fmt::Debug> std::error::Error for SendError<T> {}
 
-/// Error from [`crate::Sender::try_send`].
+/// Error from [`crate::mpsc::Sender::try_send`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrySendError<T> {
     /// This sender's ring is full.
@@ -94,7 +95,7 @@ impl<T> fmt::Display for TrySendError<T> {
 
 impl<T: fmt::Debug> std::error::Error for TrySendError<T> {}
 
-/// Error from [`crate::Sender::send_timeout`].
+/// Error from [`crate::mpsc::Sender::send_timeout`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendTimeoutError<T> {
     /// The timeout elapsed while this sender's ring remained full.
@@ -124,7 +125,7 @@ impl<T> fmt::Display for SendTimeoutError<T> {
 
 impl<T: fmt::Debug> std::error::Error for SendTimeoutError<T> {}
 
-/// Error from [`crate::Receiver::recv`].
+/// Error from [`crate::mpsc::Receiver::recv`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecvError;
 
@@ -136,7 +137,7 @@ impl fmt::Display for RecvError {
 
 impl std::error::Error for RecvError {}
 
-/// Error from [`crate::Receiver::try_recv`].
+/// Error from [`crate::mpsc::Receiver::try_recv`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TryRecvError {
     /// No sender ring has visible data right now.
@@ -156,7 +157,7 @@ impl fmt::Display for TryRecvError {
 
 impl std::error::Error for TryRecvError {}
 
-/// Error from [`crate::Receiver::recv_timeout`].
+/// Error from [`crate::mpsc::Receiver::recv_timeout`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecvTimeoutError {
     /// The timeout elapsed while the channel remained empty.

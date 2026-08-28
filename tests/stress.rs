@@ -1,14 +1,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use fanring::{TryRecvError, TrySendError, channel};
+use fanring::mpsc::{TryRecvError, TrySendError, channel};
 
 #[cfg(miri)]
 const MESSAGES_PER_SENDER: usize = 16;
 #[cfg(not(miri))]
 const MESSAGES_PER_SENDER: usize = 2_000;
 
-fn send_until_ok<T: Copy>(tx: &mut fanring::Sender<T>, mut value: T) {
+fn send_until_ok<T: Copy>(tx: &mut fanring::mpsc::Sender<T>, mut value: T) {
     loop {
         match tx.try_send(value) {
             Ok(()) => return,

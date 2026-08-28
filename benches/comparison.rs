@@ -214,7 +214,7 @@ where
     T: Copy + Send + 'static,
 {
     let stop = Arc::new(AtomicBool::new(false));
-    let (tx0, mut rx) = fanring::channel::<T>(config.capacity_per_sender);
+    let (tx0, mut rx) = fanring::mpsc::channel::<T>(config.capacity_per_sender);
     let mut senders = vec![tx0];
     for _ in 1..config.producers {
         let tx = senders[0].try_clone().expect("fanring sender slot");
@@ -229,7 +229,7 @@ where
             while !stop.load(Ordering::Relaxed) {
                 match mode {
                     Mode::Try => {
-                        if let Err(fanring::TrySendError::Full(_)) = tx.try_send(value) {
+                        if let Err(fanring::mpsc::TrySendError::Full(_)) = tx.try_send(value) {
                             thread::yield_now();
                         }
                     }
@@ -255,7 +255,9 @@ where
                     black_box(value);
                     messages += 1;
                 }
-                Err(fanring::TryRecvError::Empty | fanring::TryRecvError::Disconnected) => {
+                Err(
+                    fanring::mpsc::TryRecvError::Empty | fanring::mpsc::TryRecvError::Disconnected,
+                ) => {
                     thread::yield_now();
                 }
             },

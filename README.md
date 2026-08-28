@@ -11,7 +11,7 @@ shared queue tail.
 ## Example
 
 ```rust
-use fanring::channel;
+use fanring::mpsc::channel;
 
 let (mut tx0, mut rx) = channel(8);
 let mut tx1 = tx0.try_clone().expect("receiver alive");

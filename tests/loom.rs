@@ -1,6 +1,6 @@
 #![cfg(all(loom, target_pointer_width = "64"))]
 
-use fanring::{RecvError, SendError, TryRecvError, TryRegisterError, TrySendError, channel};
+use fanring::mpsc::{RecvError, SendError, TryRecvError, TryRegisterError, TrySendError, channel};
 use loom::sync::Arc;
 use loom::sync::atomic::{AtomicBool, Ordering};
 use loom::thread;
