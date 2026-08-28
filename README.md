@@ -105,4 +105,5 @@ Comparison benches accept `FANRING_BENCH_SECS`, `FANRING_BENCH_PRODUCERS`,
 `FANRING_BENCH_IMPLS`, and `FANRING_BENCH_OUT`. MPMC also accepts
 `FANRING_BENCH_CONSUMERS`. Wake latency accepts `FANRING_WAKE_ROUNDS`,
 `FANRING_WAKE_WARMUP`, `FANRING_WAKE_SETTLE_NS`, and
-`FANRING_WAKE_OUT`. All append machine-readable JSONL.
+`FANRING_WAKE_SETTLE_MODE` (`sleep` or `spin`), and `FANRING_WAKE_OUT`.
+All append machine-readable JSONL.

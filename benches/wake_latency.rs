@@ -16,6 +16,7 @@ struct Row {
     implementation: &'static str,
     operation: &'static str,
     rounds: usize,
+    settle_mode: &'static str,
     settle_ns: u64,
     mean_ns: u64,
     p50_ns: u64,
@@ -42,6 +43,18 @@ impl BlockingSender for fanring::mpsc::Sender<u64> {
 impl BlockingReceiver for fanring::mpsc::Receiver<u64> {
     fn recv(&mut self) -> Option<u64> {
         fanring::mpsc::Receiver::recv(self).ok()
+    }
+}
+
+impl BlockingSender for fanring::mpmc::Sender<u64> {
+    fn send(&mut self, value: u64) -> bool {
+        fanring::mpmc::Sender::send(self, value).is_ok()
+    }
+}
+
+impl BlockingReceiver for fanring::mpmc::Receiver<u64> {
+    fn recv(&mut self) -> Option<u64> {
+        fanring::mpmc::Receiver::recv(self).ok()
     }
 }
 
@@ -101,6 +114,7 @@ fn main() {
     let rounds = env_usize("FANRING_WAKE_ROUNDS", 10_000);
     let warmup = env_usize("FANRING_WAKE_WARMUP", 200);
     let settle = Duration::from_nanos(env_u64("FANRING_WAKE_SETTLE_NS", 50_000));
+    let settle_mode = SettleMode::from_env();
     let out_path = std::env::var_os("FANRING_WAKE_OUT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/fanring-bench/wake-latency.jsonl"));
@@ -124,8 +138,9 @@ fn main() {
     let mut out = BufWriter::new(file);
 
     println!(
-        "Forced-park wake latency ({rounds} samples, {warmup} warmup, {} ns settle, output {})\n",
+        "Wake latency ({rounds} samples, {warmup} warmup, {} ns {} settle, output {})\n",
         settle.as_nanos(),
+        settle_mode.label(),
         out_path.display()
     );
 
@@ -137,8 +152,22 @@ fn main() {
             rounds,
             warmup,
             settle,
+            settle_mode,
             &mut out,
             || fanring::mpsc::channel(1),
+        );
+    }
+    if filter.matches("fanring-mpmc") {
+        run_implementation(
+            &run_id,
+            &cpu,
+            "fanring-mpmc",
+            rounds,
+            warmup,
+            settle,
+            settle_mode,
+            &mut out,
+            || fanring::mpmc::channel(1),
         );
     }
     if filter.matches("crossbeam-channel") {
@@ -149,6 +178,7 @@ fn main() {
             rounds,
             warmup,
             settle,
+            settle_mode,
             &mut out,
             || crossbeam_channel::bounded(1),
         );
@@ -161,6 +191,7 @@ fn main() {
             rounds,
             warmup,
             settle,
+            settle_mode,
             &mut out,
             || flume::bounded(1),
         );
@@ -173,6 +204,7 @@ fn main() {
             rounds,
             warmup,
             settle,
+            settle_mode,
             &mut out,
             || kanal::bounded(1),
         );
@@ -185,6 +217,7 @@ fn main() {
             rounds,
             warmup,
             settle,
+            settle_mode,
             &mut out,
             || thingbuf::mpsc::blocking::channel(1),
         );
@@ -201,6 +234,7 @@ fn run_implementation<S, R, F>(
     rounds: usize,
     warmup: usize,
     settle: Duration,
+    settle_mode: SettleMode,
     out: &mut impl Write,
     make_channel: F,
 ) where
@@ -209,7 +243,7 @@ fn run_implementation<S, R, F>(
     F: Fn() -> (S, R),
 {
     let (sender, receiver) = make_channel();
-    let recv_samples = measure_recv_wake(sender, receiver, rounds, warmup, settle);
+    let recv_samples = measure_recv_wake(sender, receiver, rounds, warmup, settle, settle_mode);
     write_row(
         out,
         summarize(
@@ -218,12 +252,13 @@ fn run_implementation<S, R, F>(
             implementation,
             "recv_wake",
             settle,
+            settle_mode,
             recv_samples,
         ),
     );
 
     let (sender, receiver) = make_channel();
-    let send_samples = measure_send_wake(sender, receiver, rounds, warmup, settle);
+    let send_samples = measure_send_wake(sender, receiver, rounds, warmup, settle, settle_mode);
     write_row(
         out,
         summarize(
@@ -232,6 +267,7 @@ fn run_implementation<S, R, F>(
             implementation,
             "send_wake",
             settle,
+            settle_mode,
             send_samples,
         ),
     );
@@ -244,6 +280,7 @@ fn measure_recv_wake<S, R>(
     rounds: usize,
     warmup: usize,
     settle: Duration,
+    settle_mode: SettleMode,
 ) -> Vec<u64>
 where
     S: BlockingSender,
@@ -266,7 +303,7 @@ where
     let mut samples = Vec::with_capacity(rounds);
     for round in 0..total {
         ready_rx.recv().expect("wait for receiver ready");
-        thread::sleep(settle);
+        settle_mode.wait(settle);
         assert!(sender.send(elapsed_ns(clock)), "receiver disconnected");
         let sample = sample_rx.recv().expect("receive receiver wake sample");
         if round >= warmup {
@@ -284,6 +321,7 @@ fn measure_send_wake<S, R>(
     rounds: usize,
     warmup: usize,
     settle: Duration,
+    settle_mode: SettleMode,
 ) -> Vec<u64>
 where
     S: BlockingSender + 'static,
@@ -307,7 +345,7 @@ where
     let mut samples = Vec::with_capacity(rounds);
     for round in 0..total {
         ready_rx.recv().expect("wait for sender ready");
-        thread::sleep(settle);
+        settle_mode.wait(settle);
         let started = elapsed_ns(clock);
         receiver.recv().expect("receive buffered payload");
         let completed = sample_rx.recv().expect("receive sender wake sample");
@@ -326,6 +364,7 @@ fn summarize(
     implementation: &'static str,
     operation: &'static str,
     settle: Duration,
+    settle_mode: SettleMode,
     mut samples: Vec<u64>,
 ) -> Row {
     samples.sort_unstable();
@@ -336,6 +375,7 @@ fn summarize(
         implementation,
         operation,
         rounds: samples.len(),
+        settle_mode: settle_mode.label(),
         settle_ns: settle.as_nanos() as u64,
         mean_ns: (sum / samples.len() as u128) as u64,
         p50_ns: percentile(&samples, 500),
@@ -384,6 +424,41 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .ok()
         .map(|value| value.parse().expect("invalid u64 environment value"))
         .unwrap_or(default)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SettleMode {
+    Sleep,
+    Spin,
+}
+
+impl SettleMode {
+    fn from_env() -> Self {
+        match std::env::var("FANRING_WAKE_SETTLE_MODE").as_deref() {
+            Ok("spin") => Self::Spin,
+            Ok("sleep") | Err(_) => Self::Sleep,
+            Ok(value) => panic!("invalid settle mode {value:?}; expected sleep or spin"),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sleep => "sleep",
+            Self::Spin => "spin",
+        }
+    }
+
+    fn wait(self, duration: Duration) {
+        match self {
+            Self::Sleep => thread::sleep(duration),
+            Self::Spin => {
+                let deadline = Instant::now() + duration;
+                while Instant::now() < deadline {
+                    std::hint::spin_loop();
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
