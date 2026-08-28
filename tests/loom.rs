@@ -1,6 +1,6 @@
 #![cfg(all(loom, target_pointer_width = "64"))]
 
-use fanring::{RecvError, SendError, TryRegisterError, channel};
+use fanring::{RecvError, SendError, TryRecvError, TryRegisterError, TrySendError, channel};
 use loom::sync::Arc;
 use loom::sync::atomic::{AtomicBool, Ordering};
 use loom::thread;
@@ -8,7 +8,7 @@ use loom::thread;
 #[test]
 fn send_recv_ready_race_does_not_lose_message() {
     loom::model(|| {
-        let (mut tx, mut rx) = channel(1, 1);
+        let (mut tx, mut rx) = channel(1);
         tx.try_send(1).unwrap();
         assert_eq!(rx.try_recv(), Ok(1));
 
@@ -33,8 +33,8 @@ fn send_recv_ready_race_does_not_lose_message() {
                     break;
                 }
                 Ok(other) => panic!("unexpected value {other}"),
-                Err(RecvError::Empty) => thread::yield_now(),
-                Err(RecvError::Disconnected) => panic!("sender still alive"),
+                Err(TryRecvError::Empty) => thread::yield_now(),
+                Err(TryRecvError::Disconnected) => panic!("sender still alive"),
             }
         }
 
@@ -54,7 +54,7 @@ fn send_recv_ready_race_does_not_lose_message() {
 #[test]
 fn receiver_drop_makes_sender_disconnect() {
     loom::model(|| {
-        let (mut tx, rx) = channel(1, 1);
+        let (mut tx, rx) = channel(1);
         tx.try_send(1).unwrap();
 
         let sender = thread::spawn(move || {
@@ -62,11 +62,11 @@ fn receiver_drop_makes_sender_disconnect() {
             loop {
                 match tx.try_send(value) {
                     Ok(()) => return,
-                    Err(SendError::Full(returned)) => {
+                    Err(TrySendError::Full(returned)) => {
                         value = returned;
                         thread::yield_now();
                     }
-                    Err(SendError::Disconnected(returned)) => {
+                    Err(TrySendError::Disconnected(returned)) => {
                         assert_eq!(returned, 2);
                         return;
                     }
@@ -82,7 +82,7 @@ fn receiver_drop_makes_sender_disconnect() {
 #[test]
 fn second_shard_ready_race_does_not_lose_message() {
     loom::model(|| {
-        let (mut tx0, mut rx) = channel(2, 1);
+        let (mut tx0, mut rx) = channel(1);
         let mut tx1 = tx0.try_clone().unwrap();
 
         tx0.try_send(10).unwrap();
@@ -96,8 +96,8 @@ fn second_shard_ready_race_does_not_lose_message() {
         match rx.try_recv() {
             Ok(20) => received = true,
             Ok(other) => panic!("unexpected value {other}"),
-            Err(RecvError::Empty) => thread::yield_now(),
-            Err(RecvError::Disconnected) => panic!("senders still alive"),
+            Err(TryRecvError::Empty) => thread::yield_now(),
+            Err(TryRecvError::Disconnected) => panic!("senders still alive"),
         }
 
         sender1.join().unwrap();
@@ -106,14 +106,14 @@ fn second_shard_ready_race_does_not_lose_message() {
             assert_eq!(rx.try_recv(), Ok(20));
         }
         drop(tx0);
-        assert_eq!(rx.try_recv(), Err(RecvError::Disconnected));
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
     });
 }
 
 #[test]
 fn register_race_with_receiver_drop_reports_disconnected() {
     loom::model(|| {
-        let (mut tx, rx) = channel::<u8>(2, 1);
+        let (mut tx, rx) = channel::<u8>(1);
 
         let dropper = thread::spawn(move || {
             thread::yield_now();
@@ -125,20 +125,19 @@ fn register_race_with_receiver_drop_reports_disconnected() {
 
         match registered {
             Ok(mut tx1) => {
-                assert_eq!(tx1.try_send(1), Err(SendError::Disconnected(1)));
+                assert_eq!(tx1.try_send(1), Err(TrySendError::Disconnected(1)));
             }
             Err(TryRegisterError::Disconnected) => {}
-            Err(TryRegisterError::NoSenderSlot) => panic!("sender slot should be available"),
         }
 
-        assert_eq!(tx.try_send(2), Err(SendError::Disconnected(2)));
+        assert_eq!(tx.try_send(2), Err(TrySendError::Disconnected(2)));
     });
 }
 
 #[test]
 fn sender_drop_during_receiver_drain_preserves_buffered_items() {
     loom::model(|| {
-        let (mut tx, mut rx) = channel(1, 2);
+        let (mut tx, mut rx) = channel(2);
         tx.try_send(1).unwrap();
         tx.try_send(2).unwrap();
 
@@ -150,6 +149,74 @@ fn sender_drop_during_receiver_drain_preserves_buffered_items() {
         assert_eq!(rx.try_recv(), Ok(1));
         sender.join().unwrap();
         assert_eq!(rx.try_recv(), Ok(2));
-        assert_eq!(rx.try_recv(), Err(RecvError::Disconnected));
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
+    });
+}
+
+#[test]
+fn blocking_recv_does_not_lose_data_wakeup() {
+    loom::model(|| {
+        let (mut tx, mut rx) = channel(1);
+        let sender = thread::spawn(move || tx.send(1));
+
+        assert_eq!(rx.recv(), Ok(1));
+        assert_eq!(sender.join().unwrap(), Ok(()));
+    });
+}
+
+#[test]
+fn blocking_send_does_not_lose_space_wakeup() {
+    loom::model(|| {
+        let (mut tx, mut rx) = channel(1);
+        tx.try_send(1).unwrap();
+        let sender = thread::spawn(move || tx.send(2));
+
+        assert_eq!(rx.recv(), Ok(1));
+        assert_eq!(sender.join().unwrap(), Ok(()));
+        assert_eq!(rx.recv(), Ok(2));
+    });
+}
+
+#[test]
+fn blocking_send_recv_do_not_deadlock_while_sender_stays_alive() {
+    loom::model(|| {
+        let (mut tx, mut rx) = channel(1);
+        tx.try_send(1).unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let sender_done = done.clone();
+        let sender = thread::spawn(move || {
+            tx.send(2).unwrap();
+            while !sender_done.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+        });
+
+        assert_eq!(rx.recv(), Ok(1));
+        assert_eq!(rx.recv(), Ok(2));
+        done.store(true, Ordering::Release);
+        sender.join().unwrap();
+    });
+}
+
+#[test]
+fn blocking_recv_wakes_on_sender_disconnect() {
+    loom::model(|| {
+        let (tx, mut rx) = channel::<u8>(1);
+        let sender = thread::spawn(move || drop(tx));
+
+        assert_eq!(rx.recv(), Err(RecvError));
+        sender.join().unwrap();
+    });
+}
+
+#[test]
+fn blocking_send_wakes_on_receiver_disconnect() {
+    loom::model(|| {
+        let (mut tx, rx) = channel(1);
+        tx.try_send(1).unwrap();
+        let sender = thread::spawn(move || tx.send(2));
+
+        drop(rx);
+        assert_eq!(sender.join().unwrap(), Err(SendError(2)));
     });
 }

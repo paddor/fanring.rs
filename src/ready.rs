@@ -1,114 +1,133 @@
 use std::fmt;
 
-use crate::compat::{AtomicBool, AtomicU64, Ordering};
+use crate::compat::{Arc, AtomicU8, AtomicU64, Ordering};
+use crate::wait::{WaitCell, WaitRegistration};
 
-/// Bitmask of shards that may have data.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ReadyMask(u64);
+const IDLE: u8 = 0;
+const PENDING: u8 = 1;
 
-impl ReadyMask {
-    #[inline]
-    pub(crate) const fn empty() -> Self {
-        Self(0)
+pub(crate) const LANES_PER_PAGE: usize = u64::BITS as usize;
+
+/// One page in the dynamic ready index.
+pub(crate) struct ReadyPage {
+    id: usize,
+    bits: AtomicU64,
+}
+
+impl ReadyPage {
+    pub(crate) fn new(id: usize) -> Self {
+        Self {
+            id,
+            bits: AtomicU64::new(0),
+        }
     }
 
     #[inline]
-    pub(crate) fn is_empty(self) -> bool {
-        self.0 == 0
+    pub(crate) fn id(&self) -> usize {
+        self.id
+    }
+
+    /// Mark a lane ready. Returns the page ID when the page needs publishing.
+    #[inline]
+    fn mark(&self, bit: u64) -> Option<usize> {
+        (self.bits.fetch_or(bit, Ordering::Release) == 0).then_some(self.id)
     }
 
     #[inline]
-    pub(crate) fn contains(self, shard: usize) -> bool {
-        self.0 & shard_bit(shard) != 0
-    }
-
-    #[inline]
-    pub(crate) fn remove(&mut self, shard: usize) {
-        self.0 &= !shard_bit(shard);
+    pub(crate) fn take(&self) -> u64 {
+        self.bits.swap(0, Ordering::AcqRel)
     }
 }
 
-impl fmt::Debug for ReadyMask {
+impl fmt::Debug for ReadyPage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("ReadyMask")
-            .field(&format_args!("{:#066b}", self.0))
+        f.debug_struct("ReadyPage")
+            .field("id", &self.id)
+            .field("bits", &self.bits.load(Ordering::Relaxed))
             .finish()
     }
 }
 
-/// Shared ready-state protocol.
+/// Per-lane coalescing protocol.
 ///
-/// Senders set a padded per-shard flag and publish the shard bit only on an
-/// empty-to-ready transition. The receiver drains the global bitmask, then uses
-/// per-shard flags to close the race with concurrent sends.
-pub(crate) struct ReadySet {
-    global: AtomicU64,
-    shards: Box<[ReadyFlag]>,
+/// Every publication swaps the lane to `PENDING`. Only the first publication
+/// after `IDLE` queues the lane. The receiver swaps back to `IDLE` before its
+/// final ring recheck, preventing a publication from being lost at the empty
+/// boundary.
+pub(crate) struct LaneSignal {
+    state: PaddedState,
+    page: Arc<ReadyPage>,
+    bit: u64,
+    space_waiter: WaitCell,
 }
 
-impl ReadySet {
-    pub(crate) fn new(max_senders: usize) -> Self {
+pub(crate) struct ReadyMark {
+    pub(crate) page: Option<usize>,
+    pub(crate) activated: bool,
+}
+
+impl LaneSignal {
+    pub(crate) fn new(page: Arc<ReadyPage>, lane: usize) -> Self {
         Self {
-            global: AtomicU64::new(0),
-            shards: (0..max_senders).map(|_| ReadyFlag::new(false)).collect(),
+            state: PaddedState(AtomicU8::new(IDLE)),
+            page,
+            bit: 1u64 << (lane % LANES_PER_PAGE),
+            space_waiter: WaitCell::new(),
         }
     }
 
     #[inline]
-    pub(crate) fn mark_ready(&self, shard: usize) {
-        let flag = &self.shards[shard];
-        // Publish the flush even when the shard was already ready. The
-        // receiver's matching swap synchronizes before its second prefetch.
-        if !flag.swap(true, Ordering::AcqRel) {
-            self.global.fetch_or(shard_bit(shard), Ordering::Release);
+    pub(crate) fn mark(&self) -> ReadyMark {
+        if self.state.0.swap(PENDING, Ordering::AcqRel) == IDLE {
+            ReadyMark {
+                page: self.page.mark(self.bit),
+                activated: true,
+            }
+        } else {
+            ReadyMark {
+                page: None,
+                activated: false,
+            }
         }
     }
 
     #[inline]
-    pub(crate) fn take_ready(&self) -> ReadyMask {
-        ReadyMask(self.global.swap(0, Ordering::AcqRel))
+    pub(crate) fn finish_drain(&self) {
+        self.state.0.swap(IDLE, Ordering::AcqRel);
     }
 
     #[inline]
-    pub(crate) fn clear_shard(&self, shard: usize) {
-        self.shards[shard].swap(false, Ordering::AcqRel);
+    pub(crate) fn claim_after_empty(&self) -> bool {
+        self.state
+            .0
+            .compare_exchange(IDLE, PENDING, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     #[inline]
-    pub(crate) fn restore_shard(&self, shard: usize) {
-        self.shards[shard].store(true, Ordering::Release);
+    pub(crate) fn is_pending(&self) -> bool {
+        self.state.0.load(Ordering::Acquire) != IDLE
+    }
+
+    pub(crate) fn prepare_space_wait(&self) -> WaitRegistration<'_> {
+        self.space_waiter.prepare()
+    }
+
+    #[inline]
+    pub(crate) fn notify_space(&self) {
+        self.space_waiter.notify();
     }
 }
 
-impl fmt::Debug for ReadySet {
+impl fmt::Debug for LaneSignal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ReadySet")
-            .field("global", &ReadyMask(self.global.load(Ordering::Relaxed)))
-            .finish_non_exhaustive()
+        f.debug_struct("LaneSignal")
+            .field("state", &self.state.0.load(Ordering::Relaxed))
+            .field("page", &self.page.id())
+            .field("bit", &self.bit)
+            .finish()
     }
-}
-
-#[inline]
-pub(crate) fn shard_bit(shard: usize) -> u64 {
-    1u64 << shard
 }
 
 #[repr(align(128))]
-struct ReadyFlag(AtomicBool);
-
-impl ReadyFlag {
-    #[inline]
-    fn new(value: bool) -> Self {
-        Self(AtomicBool::new(value))
-    }
-
-    #[inline]
-    fn store(&self, value: bool, ordering: Ordering) {
-        self.0.store(value, ordering);
-    }
-
-    #[inline]
-    fn swap(&self, value: bool, ordering: Ordering) -> bool {
-        self.0.swap(value, ordering)
-    }
-}
+struct PaddedState(AtomicU8);

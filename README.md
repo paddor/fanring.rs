@@ -1,9 +1,9 @@
 # fanring
 
-Fast bounded MPSC channel built from one SPSC ring per producer.
+Fast bounded MPSC channel built from one SPSC `yring` per producer.
 
-Each sender writes to its own ring. One receiver polls ready rings with a
-bitmask and round-robin cursor. This avoids producer-vs-producer contention on a
+Sender registration is dynamic. Each sender writes to its own ring. The
+receiver drains active rings in bounded bursts. Producers do not contend on a
 shared queue tail.
 
 ![Benchmark chart](doc/charts/mpsc.svg)
@@ -11,74 +11,67 @@ shared queue tail.
 ## Example
 
 ```rust
-use fanring::{RecvError, SendError, channel};
+use fanring::channel;
 
-let (mut tx0, mut rx) = channel(2, 8);
-let mut tx1 = tx0.try_clone().expect("sender slot available");
+let (mut tx0, mut rx) = channel(8);
+let mut tx1 = tx0.try_clone().expect("receiver alive");
 
-tx0.try_send("from sender 0").unwrap();
-tx1.try_send("from sender 1").unwrap();
+tx0.send("from sender 0").unwrap();
+tx1.send("from sender 1").unwrap();
 
 for _ in 0..2 {
-    match rx.try_recv() {
-        Ok(message) => println!("{message}"),
-        Err(RecvError::Empty) => std::thread::yield_now(),
-        Err(RecvError::Disconnected) => break,
-    }
+    println!("{}", rx.recv().unwrap());
 }
 
-assert_eq!(tx0.try_send("still open"), Ok(()));
+assert_eq!(tx0.send("still open"), Ok(()));
 drop(rx);
-assert_eq!(
-    tx0.try_send("closed"),
-    Err(SendError::Disconnected("closed"))
-);
+assert_eq!(tx0.send("closed").unwrap_err().into_inner(), "closed");
 ```
 
 ## Contract
 
-- Bounded, non-blocking MPSC.
-- `try_channel` validates configuration; `channel` panics on invalid arguments.
-- `try_send` returns immediately with `Full` instead of blocking.
-- `try_recv` returns immediately with `Empty` instead of blocking or awaiting.
-- FIFO per sender.
-- Relaxed ordering across senders.
-- Best-effort round-robin across ready senders.
-- Fixed sender limit, currently `<= fanring::MAX_SENDERS`.
-- `try_register` reports sender-slot exhaustion vs receiver drop.
-- Capacity is per sender: `max_senders * capacity_per_sender`.
-- `unsafe` is forbidden in this crate; ring storage is delegated to `yring`.
+- Bounded MPSC with blocking, timeout, and non-blocking operations.
+- No configured producer limit.
+- One bounded SPSC ring per live sender.
+- Capacity is per sender and rounded up to a power of two.
+- `try_send` returns `Full` when that sender's ring is full.
+- `try_recv` returns `Empty` when no active ring has visible data.
+- `send` and `recv` park only after the corresponding try operation fails.
+- Blocking operations spin briefly before parking.
+- `send_timeout` and `recv_timeout` bound that parked wait.
+- FIFO per sender. Relaxed ordering across senders.
+- Active senders are served in bursts of at most 64 items.
+- Dropped sender slots are reused after their rings drain.
+- Receive-side yring prefetch and release batching is internal to `try_recv`.
+- `unsafe` is forbidden in this crate. Ring storage is delegated to `yring`.
 
 ## Good Fit
 
-- Long-lived producers registered up front.
-- One receiver doing high-rate fan-in.
+- Many long-lived or frequently changing producers feeding one consumer.
 - Per-producer FIFO is enough.
-- Bounded per-producer queues are acceptable.
-- Caller wants to own backoff policy: spin, yield, sleep, park, or async wrapper.
+- Per-producer HWM matches the desired backpressure model.
+- Callers can use built-in parking or own the backoff policy around `try_*`.
 
 ## Bad Fit
 
-- Need multiple receivers or load-balanced consumers.
-- Need global FIFO across all producers.
-- Need strict fairness across producers.
-- Need built-in blocking or async wakeups.
-- Producer set churns heavily.
-- One producer may burst much harder than others and should borrow idle capacity
-  from other producers.
-- Need each received item to return capacity immediately. Capacity is released
-  after a receive batch or when an internal prefetch window drains.
-- Sender slots must be reused after senders are dropped.
-
-## Tradeoff
-
-The speed comes from a narrower contract:
-
-- no shared producer tail
-- no global FIFO
-- no strict fairness
-- no dynamic capacity sharing
-- no immediate per-message capacity release
-- no built-in parking/waking
+- Need multiple consumers from one channel.
+- Need global FIFO or strict one-item round robin.
+- Need one exact capacity shared across all producers.
+- Need async wakeups.
 
 More detail: [DESIGN.md](DESIGN.md)
+
+## Benchmarks
+
+```sh
+cargo bench --bench comparison
+FANRING_BENCH_MODE=blocking cargo bench --bench comparison
+cargo bench --bench wake_latency
+```
+
+The comparison bench accepts `FANRING_BENCH_SECS`,
+`FANRING_BENCH_PRODUCERS`, `FANRING_BENCH_CAPACITY`,
+`FANRING_BENCH_PAYLOADS`, `FANRING_BENCH_IMPLS`, and
+`FANRING_BENCH_OUT`. Wake latency accepts `FANRING_WAKE_ROUNDS`,
+`FANRING_WAKE_WARMUP`, `FANRING_WAKE_SETTLE_NS`, and
+`FANRING_WAKE_OUT`. Both append machine-readable JSONL.
