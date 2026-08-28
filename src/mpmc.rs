@@ -77,7 +77,7 @@ fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
         ready_lanes: ConcurrentQueue::unbounded(),
         injector: Injector::new(),
         stealer_generation: AtomicUsize::new(0),
-        prefetched_items: AtomicUsize::new(0),
+        work_handoffs: AtomicUsize::new(0),
         registered_lanes: AtomicUsize::new(1),
         live_senders: AtomicUsize::new(1),
         live_receivers: AtomicUsize::new(1),
@@ -111,7 +111,7 @@ struct Shared<T> {
     ready_lanes: ConcurrentQueue<LaneToken<T>>,
     injector: Injector<T>,
     stealer_generation: AtomicUsize,
-    prefetched_items: AtomicUsize,
+    work_handoffs: AtomicUsize,
     registered_lanes: AtomicUsize,
     live_senders: AtomicUsize,
     live_receivers: AtomicUsize,
@@ -219,10 +219,7 @@ impl<T> Shared<T> {
         }
         loop {
             match self.injector.steal() {
-                Steal::Success(value) => {
-                    self.prefetched_items.fetch_sub(1, Ordering::AcqRel);
-                    drop(value);
-                }
+                Steal::Success(value) => drop(value),
                 Steal::Retry => {}
                 Steal::Empty => break,
             }
@@ -660,7 +657,8 @@ impl<T> Receiver<T> {
                 // Receiver drop publishes local work before changing this
                 // generation. Retry if the first work scan raced that handoff.
                 if disconnected
-                    && work_generation != self.shared.stealer_generation.load(Ordering::Acquire)
+                    && (work_generation != self.shared.stealer_generation.load(Ordering::Acquire)
+                        || self.shared.work_handoffs.load(Ordering::Acquire) != 0)
                 {
                     continue;
                 }
@@ -798,17 +796,13 @@ impl<T> Receiver<T> {
 
     fn pop_work(&mut self) -> WorkPop<T> {
         if let Some(value) = self.local.pop() {
-            self.shared.prefetched_items.fetch_sub(1, Ordering::AcqRel);
             return WorkPop::Item(value);
         }
 
         let generation = self.shared.stealer_generation.load(Ordering::Acquire);
         loop {
             match self.shared.injector.steal_batch_and_pop(&self.local) {
-                Steal::Success(value) => {
-                    self.shared.prefetched_items.fetch_sub(1, Ordering::AcqRel);
-                    return WorkPop::Item(value);
-                }
+                Steal::Success(value) => return WorkPop::Item(value),
                 Steal::Retry => continue,
                 Steal::Empty => break,
             }
@@ -826,7 +820,6 @@ impl<T> Receiver<T> {
                 match stealer.steal_batch_and_pop(&self.local) {
                     Steal::Success(value) => {
                         self.steal_cursor = index.wrapping_add(1);
-                        self.shared.prefetched_items.fetch_sub(1, Ordering::AcqRel);
                         return WorkPop::Item(value);
                     }
                     Steal::Retry => continue,
@@ -891,11 +884,6 @@ impl<T> Receiver<T> {
             .consumer
             .pop()
             .expect("cached_available guarantees prefetched data");
-        if batch > 1 {
-            self.shared
-                .prefetched_items
-                .fetch_add(batch - 1, Ordering::Release);
-        }
         for _ in 1..batch {
             self.local.push(
                 lane.consumer
@@ -956,7 +944,6 @@ impl<T> Receiver<T> {
     pub fn is_disconnected(&self) -> bool {
         self.shared.live_senders.load(Ordering::Acquire) == 0
             && self.shared.registered_lanes.load(Ordering::Acquire) == 0
-            && self.shared.prefetched_items.load(Ordering::Acquire) == 0
     }
 
     /// Return per-sender capacity after `yring` rounding.
@@ -998,12 +985,14 @@ impl<T> Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
+        self.shared.work_handoffs.fetch_add(1, Ordering::AcqRel);
         let mut published = false;
         while let Some(value) = self.local.pop() {
             self.shared.injector.push(value);
             published = true;
         }
         self.shared.unregister_receiver(self.id);
+        self.shared.work_handoffs.fetch_sub(1, Ordering::Release);
 
         let previous = self.shared.live_receivers.fetch_sub(1, Ordering::AcqRel);
         if previous == 1 {
@@ -1024,8 +1013,8 @@ impl<T> fmt::Debug for Receiver<T> {
                 &self.shared.registered_lanes.load(Ordering::Relaxed),
             )
             .field(
-                "prefetched_items",
-                &self.shared.prefetched_items.load(Ordering::Relaxed),
+                "work_handoffs",
+                &self.shared.work_handoffs.load(Ordering::Relaxed),
             )
             .field(
                 "live_receivers",
