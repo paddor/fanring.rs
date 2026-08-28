@@ -1,4 +1,6 @@
-use fanring::mpmc::{TrySendError, channel};
+use std::time::Instant;
+
+use fanring::mpmc::{RecvTimeoutError, SendTimeoutError, TrySendError, channel};
 
 #[test]
 fn cloned_receivers_distribute_messages() {
@@ -80,4 +82,62 @@ fn dynamic_senders_share_receivers() {
     let mut values = [rx0.try_recv().unwrap(), rx1.try_recv().unwrap()];
     values.sort_unstable();
     assert_eq!(values, [1, 2]);
+}
+
+#[test]
+fn deadlines_report_unsatisfied_operation() {
+    let (mut tx, mut rx) = channel(1);
+    assert_eq!(
+        rx.recv_deadline(Instant::now()),
+        Err(RecvTimeoutError::Timeout)
+    );
+
+    tx.try_send(1).unwrap();
+    assert_eq!(
+        tx.send_deadline(2, Instant::now()),
+        Err(SendTimeoutError::Timeout(2))
+    );
+}
+
+#[test]
+fn endpoint_counts_and_identity_are_exposed() {
+    let (tx0, rx0) = channel::<u8>(1);
+    let tx1 = tx0.try_clone().unwrap();
+    let rx1 = rx0.clone();
+    let (other_tx, other_rx) = channel::<u8>(1);
+
+    assert!(tx0.same_channel(&tx1));
+    assert!(!tx0.same_channel(&other_tx));
+    assert!(rx0.same_channel(&rx1));
+    assert!(!rx0.same_channel(&other_rx));
+    assert_eq!(tx0.sender_count(), 2);
+    assert_eq!(rx0.sender_count(), 2);
+    assert_eq!(tx0.receiver_count(), 2);
+    assert_eq!(rx0.receiver_count(), 2);
+
+    drop(tx1);
+    assert_eq!(tx0.sender_count(), 1);
+    drop(rx1);
+    assert_eq!(tx0.receiver_count(), 1);
+    drop(rx0);
+    assert_eq!(tx0.receiver_count(), 0);
+    assert!(tx0.is_disconnected());
+}
+
+#[test]
+fn receiver_iterators_cover_blocking_and_ready_values() {
+    let (mut tx, mut rx) = channel(4);
+    tx.try_send(1).unwrap();
+    tx.try_send(2).unwrap();
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), [1, 2]);
+
+    tx.try_send(3).unwrap();
+    tx.try_send(4).unwrap();
+    drop(tx);
+    assert_eq!(rx.iter().collect::<Vec<_>>(), [3, 4]);
+
+    let (mut tx, rx) = channel(1);
+    tx.try_send(5).unwrap();
+    drop(tx);
+    assert_eq!(rx.into_iter().collect::<Vec<_>>(), [5]);
 }

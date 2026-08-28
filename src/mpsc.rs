@@ -345,17 +345,22 @@ impl<T> Sender<T> {
 
     /// Send one value, blocking for at most `timeout` while this sender's ring
     /// is full.
-    pub fn send_timeout(
-        &mut self,
-        mut value: T,
-        timeout: Duration,
-    ) -> Result<(), SendTimeoutError<T>> {
+    pub fn send_timeout(&mut self, value: T, timeout: Duration) -> Result<(), SendTimeoutError<T>> {
         let Some(deadline) = Instant::now().checked_add(timeout) else {
             return self
                 .send(value)
                 .map_err(|SendError(value)| SendTimeoutError::Disconnected(value));
         };
+        self.send_deadline(value, deadline)
+    }
 
+    /// Send one value, blocking until `deadline` while this sender's ring is
+    /// full.
+    pub fn send_deadline(
+        &mut self,
+        mut value: T,
+        deadline: Instant,
+    ) -> Result<(), SendTimeoutError<T>> {
         loop {
             match self.try_send(value) {
                 Ok(()) => return Ok(()),
@@ -412,6 +417,30 @@ impl<T> Sender<T> {
     #[inline]
     pub fn capacity(&self) -> usize {
         self.producer.capacity()
+    }
+
+    /// Return whether the receiver has been dropped.
+    #[inline]
+    pub fn is_disconnected(&self) -> bool {
+        !self.shared.receiver_alive.load(Ordering::Acquire)
+    }
+
+    /// Return a snapshot of the number of live senders.
+    #[inline]
+    pub fn sender_count(&self) -> usize {
+        self.shared.live_senders.load(Ordering::Relaxed)
+    }
+
+    /// Return a snapshot of the number of live receivers.
+    #[inline]
+    pub fn receiver_count(&self) -> usize {
+        usize::from(self.shared.receiver_alive.load(Ordering::Relaxed))
+    }
+
+    /// Return whether both senders belong to the same channel.
+    #[inline]
+    pub fn same_channel(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
     }
 }
 
@@ -570,7 +599,12 @@ impl<T> Receiver<T> {
                 .recv()
                 .map_err(|RecvError| RecvTimeoutError::Disconnected);
         };
+        self.recv_deadline(deadline)
+    }
 
+    /// Receive one value, blocking until `deadline` while the channel is
+    /// empty.
+    pub fn recv_deadline(&mut self, deadline: Instant) -> Result<T, RecvTimeoutError> {
         loop {
             match self.try_recv() {
                 Ok(value) => return Ok(value),
@@ -762,6 +796,36 @@ impl<T> Receiver<T> {
     pub fn capacity_per_sender(&self) -> usize {
         self.capacity_per_sender
     }
+
+    /// Return a snapshot of the number of live senders.
+    #[inline]
+    pub fn sender_count(&self) -> usize {
+        self.shared.live_senders.load(Ordering::Relaxed)
+    }
+
+    /// Return a snapshot of the number of live receivers.
+    #[inline]
+    pub fn receiver_count(&self) -> usize {
+        usize::from(self.shared.receiver_alive.load(Ordering::Relaxed))
+    }
+
+    /// Return whether both receivers belong to the same channel.
+    #[inline]
+    pub fn same_channel(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
+    /// Iterate until every sender disconnects and buffered values are drained.
+    #[inline]
+    pub fn iter(&mut self) -> Iter<'_, T> {
+        Iter { receiver: self }
+    }
+
+    /// Iterate over values immediately available without blocking.
+    #[inline]
+    pub fn try_iter(&mut self) -> TryIter<'_, T> {
+        TryIter { receiver: self }
+    }
 }
 
 struct Lane<T> {
@@ -846,5 +910,74 @@ impl<T> fmt::Debug for Receiver<T> {
             )
             .field("capacity_per_sender", &self.capacity_per_sender())
             .finish_non_exhaustive()
+    }
+}
+
+/// Blocking iterator over a borrowed receiver.
+#[derive(Debug)]
+pub struct Iter<'a, T> {
+    receiver: &'a mut Receiver<T>,
+}
+
+impl<T> Iterator for Iter<'_, T> {
+    type Item = T;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.receiver.recv().ok()
+    }
+}
+
+impl<T> std::iter::FusedIterator for Iter<'_, T> {}
+
+/// Nonblocking iterator over a borrowed receiver.
+#[derive(Debug)]
+pub struct TryIter<'a, T> {
+    receiver: &'a mut Receiver<T>,
+}
+
+impl<T> Iterator for TryIter<'_, T> {
+    type Item = T;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.receiver.try_recv().ok()
+    }
+}
+
+/// Blocking iterator that owns its receiver.
+#[derive(Debug)]
+pub struct IntoIter<T> {
+    receiver: Receiver<T>,
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.receiver.recv().ok()
+    }
+}
+
+impl<T> std::iter::FusedIterator for IntoIter<T> {}
+
+impl<'a, T> IntoIterator for &'a mut Receiver<T> {
+    type Item = T;
+    type IntoIter = Iter<'a, T>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<T> IntoIterator for Receiver<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter { receiver: self }
     }
 }
