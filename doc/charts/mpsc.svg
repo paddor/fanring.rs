@@ -4,7 +4,7 @@
 fanring MPSC comparison
 </text>
 <text x="512" y="35" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#9CA3AF">
-Intel Core i7-8700B; capacity 8192 items
+Intel Core i7-8700B; try operations; capacity 8192 items
 </text>
 <text x="539" y="83" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E5E7EB">
 u64 (8 B)
@@ -38,44 +38,44 @@ producer threads
 0
 </text>
 <text x="67" y="227" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-50
+20
 </text>
 <text x="67" y="184" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-100
+40
 </text>
 <text x="67" y="141" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-150
+60
 </text>
 <text x="67" y="98" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-200
+80
 </text>
 <text x="12" y="84" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 M items/s
 </text>
-<rect x="106" y="199" width="24" height="70" opacity="1" fill="#FACC15" stroke="none"/>
-<rect x="337" y="140" width="24" height="129" opacity="1" fill="#FACC15" stroke="none"/>
-<rect x="569" y="169" width="23" height="100" opacity="1" fill="#FACC15" stroke="none"/>
-<rect x="800" y="187" width="24" height="82" opacity="1" fill="#FACC15" stroke="none"/>
-<rect x="135" y="250" width="24" height="19" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="367" y="239" width="23" height="30" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="598" y="247" width="24" height="22" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="829" y="253" width="24" height="16" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="165" y="250" width="23" height="19" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="396" y="260" width="24" height="9" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="627" y="262" width="24" height="7" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="858" y="263" width="24" height="6" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="194" y="249" width="24" height="20" opacity="1" fill="#FB923C" stroke="none"/>
-<rect x="425" y="262" width="24" height="7" opacity="1" fill="#FB923C" stroke="none"/>
-<rect x="656" y="263" width="24" height="6" opacity="1" fill="#FB923C" stroke="none"/>
-<rect x="888" y="263" width="23" height="6" opacity="1" fill="#FB923C" stroke="none"/>
-<rect x="223" y="262" width="24" height="7" opacity="1" fill="#A78BFA" stroke="none"/>
-<rect x="454" y="263" width="24" height="6" opacity="1" fill="#A78BFA" stroke="none"/>
-<rect x="686" y="265" width="23" height="4" opacity="1" fill="#A78BFA" stroke="none"/>
-<rect x="917" y="266" width="24" height="3" opacity="1" fill="#A78BFA" stroke="none"/>
-<rect x="252" y="268" width="24" height="1" opacity="1" fill="#34D399" stroke="none"/>
-<rect x="484" y="268" width="23" height="1" opacity="1" fill="#34D399" stroke="none"/>
-<rect x="715" y="268" width="24" height="1" opacity="1" fill="#34D399" stroke="none"/>
-<rect x="946" y="268" width="24" height="1" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="106" y="115" width="24" height="154" opacity="1" fill="#FACC15" stroke="none"/>
+<rect x="337" y="118" width="24" height="151" opacity="1" fill="#FACC15" stroke="none"/>
+<rect x="569" y="131" width="23" height="138" opacity="1" fill="#FACC15" stroke="none"/>
+<rect x="800" y="121" width="24" height="148" opacity="1" fill="#FACC15" stroke="none"/>
+<rect x="135" y="225" width="24" height="44" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="367" y="216" width="23" height="53" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="598" y="225" width="24" height="44" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="829" y="241" width="24" height="28" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="165" y="201" width="23" height="68" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="396" y="245" width="24" height="24" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="627" y="252" width="24" height="17" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="858" y="254" width="24" height="15" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="194" y="219" width="24" height="50" opacity="1" fill="#FB923C" stroke="none"/>
+<rect x="425" y="251" width="24" height="18" opacity="1" fill="#FB923C" stroke="none"/>
+<rect x="656" y="254" width="24" height="15" opacity="1" fill="#FB923C" stroke="none"/>
+<rect x="888" y="257" width="23" height="12" opacity="1" fill="#FB923C" stroke="none"/>
+<rect x="223" y="254" width="24" height="15" opacity="1" fill="#A78BFA" stroke="none"/>
+<rect x="454" y="257" width="24" height="12" opacity="1" fill="#A78BFA" stroke="none"/>
+<rect x="686" y="260" width="23" height="9" opacity="1" fill="#A78BFA" stroke="none"/>
+<rect x="917" y="265" width="24" height="4" opacity="1" fill="#A78BFA" stroke="none"/>
+<rect x="252" y="266" width="24" height="3" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="484" y="265" width="23" height="4" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="715" y="262" width="24" height="7" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="946" y="265" width="24" height="4" opacity="1" fill="#34D399" stroke="none"/>
 <text x="539" y="333" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E5E7EB">
 bytes64 (64 B)
 </text>
@@ -85,10 +85,11 @@ bytes64 (64 B)
 <line opacity="1" stroke="#374151" stroke-width="1" x1="769" y1="519" x2="769" y2="348"/>
 <line opacity="1" stroke="#374151" stroke-width="1" x1="1001" y1="519" x2="1001" y2="348"/>
 <line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="519" x2="1001" y2="519"/>
-<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="485" x2="1001" y2="485"/>
-<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="451" x2="1001" y2="451"/>
-<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="417" x2="1001" y2="417"/>
-<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="383" x2="1001" y2="383"/>
+<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="491" x2="1001" y2="491"/>
+<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="462" x2="1001" y2="462"/>
+<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="434" x2="1001" y2="434"/>
+<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="405" x2="1001" y2="405"/>
+<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="377" x2="1001" y2="377"/>
 <line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="348" x2="1001" y2="348"/>
 <text x="191" y="536" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 1
@@ -108,48 +109,51 @@ producer threads
 <text x="67" y="519" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 0
 </text>
-<text x="67" y="485" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+<text x="67" y="491" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+10
+</text>
+<text x="67" y="462" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 20
 </text>
-<text x="67" y="451" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+<text x="67" y="434" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+30
+</text>
+<text x="67" y="405" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 40
 </text>
-<text x="67" y="417" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-60
-</text>
-<text x="67" y="383" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-80
+<text x="67" y="377" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+50
 </text>
 <text x="67" y="348" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-100
+60
 </text>
 <text x="12" y="334" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 M items/s
 </text>
-<rect x="106" y="372" width="24" height="147" opacity="1" fill="#FACC15" stroke="none"/>
-<rect x="337" y="387" width="24" height="132" opacity="1" fill="#FACC15" stroke="none"/>
-<rect x="569" y="395" width="23" height="124" opacity="1" fill="#FACC15" stroke="none"/>
-<rect x="800" y="422" width="24" height="97" opacity="1" fill="#FACC15" stroke="none"/>
-<rect x="135" y="428" width="24" height="91" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="367" y="442" width="23" height="77" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="598" y="499" width="24" height="20" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="829" y="498" width="24" height="21" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="165" y="421" width="23" height="98" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="396" y="497" width="24" height="22" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="627" y="505" width="24" height="14" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="858" y="506" width="24" height="13" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="194" y="467" width="24" height="52" opacity="1" fill="#FB923C" stroke="none"/>
-<rect x="425" y="506" width="24" height="13" opacity="1" fill="#FB923C" stroke="none"/>
-<rect x="656" y="506" width="24" height="13" opacity="1" fill="#FB923C" stroke="none"/>
-<rect x="888" y="506" width="23" height="13" opacity="1" fill="#FB923C" stroke="none"/>
-<rect x="223" y="507" width="24" height="12" opacity="1" fill="#A78BFA" stroke="none"/>
-<rect x="454" y="509" width="24" height="10" opacity="1" fill="#A78BFA" stroke="none"/>
-<rect x="686" y="512" width="23" height="7" opacity="1" fill="#A78BFA" stroke="none"/>
-<rect x="917" y="513" width="24" height="6" opacity="1" fill="#A78BFA" stroke="none"/>
-<rect x="252" y="514" width="24" height="5" opacity="1" fill="#34D399" stroke="none"/>
-<rect x="484" y="512" width="23" height="7" opacity="1" fill="#34D399" stroke="none"/>
-<rect x="715" y="516" width="24" height="3" opacity="1" fill="#34D399" stroke="none"/>
-<rect x="946" y="515" width="24" height="4" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="106" y="411" width="24" height="108" opacity="1" fill="#FACC15" stroke="none"/>
+<rect x="337" y="414" width="24" height="105" opacity="1" fill="#FACC15" stroke="none"/>
+<rect x="569" y="463" width="23" height="56" opacity="1" fill="#FACC15" stroke="none"/>
+<rect x="800" y="416" width="24" height="103" opacity="1" fill="#FACC15" stroke="none"/>
+<rect x="135" y="396" width="24" height="123" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="367" y="424" width="23" height="95" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="598" y="490" width="24" height="29" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="829" y="493" width="24" height="26" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="165" y="357" width="23" height="162" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="396" y="485" width="24" height="34" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="627" y="496" width="24" height="23" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="858" y="500" width="24" height="19" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="194" y="436" width="24" height="83" opacity="1" fill="#FB923C" stroke="none"/>
+<rect x="425" y="497" width="24" height="22" opacity="1" fill="#FB923C" stroke="none"/>
+<rect x="656" y="497" width="24" height="22" opacity="1" fill="#FB923C" stroke="none"/>
+<rect x="888" y="500" width="23" height="19" opacity="1" fill="#FB923C" stroke="none"/>
+<rect x="223" y="502" width="24" height="17" opacity="1" fill="#A78BFA" stroke="none"/>
+<rect x="454" y="507" width="24" height="12" opacity="1" fill="#A78BFA" stroke="none"/>
+<rect x="686" y="511" width="23" height="8" opacity="1" fill="#A78BFA" stroke="none"/>
+<rect x="917" y="516" width="24" height="3" opacity="1" fill="#A78BFA" stroke="none"/>
+<rect x="252" y="501" width="24" height="18" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="484" y="503" width="23" height="16" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="715" y="515" width="24" height="4" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="946" y="514" width="24" height="5" opacity="1" fill="#34D399" stroke="none"/>
 <text x="539" y="583" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E5E7EB">
 bytes256 (256 B)
 </text>
@@ -159,9 +163,11 @@ bytes256 (256 B)
 <line opacity="1" stroke="#374151" stroke-width="1" x1="769" y1="769" x2="769" y2="598"/>
 <line opacity="1" stroke="#374151" stroke-width="1" x1="1001" y1="769" x2="1001" y2="598"/>
 <line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="769" x2="1001" y2="769"/>
-<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="727" x2="1001" y2="727"/>
+<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="741" x2="1001" y2="741"/>
+<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="712" x2="1001" y2="712"/>
 <line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="684" x2="1001" y2="684"/>
-<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="641" x2="1001" y2="641"/>
+<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="655" x2="1001" y2="655"/>
+<line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="627" x2="1001" y2="627"/>
 <line opacity="1" stroke="#374151" stroke-width="1" x1="76" y1="598" x2="1001" y2="598"/>
 <text x="191" y="786" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 1
@@ -181,45 +187,51 @@ producer threads
 <text x="67" y="769" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 0
 </text>
-<text x="67" y="727" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+<text x="67" y="741" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+5
+</text>
+<text x="67" y="712" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 10
 </text>
 <text x="67" y="684" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+15
+</text>
+<text x="67" y="655" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 20
 </text>
-<text x="67" y="641" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-30
+<text x="67" y="627" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+25
 </text>
 <text x="67" y="598" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-40
+30
 </text>
 <text x="12" y="584" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 M items/s
 </text>
-<rect x="106" y="609" width="24" height="160" opacity="1" fill="#FACC15" stroke="none"/>
-<rect x="337" y="618" width="24" height="151" opacity="1" fill="#FACC15" stroke="none"/>
-<rect x="569" y="626" width="23" height="143" opacity="1" fill="#FACC15" stroke="none"/>
-<rect x="800" y="628" width="24" height="141" opacity="1" fill="#FACC15" stroke="none"/>
-<rect x="135" y="657" width="24" height="112" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="367" y="711" width="23" height="58" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="598" y="731" width="24" height="38" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="829" y="732" width="24" height="37" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="165" y="626" width="23" height="143" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="396" y="727" width="24" height="42" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="627" y="734" width="24" height="35" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="858" y="736" width="24" height="33" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="194" y="673" width="24" height="96" opacity="1" fill="#FB923C" stroke="none"/>
-<rect x="425" y="740" width="24" height="29" opacity="1" fill="#FB923C" stroke="none"/>
-<rect x="656" y="736" width="24" height="33" opacity="1" fill="#FB923C" stroke="none"/>
-<rect x="888" y="737" width="23" height="32" opacity="1" fill="#FB923C" stroke="none"/>
-<rect x="223" y="748" width="24" height="21" opacity="1" fill="#A78BFA" stroke="none"/>
+<rect x="106" y="638" width="24" height="131" opacity="1" fill="#FACC15" stroke="none"/>
+<rect x="337" y="668" width="24" height="101" opacity="1" fill="#FACC15" stroke="none"/>
+<rect x="569" y="628" width="23" height="141" opacity="1" fill="#FACC15" stroke="none"/>
+<rect x="800" y="634" width="24" height="135" opacity="1" fill="#FACC15" stroke="none"/>
+<rect x="135" y="608" width="24" height="161" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="367" y="651" width="23" height="118" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="598" y="716" width="24" height="53" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="829" y="718" width="24" height="51" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="165" y="613" width="23" height="156" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="396" y="706" width="24" height="63" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="627" y="723" width="24" height="46" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="858" y="731" width="24" height="38" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="194" y="660" width="24" height="109" opacity="1" fill="#FB923C" stroke="none"/>
+<rect x="425" y="735" width="24" height="34" opacity="1" fill="#FB923C" stroke="none"/>
+<rect x="656" y="724" width="24" height="45" opacity="1" fill="#FB923C" stroke="none"/>
+<rect x="888" y="743" width="23" height="26" opacity="1" fill="#FB923C" stroke="none"/>
+<rect x="223" y="746" width="24" height="23" opacity="1" fill="#A78BFA" stroke="none"/>
 <rect x="454" y="752" width="24" height="17" opacity="1" fill="#A78BFA" stroke="none"/>
 <rect x="686" y="757" width="23" height="12" opacity="1" fill="#A78BFA" stroke="none"/>
-<rect x="917" y="760" width="24" height="9" opacity="1" fill="#A78BFA" stroke="none"/>
-<rect x="252" y="762" width="24" height="7" opacity="1" fill="#34D399" stroke="none"/>
-<rect x="484" y="768" width="23" height="1" opacity="1" fill="#34D399" stroke="none"/>
-<rect x="715" y="760" width="24" height="9" opacity="1" fill="#34D399" stroke="none"/>
-<rect x="946" y="764" width="24" height="5" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="917" y="764" width="24" height="5" opacity="1" fill="#A78BFA" stroke="none"/>
+<rect x="252" y="732" width="24" height="37" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="484" y="756" width="23" height="13" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="715" y="757" width="24" height="12" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="946" y="755" width="24" height="14" opacity="1" fill="#34D399" stroke="none"/>
 <text x="46" y="808" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#9CA3AF">
 legend
 </text>

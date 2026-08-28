@@ -19,6 +19,7 @@ type ChartResult<T> = Result<T, ChartError>;
 
 const SERIES: &[(&str, &str, RGBColor)] = &[
     ("fanring", "fanring", RGBColor(250, 204, 21)),
+    ("fanring-mpmc", "fanring", RGBColor(250, 204, 21)),
     (
         "crossbeam-channel",
         "crossbeam-channel",
@@ -39,10 +40,14 @@ struct Row {
     run_id: String,
     #[serde(default = "unknown_cpu")]
     cpu: String,
+    #[serde(default = "default_mode")]
+    mode: String,
     implementation: String,
     payload: String,
     payload_bytes: usize,
     producers: usize,
+    #[serde(default)]
+    consumers: Option<usize>,
     total_capacity: usize,
     #[serde(alias = "msgs_per_sec")]
     items_per_sec: f64,
@@ -189,14 +194,25 @@ fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
         .collect();
     payloads.sort_by_key(|(_, bytes)| *bytes);
     let payloads: Vec<String> = payloads.into_iter().map(|(payload, _)| payload).collect();
-    let producers: Vec<usize> = rows
+    let is_mpmc = rows.iter().any(|row| row.consumers.is_some());
+    let topologies: Vec<(usize, usize)> = rows
         .iter()
-        .map(|row| row.producers)
+        .map(|row| (row.producers, row.consumers.unwrap_or(0)))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    let topology_labels = topologies
+        .iter()
+        .map(|(producers, consumers)| {
+            if is_mpmc {
+                format!("{producers}/{consumers}")
+            } else {
+                producers.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
 
-    let width = 1024;
+    let width = if is_mpmc { 1440 } else { 1024 };
     let panel_h = 250;
     let header_h = 56;
     let legend_h = 74;
@@ -215,7 +231,11 @@ fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
         .pos(Pos::new(HPos::Center, VPos::Center));
 
     root.draw(&Text::new(
-        "fanring MPSC comparison",
+        if is_mpmc {
+            "fanring MPMC comparison"
+        } else {
+            "fanring MPSC comparison"
+        },
         (width as i32 / 2, 17),
         title_style,
     ))
@@ -239,7 +259,7 @@ fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
             .fold(0.0_f64, f64::max)
             .max(1.0);
         let (y_max, y_ticks) = nice_axis(y_raw, 5);
-        let x_max = producers.len().max(1) as f64;
+        let x_max = topologies.len().max(1) as f64;
         let present_series: Vec<(&str, &str, RGBColor)> = SERIES
             .iter()
             .copied()
@@ -260,7 +280,7 @@ fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
 
         chart
             .configure_mesh()
-            .x_labels(producers.len() + 1)
+            .x_labels(topologies.len() + 1)
             .y_labels(y_ticks + 1)
             .light_line_style(TRANSPARENT)
             .bold_line_style(GRID_COLOR)
@@ -271,24 +291,39 @@ fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
             .draw()
             .chart()?;
 
-        draw_axis_labels(area, &producers, y_max, y_ticks)?;
+        draw_axis_labels(
+            area,
+            &topology_labels,
+            if is_mpmc {
+                "producer / consumer threads"
+            } else {
+                "producer threads"
+            },
+            y_max,
+            y_ticks,
+        )?;
 
         let group_pad = 0.12;
         let inner_gap = 0.012;
         let slot_width = (1.0 - group_pad * 2.0) / present_series.len().max(1) as f64;
 
         for (series_index, (key, _, color)) in present_series.iter().enumerate() {
-            let by_producer: BTreeMap<usize, f64> = payload_rows
+            let by_topology: BTreeMap<(usize, usize), f64> = payload_rows
                 .iter()
                 .filter(|row| row.implementation == *key)
-                .map(|row| (row.producers, row.items_per_sec / 1_000_000.0))
+                .map(|row| {
+                    (
+                        (row.producers, row.consumers.unwrap_or(0)),
+                        row.items_per_sec / 1_000_000.0,
+                    )
+                })
                 .collect();
 
-            let bars = producers
+            let bars = topologies
                 .iter()
                 .enumerate()
-                .filter_map(|(group_index, producer)| {
-                    by_producer.get(producer).map(|value| {
+                .filter_map(|(group_index, topology)| {
+                    by_topology.get(topology).map(|value| {
                         let x0 = group_index as f64
                             + group_pad
                             + series_index as f64 * slot_width
@@ -310,7 +345,8 @@ fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
 
 fn draw_axis_labels(
     area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
-    producers: &[usize],
+    labels: &[String],
+    x_axis_title: &str,
     y_max: f64,
     y_ticks: usize,
 ) -> ChartResult<()> {
@@ -338,19 +374,19 @@ fn draw_axis_labels(
     let plot_bottom = 213;
     let plot_w = plot_right - plot_left;
     let plot_h = plot_bottom - plot_top;
-    let x_count = producers.len().max(1);
+    let x_count = labels.len().max(1);
 
-    for (i, producer) in producers.iter().enumerate() {
+    for (i, label) in labels.iter().enumerate() {
         let x = plot_left + plot_w * (2 * i + 1) as i32 / (2 * x_count) as i32;
         area.draw(&Text::new(
-            producer.to_string(),
+            label.as_str(),
             (x, plot_bottom + 17),
             tick_style.clone(),
         ))
         .chart()?;
     }
     area.draw(&Text::new(
-        "producer threads",
+        x_axis_title,
         ((plot_left + plot_right) / 2, plot_bottom + 34),
         axis_style,
     ))
@@ -385,8 +421,9 @@ fn chart_subtitle(rows: &[Row]) -> String {
     };
 
     format!(
-        "{}; capacity {} items",
+        "{}; {} operations; capacity {} items",
         simplify_cpu_name(&row.cpu),
+        row.mode,
         row.total_capacity
     )
 }
@@ -403,6 +440,10 @@ fn simplify_cpu_name(cpu: &str) -> String {
 
 fn unknown_cpu() -> String {
     "unknown CPU".to_string()
+}
+
+fn default_mode() -> String {
+    "try".to_string()
 }
 
 fn draw_legend(
