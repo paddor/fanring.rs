@@ -6,9 +6,15 @@ Sender registration is dynamic. Each sender writes to its own ring, so
 producers do not contend on a shared queue tail. Choose `mpsc` for one consumer
 or `mpmc` for cloneable competing consumers.
 
-![MPSC benchmark chart](doc/charts/mpsc.svg)
+## Performance
 
-![MPMC benchmark chart](doc/charts/mpmc.svg)
+#### MPSC
+
+![MPSC benchmark chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/mpsc.svg)
+
+#### MPMC
+
+![MPMC benchmark chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/mpmc.svg)
 
 ## MPSC
 

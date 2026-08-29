@@ -11,28 +11,19 @@ use serde::Deserialize;
 
 const BACKGROUND_COLOR: RGBColor = RGBColor(0, 0, 0);
 const GRID_COLOR: RGBColor = RGBColor(55, 65, 81);
-const AXIS_COLOR: RGBColor = RGBColor(156, 163, 175);
 const TEXT_COLOR: RGBColor = RGBColor(229, 231, 235);
 const MUTED_TEXT_COLOR: RGBColor = RGBColor(156, 163, 175);
 
 type ChartResult<T> = Result<T, ChartError>;
 
-const SERIES: &[(&str, &str, RGBColor)] = &[
-    ("fanring", "fanring", RGBColor(250, 204, 21)),
-    ("fanring-mpmc", "fanring", RGBColor(250, 204, 21)),
-    (
-        "crossbeam-channel",
-        "crossbeam-channel",
-        RGBColor(96, 165, 250),
-    ),
-    (
-        "concurrent-queue",
-        "concurrent-queue",
-        RGBColor(248, 113, 113),
-    ),
-    ("thingbuf", "thingbuf", RGBColor(251, 146, 60)),
-    ("flume", "flume", RGBColor(167, 139, 250)),
-    ("kanal", "kanal", RGBColor(52, 211, 153)),
+const SERIES: &[(&str, &str)] = &[
+    ("fanring", "fanring"),
+    ("fanring-mpmc", "fanring"),
+    ("crossbeam-channel", "crossbeam-channel"),
+    ("concurrent-queue", "concurrent-queue"),
+    ("thingbuf", "thingbuf"),
+    ("flume", "flume"),
+    ("kanal", "kanal"),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -195,28 +186,10 @@ fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
     payloads.sort_by_key(|(_, bytes)| *bytes);
     let payloads: Vec<String> = payloads.into_iter().map(|(payload, _)| payload).collect();
     let is_mpmc = rows.iter().any(|row| row.consumers.is_some());
-    let topologies: Vec<(usize, usize)> = rows
-        .iter()
-        .map(|row| (row.producers, row.consumers.unwrap_or(0)))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let topology_labels = topologies
-        .iter()
-        .map(|(producers, consumers)| {
-            if is_mpmc {
-                format!("{producers}/{consumers}")
-            } else {
-                producers.to_string()
-            }
-        })
-        .collect::<Vec<_>>();
-
     let width = if is_mpmc { 1440 } else { 1024 };
-    let panel_h = 250;
-    let header_h = 56;
-    let legend_h = 74;
-    let total_h = header_h + panel_h * payloads.len() as u32 + legend_h;
+    let section_h = 236;
+    let header_h = 58;
+    let total_h = header_h + section_h * payloads.len() as u32;
 
     let root = SVGBackend::new(output, (width, total_h)).into_drawing_area();
     root.fill(&BACKGROUND_COLOR).chart()?;
@@ -247,164 +220,372 @@ fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
     ))
     .chart()?;
 
-    let (_, body) = root.split_vertically(header_h);
-    let (chart_area, legend_area) = body.split_vertically(panel_h * payloads.len() as u32);
-    let panels = chart_area.split_evenly((payloads.len(), 1));
-
-    for (area, payload) in panels.iter().zip(payloads.iter()) {
+    for (index, payload) in payloads.iter().enumerate() {
         let payload_rows: Vec<&Row> = rows.iter().filter(|row| &row.payload == payload).collect();
-        let y_raw = payload_rows
+        let raw_max = payload_rows
             .iter()
             .map(|row| row.items_per_sec / 1_000_000.0)
             .fold(0.0_f64, f64::max)
             .max(1.0);
-        let (y_max, y_ticks) = nice_axis(y_raw, 5);
-        let x_max = topologies.len().max(1) as f64;
-        let present_series: Vec<(&str, &str, RGBColor)> = SERIES
-            .iter()
-            .copied()
-            .filter(|(key, _, _)| payload_rows.iter().any(|row| row.implementation == *key))
-            .collect();
+        let scale_max = nice_axis(raw_max, 5).0;
+        let section_y = header_h as i32 + index as i32 * section_h as i32;
 
-        let mut chart = ChartBuilder::on(area)
-            .margin_top(22)
-            .margin_bottom(36)
-            .margin_left(76)
-            .margin_right(22)
-            .caption(
-                payload_title(&payload_rows),
-                ("sans-serif", 12).into_font().color(&TEXT_COLOR),
-            )
-            .build_cartesian_2d(0.0..x_max, 0.0..y_max)
-            .chart()?;
-
-        chart
-            .configure_mesh()
-            .x_labels(topologies.len() + 1)
-            .y_labels(y_ticks + 1)
-            .light_line_style(TRANSPARENT)
-            .bold_line_style(GRID_COLOR)
-            .axis_style(AXIS_COLOR)
-            .label_style(("sans-serif", 0).into_font().color(&TEXT_COLOR))
-            .x_label_formatter(&|_| String::new())
-            .y_label_formatter(&|y| fmt_mmsgs(*y))
-            .draw()
-            .chart()?;
-
-        draw_axis_labels(
-            area,
-            &topology_labels,
-            if is_mpmc {
-                "producer / consumer threads"
-            } else {
-                "producer threads"
-            },
-            y_max,
-            y_ticks,
-        )?;
-
-        let group_pad = 0.12;
-        let inner_gap = 0.012;
-        let slot_width = (1.0 - group_pad * 2.0) / present_series.len().max(1) as f64;
-
-        for (series_index, (key, _, color)) in present_series.iter().enumerate() {
-            let by_topology: BTreeMap<(usize, usize), f64> = payload_rows
-                .iter()
-                .filter(|row| row.implementation == *key)
-                .map(|row| {
-                    (
-                        (row.producers, row.consumers.unwrap_or(0)),
-                        row.items_per_sec / 1_000_000.0,
-                    )
-                })
-                .collect();
-
-            let bars = topologies
-                .iter()
-                .enumerate()
-                .filter_map(|(group_index, topology)| {
-                    by_topology.get(topology).map(|value| {
-                        let x0 = group_index as f64
-                            + group_pad
-                            + series_index as f64 * slot_width
-                            + inner_gap;
-                        let x1 =
-                            group_index as f64 + group_pad + (series_index + 1) as f64 * slot_width
-                                - inner_gap;
-                        Rectangle::new([(x0, 0.0), (x1, *value)], color.filled())
-                    })
-                });
-
-            chart.draw_series(bars).chart()?;
+        if is_mpmc {
+            draw_mpmc_heatmap(&root, &payload_rows, section_y, width as i32, scale_max)?;
+        } else {
+            draw_mpsc_heatmap(&root, &payload_rows, section_y, width as i32, scale_max)?;
         }
     }
 
-    draw_legend(&legend_area, rows)?;
+    root.present().chart()?;
     Ok(())
 }
 
-fn draw_axis_labels(
+fn draw_mpsc_heatmap(
     area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
-    labels: &[String],
-    x_axis_title: &str,
-    y_max: f64,
-    y_ticks: usize,
+    rows: &[&Row],
+    y: i32,
+    width: i32,
+    scale_max: f64,
 ) -> ChartResult<()> {
-    let tick_style = ("sans-serif", 11)
-        .into_font()
-        .color(&TEXT_COLOR)
-        .pos(Pos::new(HPos::Center, VPos::Center));
-    let right_tick_style = ("sans-serif", 11)
-        .into_font()
-        .color(&TEXT_COLOR)
-        .pos(Pos::new(HPos::Right, VPos::Center));
-    let axis_style = ("sans-serif", 11)
-        .into_font()
-        .color(&MUTED_TEXT_COLOR)
-        .pos(Pos::new(HPos::Center, VPos::Center));
-    let y_axis_style = ("sans-serif", 11)
-        .into_font()
-        .color(&MUTED_TEXT_COLOR)
-        .pos(Pos::new(HPos::Left, VPos::Center));
+    let series = present_series(rows);
+    let producers: Vec<usize> = rows
+        .iter()
+        .map(|row| row.producers)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let values = values_by_series(rows);
+    let winners = winners_by_topology(rows);
+    let table_left = 184;
+    let table_right = 24;
+    let cell_width = (width - table_left - table_right) / producers.len().max(1) as i32;
+    let row_height = 25;
+    let rows_top = y + 68;
 
-    let width = area.dim_in_pixel().0 as i32;
-    let plot_left = 76;
-    let plot_right = width - 23;
-    let plot_top = 42;
-    let plot_bottom = 213;
-    let plot_w = plot_right - plot_left;
-    let plot_h = plot_bottom - plot_top;
-    let x_count = labels.len().max(1);
+    draw_section_title(area, rows, y, scale_max, "")?;
+    draw_text(
+        area,
+        "implementation",
+        (28, y + 46),
+        label_style(MUTED_TEXT_COLOR, HPos::Left),
+    )?;
+    draw_text(
+        area,
+        "producer threads",
+        ((table_left + width - table_right) / 2, y + 38),
+        label_style(MUTED_TEXT_COLOR, HPos::Center),
+    )?;
 
-    for (i, label) in labels.iter().enumerate() {
-        let x = plot_left + plot_w * (2 * i + 1) as i32 / (2 * x_count) as i32;
-        area.draw(&Text::new(
-            label.as_str(),
-            (x, plot_bottom + 17),
-            tick_style.clone(),
-        ))
-        .chart()?;
+    for (column, producer) in producers.iter().enumerate() {
+        let x = table_left + column as i32 * cell_width;
+        draw_text(
+            area,
+            producer.to_string(),
+            (x + cell_width / 2, y + 56),
+            label_style(TEXT_COLOR, HPos::Center),
+        )?;
     }
-    area.draw(&Text::new(
-        x_axis_title,
-        ((plot_left + plot_right) / 2, plot_bottom + 34),
-        axis_style,
-    ))
-    .chart()?;
 
-    for tick in 0..=y_ticks {
-        let y = plot_bottom - plot_h * tick as i32 / y_ticks.max(1) as i32;
-        let value = y_max * tick as f64 / y_ticks.max(1) as f64;
-        area.draw(&Text::new(
-            fmt_mmsgs(value),
-            (plot_left - 9, y),
-            right_tick_style.clone(),
-        ))
-        .chart()?;
+    for (row_index, (key, label)) in series.iter().enumerate() {
+        let row_y = rows_top + row_index as i32 * row_height;
+        let color = if label == &"fanring" {
+            RGBColor(250, 204, 21)
+        } else {
+            TEXT_COLOR
+        };
+        draw_text(
+            area,
+            *label,
+            (28, row_y + row_height / 2),
+            label_style(color, HPos::Left),
+        )?;
+
+        for (column, producer) in producers.iter().enumerate() {
+            let topology = (*producer, 0);
+            let value = values.get(&(*key, topology)).copied();
+            let winner = value
+                .zip(winners.get(&topology).copied())
+                .is_some_and(|(value, best)| value >= best);
+            draw_heat_cell(
+                area,
+                table_left + column as i32 * cell_width,
+                row_y,
+                cell_width,
+                row_height,
+                value,
+                scale_max,
+                winner,
+            )?;
+        }
     }
-    area.draw(&Text::new("M items/s", (12, plot_top - 14), y_axis_style))
-        .chart()?;
+
+    draw_separator(area, y + 235, width)?;
     Ok(())
+}
+
+fn draw_mpmc_heatmap(
+    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    rows: &[&Row],
+    y: i32,
+    width: i32,
+    scale_max: f64,
+) -> ChartResult<()> {
+    let series = present_series(rows);
+    let producers: Vec<usize> = rows
+        .iter()
+        .map(|row| row.producers)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let consumers: Vec<usize> = rows
+        .iter()
+        .filter_map(|row| row.consumers)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let values = values_by_series(rows);
+    let winners = winners_by_topology(rows);
+    let table_left = 184;
+    let table_right = 24;
+    let group_gap = 8;
+    let topology_count = producers.len() * consumers.len();
+    let total_gaps = group_gap * producers.len().saturating_sub(1) as i32;
+    let cell_width = (width - table_left - table_right - total_gaps) / topology_count.max(1) as i32;
+    let row_height = 29;
+    let rows_top = y + 89;
+
+    draw_section_title(area, rows, y, scale_max, "")?;
+    draw_text(
+        area,
+        "producer threads",
+        (table_left - 12, y + 39),
+        label_style(MUTED_TEXT_COLOR, HPos::Right),
+    )?;
+    draw_text(
+        area,
+        "consumer threads",
+        (table_left - 12, y + 61),
+        label_style(MUTED_TEXT_COLOR, HPos::Right),
+    )?;
+    draw_text(
+        area,
+        "implementation",
+        (28, y + 78),
+        label_style(MUTED_TEXT_COLOR, HPos::Left),
+    )?;
+
+    for (producer_index, producer) in producers.iter().enumerate() {
+        let group_start =
+            table_left + producer_index as i32 * (consumers.len() as i32 * cell_width + group_gap);
+        let group_width = consumers.len() as i32 * cell_width;
+        draw_text(
+            area,
+            producer.to_string(),
+            (group_start + group_width / 2, y + 39),
+            label_style(TEXT_COLOR, HPos::Center),
+        )?;
+
+        for (consumer_index, consumer) in consumers.iter().enumerate() {
+            draw_text(
+                area,
+                consumer.to_string(),
+                (
+                    group_start + consumer_index as i32 * cell_width + cell_width / 2,
+                    y + 61,
+                ),
+                label_style(TEXT_COLOR, HPos::Center),
+            )?;
+        }
+    }
+
+    for (row_index, (key, label)) in series.iter().enumerate() {
+        let row_y = rows_top + row_index as i32 * row_height;
+        let color = if label == &"fanring" {
+            RGBColor(250, 204, 21)
+        } else {
+            TEXT_COLOR
+        };
+        draw_text(
+            area,
+            *label,
+            (28, row_y + row_height / 2),
+            label_style(color, HPos::Left),
+        )?;
+
+        for (producer_index, producer) in producers.iter().enumerate() {
+            let group_start = table_left
+                + producer_index as i32 * (consumers.len() as i32 * cell_width + group_gap);
+            for (consumer_index, consumer) in consumers.iter().enumerate() {
+                let topology = (*producer, *consumer);
+                let value = values.get(&(*key, topology)).copied();
+                let winner = value
+                    .zip(winners.get(&topology).copied())
+                    .is_some_and(|(value, best)| value >= best);
+                draw_heat_cell(
+                    area,
+                    group_start + consumer_index as i32 * cell_width,
+                    row_y,
+                    cell_width,
+                    row_height,
+                    value,
+                    scale_max,
+                    winner,
+                )?;
+            }
+        }
+    }
+
+    draw_separator(area, y + 235, width)?;
+    Ok(())
+}
+
+type SeriesValues<'a> = BTreeMap<(&'a str, (usize, usize)), f64>;
+
+fn values_by_series<'a>(rows: &[&'a Row]) -> SeriesValues<'a> {
+    rows.iter()
+        .map(|row| {
+            (
+                (
+                    row.implementation.as_str(),
+                    (row.producers, row.consumers.unwrap_or(0)),
+                ),
+                row.items_per_sec / 1_000_000.0,
+            )
+        })
+        .collect()
+}
+
+fn winners_by_topology(rows: &[&Row]) -> BTreeMap<(usize, usize), f64> {
+    let mut winners = BTreeMap::new();
+    for row in rows {
+        let topology = (row.producers, row.consumers.unwrap_or(0));
+        let value = row.items_per_sec / 1_000_000.0;
+        winners
+            .entry(topology)
+            .and_modify(|best: &mut f64| *best = best.max(value))
+            .or_insert(value);
+    }
+    winners
+}
+
+fn present_series(rows: &[&Row]) -> Vec<(&'static str, &'static str)> {
+    SERIES
+        .iter()
+        .copied()
+        .filter(|(key, _)| rows.iter().any(|row| row.implementation == *key))
+        .collect()
+}
+
+fn draw_section_title(
+    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    rows: &[&Row],
+    y: i32,
+    scale_max: f64,
+    suffix: &str,
+) -> ChartResult<()> {
+    let title = format!(
+        "{}; M items/s; darker to lighter = 0-{}{suffix}; white outline = winner",
+        payload_title(rows),
+        fmt_mmsgs(scale_max)
+    );
+    draw_text(
+        area,
+        title,
+        (area.dim_in_pixel().0 as i32 / 2, y + 15),
+        ("sans-serif", 11)
+            .into_font()
+            .color(&TEXT_COLOR)
+            .pos(Pos::new(HPos::Center, VPos::Center)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_heat_cell(
+    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    value: Option<f64>,
+    scale_max: f64,
+    winner: bool,
+) -> ChartResult<()> {
+    let x0 = x + 2;
+    let y0 = y + 2;
+    let x1 = x + width - 2;
+    let y1 = y + height - 2;
+    let intensity = value.map_or(0.0, |value| (value / scale_max).clamp(0.0, 1.0));
+    let fill = value.map_or(RGBColor(17, 24, 39), |_| heat_color(intensity));
+
+    area.draw(&Rectangle::new([(x0, y0), (x1, y1)], fill.filled()))
+        .chart()?;
+    if winner {
+        area.draw(&Rectangle::new(
+            [(x0, y0), (x1, y1)],
+            ShapeStyle::from(&TEXT_COLOR).stroke_width(2),
+        ))
+        .chart()?;
+    }
+
+    let text = value.map_or_else(|| "-".to_string(), |value| format!("{value:.1}"));
+    let text_color = if intensity >= 0.68 {
+        BACKGROUND_COLOR
+    } else {
+        TEXT_COLOR
+    };
+    draw_text(
+        area,
+        text,
+        ((x0 + x1) / 2, (y0 + y1) / 2),
+        ("sans-serif", 11)
+            .into_font()
+            .color(&text_color)
+            .pos(Pos::new(HPos::Center, VPos::Center)),
+    )
+}
+
+fn heat_color(intensity: f64) -> RGBColor {
+    const LOW: RGBColor = RGBColor(24, 32, 48);
+    const HIGH: RGBColor = RGBColor(96, 165, 250);
+    let mix = intensity.clamp(0.0, 1.0);
+    RGBColor(
+        lerp(LOW.0, HIGH.0, mix),
+        lerp(LOW.1, HIGH.1, mix),
+        lerp(LOW.2, HIGH.2, mix),
+    )
+}
+
+fn lerp(from: u8, to: u8, mix: f64) -> u8 {
+    (from as f64 + (to as f64 - from as f64) * mix).round() as u8
+}
+
+fn draw_text<T: std::borrow::Borrow<str>>(
+    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    text: T,
+    position: (i32, i32),
+    style: TextStyle<'_>,
+) -> ChartResult<()> {
+    area.draw(&Text::new(text, position, style)).chart()
+}
+
+fn label_style(color: RGBColor, horizontal: HPos) -> TextStyle<'static> {
+    ("sans-serif", 11)
+        .into_font()
+        .color(&color)
+        .pos(Pos::new(horizontal, VPos::Center))
+}
+
+fn draw_separator(
+    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    y: i32,
+    width: i32,
+) -> ChartResult<()> {
+    area.draw(&PathElement::new(
+        vec![(24, y), (width - 24, y)],
+        ShapeStyle::from(&GRID_COLOR).stroke_width(1),
+    ))
+    .chart()
 }
 
 fn payload_title(rows: &[&Row]) -> String {
@@ -444,36 +625,6 @@ fn unknown_cpu() -> String {
 
 fn default_mode() -> String {
     "try".to_string()
-}
-
-fn draw_legend(
-    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
-    rows: &[Row],
-) -> ChartResult<()> {
-    let present: Vec<(&str, &str, RGBColor)> = SERIES
-        .iter()
-        .copied()
-        .filter(|(key, _, _)| rows.iter().any(|row| row.implementation == *key))
-        .collect();
-
-    let label_style = ("sans-serif", 11).into_font().color(&TEXT_COLOR);
-    let dim_style = ("sans-serif", 10).into_font().color(&MUTED_TEXT_COLOR);
-
-    area.draw_text("legend", &dim_style, (46, 2)).chart()?;
-
-    for (i, (_, label, color)) in present.iter().enumerate() {
-        let col = i % 3;
-        let row = i / 3;
-        let x = 46 + col as i32 * 300;
-        let y = 22 + row as i32 * 21;
-        area.draw(&Rectangle::new(
-            [(x, y + 2), (x + 18, y + 14)],
-            color.filled(),
-        ))
-        .chart()?;
-        area.draw_text(label, &label_style, (x + 26, y)).chart()?;
-    }
-    Ok(())
 }
 
 fn fmt_mmsgs(v: f64) -> String {
