@@ -18,6 +18,12 @@ struct Config {
     duration: Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Try,
+    Blocking,
+}
+
 #[derive(Debug)]
 struct RunContext {
     run_id: String,
@@ -39,6 +45,7 @@ struct Filter {
 struct Row {
     run_id: String,
     cpu: String,
+    mode: &'static str,
     implementation: &'static str,
     payload: &'static str,
     payload_bytes: usize,
@@ -70,6 +77,7 @@ fn main() {
         .unwrap_or_else(|| PathBuf::from("target/fanring-bench/results.jsonl"));
     let payload_filter = Filter::from_env("FANRING_BENCH_PAYLOADS");
     let impl_filter = Filter::from_env("FANRING_BENCH_IMPLS");
+    let mode = Mode::from_env();
     let context = RunContext {
         run_id: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -90,7 +98,8 @@ fn main() {
     let mut out = BufWriter::new(file);
 
     println!(
-        "MPSC comparison ({:.2}s per config, capacity {} items, output {})\n",
+        "MPSC comparison ({}, {:.2}s per config, capacity {} items, output {})\n",
+        mode.label(),
         duration.as_secs_f64(),
         total_capacity(),
         out_path.display()
@@ -112,6 +121,7 @@ fn main() {
             &mut out,
             &configs,
             &impl_filter,
+            mode,
             Payload {
                 label: "u64",
                 value: 0u64,
@@ -124,6 +134,7 @@ fn main() {
             &mut out,
             &configs,
             &impl_filter,
+            mode,
             Payload {
                 label: "bytes64",
                 value: [0u64; 8],
@@ -136,6 +147,7 @@ fn main() {
             &mut out,
             &configs,
             &impl_filter,
+            mode,
             Payload {
                 label: "bytes256",
                 value: [0u64; 32],
@@ -151,6 +163,7 @@ fn run_payload<T>(
     out: &mut impl Write,
     configs: &[Config],
     impl_filter: &Filter,
+    mode: Mode,
     payload: Payload<T>,
 ) where
     T: Copy + Default + Send + Sync + 'static,
@@ -159,22 +172,22 @@ fn run_payload<T>(
     for config in configs {
         let mut rows = Vec::new();
         if impl_filter.matches("fanring") {
-            rows.push(bench_fanring(context, *config, payload));
+            rows.push(bench_fanring(context, *config, mode, payload));
         }
         if impl_filter.matches("crossbeam-channel") {
-            rows.push(bench_crossbeam_channel(context, *config, payload));
+            rows.push(bench_crossbeam_channel(context, *config, mode, payload));
         }
         if impl_filter.matches("flume") {
-            rows.push(bench_flume(context, *config, payload));
+            rows.push(bench_flume(context, *config, mode, payload));
         }
         if impl_filter.matches("kanal") {
-            rows.push(bench_kanal(context, *config, payload));
+            rows.push(bench_kanal(context, *config, mode, payload));
         }
-        if impl_filter.matches("concurrent-queue") {
-            rows.push(bench_concurrent_queue(context, *config, payload));
+        if mode == Mode::Try && impl_filter.matches("concurrent-queue") {
+            rows.push(bench_concurrent_queue(context, *config, mode, payload));
         }
         if impl_filter.matches("thingbuf") {
-            rows.push(bench_thingbuf(context, *config, payload));
+            rows.push(bench_thingbuf(context, *config, mode, payload));
         }
 
         println!(
@@ -196,12 +209,12 @@ fn run_payload<T>(
     }
 }
 
-fn bench_fanring<T>(context: &RunContext, config: Config, payload: Payload<T>) -> Row
+fn bench_fanring<T>(context: &RunContext, config: Config, mode: Mode, payload: Payload<T>) -> Row
 where
     T: Copy + Send + 'static,
 {
     let stop = Arc::new(AtomicBool::new(false));
-    let (tx0, mut rx) = fanring::channel::<T>(config.producers, config.capacity_per_sender);
+    let (tx0, mut rx) = fanring::mpsc::channel::<T>(config.capacity_per_sender);
     let mut senders = vec![tx0];
     for _ in 1..config.producers {
         let tx = senders[0].try_clone().expect("fanring sender slot");
@@ -214,8 +227,17 @@ where
         let value = payload.value;
         handles.push(thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                if let Err(fanring::SendError::Full(_)) = tx.try_send(value) {
-                    thread::yield_now();
+                match mode {
+                    Mode::Try => {
+                        if let Err(fanring::mpsc::TrySendError::Full(_)) = tx.try_send(value) {
+                            thread::yield_now();
+                        }
+                    }
+                    Mode::Blocking => {
+                        if tx.send(value).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         }));
@@ -227,31 +249,42 @@ where
     let mut polls = 0u64;
     while !reached_deadline(polls, deadline) {
         polls = polls.wrapping_add(1);
-        match rx.try_recv() {
-            Ok(value) => {
-                black_box(value);
-                messages += 1;
-            }
-            Err(fanring::RecvError::Empty | fanring::RecvError::Disconnected) => {
-                thread::yield_now();
-            }
+        match mode {
+            Mode::Try => match rx.try_recv() {
+                Ok(value) => {
+                    black_box(value);
+                    messages += 1;
+                }
+                Err(
+                    fanring::mpsc::TryRecvError::Empty | fanring::mpsc::TryRecvError::Disconnected,
+                ) => {
+                    thread::yield_now();
+                }
+            },
+            Mode::Blocking => match rx.recv() {
+                Ok(value) => {
+                    black_box(value);
+                    messages += 1;
+                }
+                Err(_) => break,
+            },
         }
     }
+    let elapsed = start.elapsed();
     stop.store(true, Ordering::Relaxed);
+    drop(rx);
     for handle in handles {
         handle.join().expect("fanring producer thread");
     }
-    row(
-        context,
-        "fanring",
-        payload,
-        config,
-        start.elapsed(),
-        messages,
-    )
+    row(context, "fanring", mode, payload, config, elapsed, messages)
 }
 
-fn bench_crossbeam_channel<T>(context: &RunContext, config: Config, payload: Payload<T>) -> Row
+fn bench_crossbeam_channel<T>(
+    context: &RunContext,
+    config: Config,
+    mode: Mode,
+    payload: Payload<T>,
+) -> Row
 where
     T: Copy + Send + 'static,
 {
@@ -265,8 +298,17 @@ where
         let value = payload.value;
         handles.push(thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                if tx.try_send(value).is_err() {
-                    thread::yield_now();
+                match mode {
+                    Mode::Try => {
+                        if tx.try_send(value).is_err() {
+                            thread::yield_now();
+                        }
+                    }
+                    Mode::Blocking => {
+                        if tx.send(value).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         }));
@@ -279,29 +321,37 @@ where
     let mut polls = 0u64;
     while !reached_deadline(polls, deadline) {
         polls = polls.wrapping_add(1);
-        match rx.try_recv() {
-            Ok(value) => {
-                black_box(value);
-                messages += 1;
-            }
-            Err(_) => thread::yield_now(),
+        let result = match mode {
+            Mode::Try => rx.try_recv().ok(),
+            Mode::Blocking => rx.recv().ok(),
+        };
+        if let Some(value) = result {
+            black_box(value);
+            messages += 1;
+        } else if mode == Mode::Try {
+            thread::yield_now();
+        } else {
+            break;
         }
     }
+    let elapsed = start.elapsed();
     stop.store(true, Ordering::Relaxed);
+    drop(rx);
     for handle in handles {
         handle.join().expect("crossbeam producer thread");
     }
     row(
         context,
         "crossbeam-channel",
+        mode,
         payload,
         config,
-        start.elapsed(),
+        elapsed,
         messages,
     )
 }
 
-fn bench_flume<T>(context: &RunContext, config: Config, payload: Payload<T>) -> Row
+fn bench_flume<T>(context: &RunContext, config: Config, mode: Mode, payload: Payload<T>) -> Row
 where
     T: Copy + Send + 'static,
 {
@@ -315,8 +365,17 @@ where
         let value = payload.value;
         handles.push(thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                if tx.try_send(value).is_err() {
-                    thread::yield_now();
+                match mode {
+                    Mode::Try => {
+                        if tx.try_send(value).is_err() {
+                            thread::yield_now();
+                        }
+                    }
+                    Mode::Blocking => {
+                        if tx.send(value).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         }));
@@ -329,22 +388,29 @@ where
     let mut polls = 0u64;
     while !reached_deadline(polls, deadline) {
         polls = polls.wrapping_add(1);
-        match rx.try_recv() {
-            Ok(value) => {
-                black_box(value);
-                messages += 1;
-            }
-            Err(_) => thread::yield_now(),
+        let result = match mode {
+            Mode::Try => rx.try_recv().ok(),
+            Mode::Blocking => rx.recv().ok(),
+        };
+        if let Some(value) = result {
+            black_box(value);
+            messages += 1;
+        } else if mode == Mode::Try {
+            thread::yield_now();
+        } else {
+            break;
         }
     }
+    let elapsed = start.elapsed();
     stop.store(true, Ordering::Relaxed);
+    drop(rx);
     for handle in handles {
         handle.join().expect("flume producer thread");
     }
-    row(context, "flume", payload, config, start.elapsed(), messages)
+    row(context, "flume", mode, payload, config, elapsed, messages)
 }
 
-fn bench_kanal<T>(context: &RunContext, config: Config, payload: Payload<T>) -> Row
+fn bench_kanal<T>(context: &RunContext, config: Config, mode: Mode, payload: Payload<T>) -> Row
 where
     T: Copy + Send + 'static,
 {
@@ -358,9 +424,16 @@ where
         let value = payload.value;
         handles.push(thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                match tx.try_send(value) {
-                    Ok(true) => {}
-                    Ok(false) | Err(_) => thread::yield_now(),
+                match mode {
+                    Mode::Try => match tx.try_send(value) {
+                        Ok(true) => {}
+                        Ok(false) | Err(_) => thread::yield_now(),
+                    },
+                    Mode::Blocking => {
+                        if tx.send(value).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         }));
@@ -373,22 +446,34 @@ where
     let mut polls = 0u64;
     while !reached_deadline(polls, deadline) {
         polls = polls.wrapping_add(1);
-        match rx.try_recv() {
-            Ok(Some(value)) => {
-                black_box(value);
-                messages += 1;
-            }
-            Ok(None) | Err(_) => thread::yield_now(),
+        let result = match mode {
+            Mode::Try => rx.try_recv().ok().flatten(),
+            Mode::Blocking => rx.recv().ok(),
+        };
+        if let Some(value) = result {
+            black_box(value);
+            messages += 1;
+        } else if mode == Mode::Try {
+            thread::yield_now();
+        } else {
+            break;
         }
     }
+    let elapsed = start.elapsed();
     stop.store(true, Ordering::Relaxed);
+    drop(rx);
     for handle in handles {
         handle.join().expect("kanal producer thread");
     }
-    row(context, "kanal", payload, config, start.elapsed(), messages)
+    row(context, "kanal", mode, payload, config, elapsed, messages)
 }
 
-fn bench_concurrent_queue<T>(context: &RunContext, config: Config, payload: Payload<T>) -> Row
+fn bench_concurrent_queue<T>(
+    context: &RunContext,
+    config: Config,
+    mode: Mode,
+    payload: Payload<T>,
+) -> Row
 where
     T: Copy + Send + 'static,
 {
@@ -425,6 +510,7 @@ where
             Err(_) => thread::yield_now(),
         }
     }
+    let elapsed = start.elapsed();
     stop.store(true, Ordering::Relaxed);
     for handle in handles {
         handle.join().expect("concurrent-queue producer thread");
@@ -432,14 +518,15 @@ where
     row(
         context,
         "concurrent-queue",
+        mode,
         payload,
         config,
-        start.elapsed(),
+        elapsed,
         messages,
     )
 }
 
-fn bench_thingbuf<T>(context: &RunContext, config: Config, payload: Payload<T>) -> Row
+fn bench_thingbuf<T>(context: &RunContext, config: Config, mode: Mode, payload: Payload<T>) -> Row
 where
     T: Copy + Default + Send + Sync + 'static,
 {
@@ -453,8 +540,17 @@ where
         let value = payload.value;
         handles.push(thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                if tx.try_send(value).is_err() {
-                    thread::yield_now();
+                match mode {
+                    Mode::Try => {
+                        if tx.try_send(value).is_err() {
+                            thread::yield_now();
+                        }
+                    }
+                    Mode::Blocking => {
+                        if tx.send(value).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         }));
@@ -467,31 +563,34 @@ where
     let mut polls = 0u64;
     while !reached_deadline(polls, deadline) {
         polls = polls.wrapping_add(1);
-        match rx.try_recv() {
-            Ok(value) => {
-                black_box(value);
-                messages += 1;
-            }
-            Err(_) => thread::yield_now(),
+        let result = match mode {
+            Mode::Try => rx.try_recv().ok(),
+            Mode::Blocking => rx.recv(),
+        };
+        if let Some(value) = result {
+            black_box(value);
+            messages += 1;
+        } else if mode == Mode::Try {
+            thread::yield_now();
+        } else {
+            break;
         }
     }
+    let elapsed = start.elapsed();
     stop.store(true, Ordering::Relaxed);
+    drop(rx);
     for handle in handles {
         handle.join().expect("thingbuf producer thread");
     }
     row(
-        context,
-        "thingbuf",
-        payload,
-        config,
-        start.elapsed(),
-        messages,
+        context, "thingbuf", mode, payload, config, elapsed, messages,
     )
 }
 
 fn row<T>(
     context: &RunContext,
     implementation: &'static str,
+    mode: Mode,
     payload: Payload<T>,
     config: Config,
     elapsed: Duration,
@@ -500,6 +599,7 @@ fn row<T>(
     Row {
         run_id: context.run_id.clone(),
         cpu: context.cpu.clone(),
+        mode: mode.label(),
         implementation,
         payload: payload.label,
         payload_bytes: size_of::<T>(),
@@ -515,6 +615,23 @@ fn row<T>(
 impl Config {
     fn total_capacity(self) -> usize {
         self.producers * self.capacity_per_sender
+    }
+}
+
+impl Mode {
+    fn from_env() -> Self {
+        match std::env::var("FANRING_BENCH_MODE").as_deref() {
+            Ok("blocking") => Self::Blocking,
+            Ok("try") | Err(_) => Self::Try,
+            Ok(value) => panic!("invalid benchmark mode {value:?}; expected try or blocking"),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Try => "try",
+            Self::Blocking => "blocking",
+        }
     }
 }
 

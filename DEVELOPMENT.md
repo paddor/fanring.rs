@@ -69,4 +69,8 @@ Custom paths:
 cargo run --features charts --bin fanring-chart -- \
   --input target/fanring-bench/results.jsonl \
   --output doc/charts/mpsc.svg
+
+cargo run --features charts --bin fanring-chart -- \
+  --input target/fanring-bench/mpmc.jsonl \
+  --output doc/charts/mpmc.svg
 ```

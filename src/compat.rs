@@ -11,6 +11,11 @@ pub(crate) use loom::sync::Mutex;
 pub(crate) use std::sync::Mutex;
 
 #[cfg(all(loom, target_pointer_width = "64"))]
-pub(crate) use loom::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+pub(crate) use loom::sync::{Condvar, MutexGuard};
 #[cfg(not(all(loom, target_pointer_width = "64")))]
-pub(crate) use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+pub(crate) use std::sync::{Condvar, MutexGuard};
+
+#[cfg(all(loom, target_pointer_width = "64"))]
+pub(crate) use loom::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+#[cfg(not(all(loom, target_pointer_width = "64")))]
+pub(crate) use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};

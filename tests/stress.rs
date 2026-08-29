@@ -1,22 +1,22 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use fanring::{RecvError, SendError, channel};
+use fanring::mpsc::{TryRecvError, TrySendError, channel};
 
 #[cfg(miri)]
 const MESSAGES_PER_SENDER: usize = 16;
 #[cfg(not(miri))]
 const MESSAGES_PER_SENDER: usize = 2_000;
 
-fn send_until_ok<T: Copy>(tx: &mut fanring::Sender<T>, mut value: T) {
+fn send_until_ok<T: Copy>(tx: &mut fanring::mpsc::Sender<T>, mut value: T) {
     loop {
         match tx.try_send(value) {
             Ok(()) => return,
-            Err(SendError::Full(returned)) => {
+            Err(TrySendError::Full(returned)) => {
                 value = returned;
                 std::thread::yield_now();
             }
-            Err(SendError::Disconnected(_)) => panic!("receiver dropped"),
+            Err(TrySendError::Disconnected(_)) => panic!("receiver dropped"),
         }
     }
 }
@@ -24,13 +24,12 @@ fn send_until_ok<T: Copy>(tx: &mut fanring::Sender<T>, mut value: T) {
 #[test]
 fn all_64_sender_bits_deliver() {
     let senders = 64;
-    let (tx0, mut rx) = channel(senders, 8);
+    let (tx0, mut rx) = channel(8);
     let mut txs = vec![tx0];
     for _ in 1..senders {
         let tx = txs[0].try_clone().expect("sender slot available");
         txs.push(tx);
     }
-    assert!(txs[0].try_clone().is_none());
 
     std::thread::scope(|scope| {
         for (sender_id, mut tx) in txs.into_iter().enumerate() {
@@ -55,8 +54,8 @@ fn all_64_sender_bits_deliver() {
                     seen[sender_id] += 1;
                     received += 1;
                 }
-                Err(RecvError::Empty) => std::thread::yield_now(),
-                Err(RecvError::Disconnected) => panic!("senders disconnected early"),
+                Err(TryRecvError::Empty) => std::thread::yield_now(),
+                Err(TryRecvError::Disconnected) => panic!("senders disconnected early"),
             }
         }
 
@@ -66,7 +65,7 @@ fn all_64_sender_bits_deliver() {
 
 #[test]
 fn sender_drop_preserves_buffered_items_until_drained() {
-    let (mut tx, mut rx) = channel(1, 8);
+    let (mut tx, mut rx) = channel(8);
     for i in 0..8 {
         tx.try_send(i).unwrap();
     }
@@ -75,18 +74,18 @@ fn sender_drop_preserves_buffered_items_until_drained() {
     for i in 0..8 {
         assert_eq!(rx.try_recv(), Ok(i));
     }
-    assert_eq!(rx.try_recv(), Err(RecvError::Disconnected));
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
 }
 
 #[test]
 fn receiver_drop_turns_full_into_disconnected() {
-    let (mut tx, rx) = channel(1, 2);
+    let (mut tx, rx) = channel(2);
     tx.try_send(1).unwrap();
     tx.try_send(2).unwrap();
-    assert_eq!(tx.try_send(3), Err(SendError::Full(3)));
+    assert_eq!(tx.try_send(3), Err(TrySendError::Full(3)));
 
     drop(rx);
-    assert_eq!(tx.try_send(4), Err(SendError::Disconnected(4)));
+    assert_eq!(tx.try_send(4), Err(TrySendError::Disconnected(4)));
 }
 
 #[test]
@@ -106,7 +105,7 @@ fn drops_remaining_items_once() {
     DROPS.store(0, Ordering::Relaxed);
 
     let token = Arc::new(());
-    let (mut tx0, rx) = channel(2, 8);
+    let (mut tx0, rx) = channel(8);
     let mut tx1 = tx0.try_clone().unwrap();
 
     for _ in 0..8 {
@@ -123,7 +122,7 @@ fn drops_remaining_items_once() {
 
 #[test]
 fn sparse_sender_set_does_not_require_low_shards() {
-    let (tx0, mut rx) = channel(8, 4);
+    let (tx0, mut rx) = channel(4);
     let tx1 = tx0.try_clone().unwrap();
     let mut tx2 = tx1.try_clone().unwrap();
     drop(tx0);
@@ -135,7 +134,7 @@ fn sparse_sender_set_does_not_require_low_shards() {
 
 #[test]
 fn repeated_empty_ready_races_do_not_lose_messages() {
-    let (mut tx, mut rx) = channel(1, 4);
+    let (mut tx, mut rx) = channel(4);
 
     std::thread::scope(|scope| {
         scope.spawn(|| {
@@ -152,10 +151,110 @@ fn repeated_empty_ready_races_do_not_lose_messages() {
                         assert_eq!(value, expected);
                         break;
                     }
-                    Err(RecvError::Empty) => std::thread::yield_now(),
-                    Err(RecvError::Disconnected) => panic!("sender disconnected early"),
+                    Err(TryRecvError::Empty) => std::thread::yield_now(),
+                    Err(TryRecvError::Disconnected) => panic!("sender disconnected early"),
                 }
             }
         }
     });
+}
+
+#[test]
+fn capacity_one_blocking_ping_pong_does_not_lose_wakeups() {
+    let (mut tx, mut rx) = channel(1);
+
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            for value in 0..MESSAGES_PER_SENDER {
+                tx.send(value).unwrap();
+            }
+        });
+
+        for expected in 0..MESSAGES_PER_SENDER {
+            assert_eq!(rx.recv(), Ok(expected));
+        }
+    });
+}
+
+#[test]
+fn capacity_eight_blocking_stream_does_not_stall() {
+    let (mut tx, mut rx) = channel(8);
+
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            for value in 0..MESSAGES_PER_SENDER * 10 {
+                tx.send(value).unwrap();
+            }
+        });
+
+        for expected in 0..MESSAGES_PER_SENDER * 10 {
+            assert_eq!(rx.recv(), Ok(expected));
+        }
+    });
+}
+
+#[test]
+fn four_small_blocking_lanes_do_not_lose_readiness() {
+    let senders = 4;
+    let (tx0, mut rx) = channel(2);
+    let mut txs = vec![tx0];
+    for _ in 1..senders {
+        txs.push(txs[0].try_clone().unwrap());
+    }
+
+    std::thread::scope(|scope| {
+        for (sender_id, mut tx) in txs.into_iter().enumerate() {
+            scope.spawn(move || {
+                for seq in 0..MESSAGES_PER_SENDER * 10 {
+                    tx.send((sender_id, seq)).unwrap();
+                }
+            });
+        }
+
+        let mut seen = vec![0usize; senders];
+        for _ in 0..senders * MESSAGES_PER_SENDER * 10 {
+            let (sender_id, seq) = rx.recv().unwrap();
+            assert_eq!(seq, seen[sender_id]);
+            seen[sender_id] += 1;
+        }
+        assert_eq!(seen, vec![MESSAGES_PER_SENDER * 10; senders]);
+    });
+}
+
+#[test]
+fn sender_slots_reuse_across_ready_page_boundaries() {
+    const DYNAMIC_SENDERS: usize = 129;
+    const ROUNDS: usize = 4;
+
+    let (root, mut rx) = channel(2);
+    let mut expected_slots = None;
+
+    for round in 0..ROUNDS {
+        let mut senders = (0..DYNAMIC_SENDERS)
+            .map(|_| root.try_clone().unwrap())
+            .collect::<Vec<_>>();
+        let mut slots = senders.iter().map(|tx| tx.shard()).collect::<Vec<_>>();
+        slots.sort_unstable();
+        assert!(slots.last().copied().unwrap() >= 129);
+        if let Some(expected) = &expected_slots {
+            assert_eq!(&slots, expected);
+        } else {
+            expected_slots = Some(slots);
+        }
+
+        for (sender, tx) in senders.iter_mut().enumerate() {
+            tx.send(round * DYNAMIC_SENDERS + sender).unwrap();
+        }
+        drop(senders);
+
+        let mut values = (0..DYNAMIC_SENDERS)
+            .map(|_| rx.recv().unwrap())
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        assert_eq!(
+            values,
+            (round * DYNAMIC_SENDERS..(round + 1) * DYNAMIC_SENDERS).collect::<Vec<_>>()
+        );
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    }
 }
