@@ -272,12 +272,12 @@ fn drained_sender_lane_is_reused() {
     let (tx0, mut rx) = channel::<u8>(2);
     let old_slot = {
         let tx1 = tx0.try_clone().unwrap();
-        tx1.shard()
+        tx1.lane_id()
     };
 
     assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
     let mut tx2 = tx0.try_clone().unwrap();
-    assert_eq!(tx2.shard(), old_slot);
+    assert_eq!(tx2.lane_id(), old_slot);
     tx2.try_send(7).unwrap();
     assert_eq!(rx.try_recv(), Ok(7));
 }

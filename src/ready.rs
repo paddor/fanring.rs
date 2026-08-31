@@ -125,7 +125,7 @@ impl fmt::Debug for LaneSignal {
             .field("state", &self.state.0.load(Ordering::Relaxed))
             .field("page", &self.page.id())
             .field("bit", &self.bit)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use concurrent_queue::ConcurrentQueue;
 
 use crate::compat::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering};
+use crate::config::validate_capacity;
 use crate::ready::{LANES_PER_PAGE, LaneSignal, ReadyPage};
 use crate::wait::WaitCell;
 
@@ -32,37 +33,34 @@ const PARK_SPINS: usize = 128;
 #[cfg(loom)]
 const PARK_SPINS: usize = 0;
 
-/// Create a bounded sharded MPSC channel.
+/// Create a bounded MPSC channel.
 ///
-/// `capacity_per_sender` must be in `1..=`[`MAX_CAPACITY_PER_SENDER`] and is
+/// `capacity_per_sender` must be between 1 and [`MAX_CAPACITY_PER_SENDER`] and is
 /// rounded up by `yring` to the next power of two.
+///
+/// # Panics
+///
+/// Panics when `capacity_per_sender` is zero or exceeds
+/// [`MAX_CAPACITY_PER_SENDER`].
+#[must_use]
 pub fn channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
     try_channel(capacity_per_sender).unwrap_or_else(|error| panic!("{error}"))
 }
 
-/// Try to create a bounded sharded MPSC channel.
+/// Try to create a bounded MPSC channel.
 ///
 /// This is the fallible version of [`channel`]. It returns a [`ChannelError`]
 /// instead of panicking when the configuration is invalid.
+///
+/// # Errors
+///
+/// Returns [`ChannelError`] when `capacity_per_sender` is zero or exceeds
+/// [`MAX_CAPACITY_PER_SENDER`].
 pub fn try_channel<T>(
     capacity_per_sender: usize,
 ) -> Result<(Sender<T>, Receiver<T>), ChannelError> {
-    validate_channel_config(capacity_per_sender)?;
+    validate_capacity(capacity_per_sender, MAX_CAPACITY_PER_SENDER)?;
     Ok(build_channel(capacity_per_sender))
-}
-
-fn validate_channel_config(capacity_per_sender: usize) -> Result<(), ChannelError> {
-    if capacity_per_sender == 0 {
-        return Err(ChannelError::ZeroCapacity);
-    }
-    if capacity_per_sender > MAX_CAPACITY_PER_SENDER {
-        return Err(ChannelError::CapacityTooLarge {
-            requested: capacity_per_sender,
-            max: MAX_CAPACITY_PER_SENDER,
-        });
-    }
-
-    Ok(())
 }
 
 fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
@@ -120,6 +118,7 @@ struct Shared<T> {
 }
 
 impl<T> Shared<T> {
+    #[allow(clippy::significant_drop_tightening)]
     fn register_sender(
         &self,
     ) -> Result<(LaneKey, Arc<LaneSignal>, yring::Producer<T>), TryRegisterError> {
@@ -143,6 +142,7 @@ impl<T> Shared<T> {
             signal: signal.clone(),
             consumer,
         });
+        // Receiver teardown consumes the registry and counters together.
         self.registered_lanes.fetch_add(1, Ordering::Release);
         self.live_senders.fetch_add(1, Ordering::AcqRel);
         self.registry_generation.fetch_add(1, Ordering::Release);
@@ -238,6 +238,7 @@ impl<T> Sender<T> {
     /// Try to register another sender.
     ///
     /// Returns `None` when the receiver is gone.
+    #[must_use]
     pub fn try_clone(&self) -> Option<Self> {
         self.try_register().ok()
     }
@@ -246,6 +247,10 @@ impl<T> Sender<T> {
     ///
     /// Prefer this over [`try_clone`](Self::try_clone) when the caller needs to
     /// distinguish a closed receiver from successful registration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TryRegisterError::Disconnected`] when the receiver is gone.
     pub fn try_register(&self) -> Result<Self, TryRegisterError> {
         let (key, signal, producer) = self.shared.register_sender()?;
         Ok(Self {
@@ -260,6 +265,11 @@ impl<T> Sender<T> {
     ///
     /// A successful send is immediately visible to the receiver. Internally,
     /// the value is pushed into this sender's SPSC ring and flushed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrySendError::Full`] when this sender's lane is full, or
+    /// [`TrySendError::Disconnected`] when the receiver is gone.
     #[inline]
     pub fn try_send(&mut self, value: T) -> Result<(), TrySendError<T>> {
         let (result, wake_receiver) = self.try_send_inner(value);
@@ -294,6 +304,10 @@ impl<T> Sender<T> {
     }
 
     /// Send one value, blocking while this sender's ring is full.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] with the unsent value when the receiver disconnects.
     #[inline]
     pub fn send(&mut self, value: T) -> Result<(), SendError<T>> {
         match self.try_send(value) {
@@ -345,6 +359,12 @@ impl<T> Sender<T> {
 
     /// Send one value, blocking for at most `timeout` while this sender's ring
     /// is full.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendTimeoutError::Timeout`] with the unsent value when the
+    /// timeout expires, or [`SendTimeoutError::Disconnected`] when the receiver
+    /// disconnects.
     pub fn send_timeout(&mut self, value: T, timeout: Duration) -> Result<(), SendTimeoutError<T>> {
         let Some(deadline) = Instant::now().checked_add(timeout) else {
             return self
@@ -356,6 +376,12 @@ impl<T> Sender<T> {
 
     /// Send one value, blocking until `deadline` while this sender's ring is
     /// full.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendTimeoutError::Timeout`] with the unsent value at the
+    /// deadline, or [`SendTimeoutError::Disconnected`] when the receiver
+    /// disconnects.
     pub fn send_deadline(
         &mut self,
         mut value: T,
@@ -409,36 +435,42 @@ impl<T> Sender<T> {
 
     /// Return this sender's current lane slot.
     #[inline]
-    pub fn shard(&self) -> usize {
+    #[must_use]
+    pub fn lane_id(&self) -> usize {
         self.key.slot
     }
 
-    /// Return this sender's per-shard capacity after `yring` rounding.
+    /// Return this sender's lane capacity after `yring` rounding.
     #[inline]
+    #[must_use]
     pub fn capacity(&self) -> usize {
         self.producer.capacity()
     }
 
     /// Return whether the receiver has been dropped.
     #[inline]
+    #[must_use]
     pub fn is_disconnected(&self) -> bool {
         !self.shared.receiver_alive.load(Ordering::Acquire)
     }
 
     /// Return a snapshot of the number of live senders.
     #[inline]
+    #[must_use]
     pub fn sender_count(&self) -> usize {
         self.shared.live_senders.load(Ordering::Relaxed)
     }
 
     /// Return a snapshot of the number of live receivers.
     #[inline]
+    #[must_use]
     pub fn receiver_count(&self) -> usize {
         usize::from(self.shared.receiver_alive.load(Ordering::Relaxed))
     }
 
     /// Return whether both senders belong to the same channel.
     #[inline]
+    #[must_use]
     pub fn same_channel(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
     }
@@ -469,6 +501,12 @@ pub struct Receiver<T> {
 
 impl<T> Receiver<T> {
     /// Try to receive one value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TryRecvError::Empty`] when no value is currently available, or
+    /// [`TryRecvError::Disconnected`] after all senders and buffered values are
+    /// gone.
     #[inline]
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
         loop {
@@ -538,6 +576,10 @@ impl<T> Receiver<T> {
     }
 
     /// Receive one value, blocking while the channel is empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecvError`] after all senders and buffered values are gone.
     #[inline]
     pub fn recv(&mut self) -> Result<T, RecvError> {
         match self.try_recv() {
@@ -593,6 +635,11 @@ impl<T> Receiver<T> {
 
     /// Receive one value, blocking for at most `timeout` while the channel is
     /// empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecvTimeoutError::Timeout`] when the timeout expires, or
+    /// [`RecvTimeoutError::Disconnected`] after the channel disconnects.
     pub fn recv_timeout(&mut self, timeout: Duration) -> Result<T, RecvTimeoutError> {
         let Some(deadline) = Instant::now().checked_add(timeout) else {
             return self
@@ -604,6 +651,11 @@ impl<T> Receiver<T> {
 
     /// Receive one value, blocking until `deadline` while the channel is
     /// empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecvTimeoutError::Timeout`] at the deadline, or
+    /// [`RecvTimeoutError::Disconnected`] after the channel disconnects.
     pub fn recv_deadline(&mut self, deadline: Instant) -> Result<T, RecvTimeoutError> {
         loop {
             match self.try_recv() {
@@ -786,43 +838,50 @@ impl<T> Receiver<T> {
 
     /// Return whether all senders are gone and every registered lane is drained.
     #[inline]
+    #[must_use]
     pub fn is_disconnected(&self) -> bool {
         self.shared.live_senders.load(Ordering::Acquire) == 0
             && self.shared.registered_lanes.load(Ordering::Acquire) == 0
     }
 
-    /// Return per-shard capacity after `yring` rounding.
+    /// Return per-sender capacity after `yring` rounding.
     #[inline]
+    #[must_use]
     pub fn capacity_per_sender(&self) -> usize {
         self.capacity_per_sender
     }
 
     /// Return a snapshot of the number of live senders.
     #[inline]
+    #[must_use]
     pub fn sender_count(&self) -> usize {
         self.shared.live_senders.load(Ordering::Relaxed)
     }
 
     /// Return a snapshot of the number of live receivers.
     #[inline]
+    #[must_use]
     pub fn receiver_count(&self) -> usize {
         usize::from(self.shared.receiver_alive.load(Ordering::Relaxed))
     }
 
     /// Return whether both receivers belong to the same channel.
     #[inline]
+    #[must_use]
     pub fn same_channel(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
     }
 
     /// Iterate until every sender disconnects and buffered values are drained.
     #[inline]
+    #[must_use]
     pub fn iter(&mut self) -> Iter<'_, T> {
         Iter { receiver: self }
     }
 
     /// Iterate over values immediately available without blocking.
     #[inline]
+    #[must_use]
     pub fn try_iter(&mut self) -> TryIter<'_, T> {
         TryIter { receiver: self }
     }
@@ -962,6 +1021,10 @@ impl<T> Iterator for IntoIter<T> {
 
 impl<T> std::iter::FusedIterator for IntoIter<T> {}
 
+#[allow(
+    clippy::into_iter_without_iter,
+    reason = "channel convention names the blocking iterator iter"
+)]
 impl<'a, T> IntoIterator for &'a mut Receiver<T> {
     type Item = T;
     type IntoIter = Iter<'a, T>;

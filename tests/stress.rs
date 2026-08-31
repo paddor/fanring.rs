@@ -233,7 +233,7 @@ fn sender_slots_reuse_across_ready_page_boundaries() {
         let mut senders = (0..DYNAMIC_SENDERS)
             .map(|_| root.try_clone().unwrap())
             .collect::<Vec<_>>();
-        let mut slots = senders.iter().map(|tx| tx.shard()).collect::<Vec<_>>();
+        let mut slots = senders.iter().map(|tx| tx.lane_id()).collect::<Vec<_>>();
         slots.sort_unstable();
         assert!(slots.last().copied().unwrap() >= 129);
         if let Some(expected) = &expected_slots {
