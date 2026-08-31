@@ -58,7 +58,8 @@ assert_ne!(a, b);
 `mpmc` drains ready sender rings in batches of at most 64. One item is returned
 and the rest enter the receiver's local FIFO, where other receivers can steal
 them in batches. Receiver drop republishes its buffered work. Ordering is
-relaxed.
+relaxed. Moving values into that second-stage queue costs more for large inline
+types; box large payloads when move bandwidth dominates.
 
 ## Contract
 
@@ -108,8 +109,13 @@ cargo bench --bench wake_latency
 
 Comparison benches accept `FANRING_BENCH_SECS`, `FANRING_BENCH_PRODUCERS`,
 `FANRING_BENCH_CAPACITY`, `FANRING_BENCH_PAYLOADS`,
-`FANRING_BENCH_IMPLS`, and `FANRING_BENCH_OUT`. MPMC also accepts
-`FANRING_BENCH_CONSUMERS`. Wake latency accepts `FANRING_WAKE_ROUNDS`,
-`FANRING_WAKE_WARMUP`, `FANRING_WAKE_SETTLE_NS`, and
-`FANRING_WAKE_SETTLE_MODE` (`sleep` or `spin`), and `FANRING_WAKE_OUT`.
-All append machine-readable JSONL.
+`FANRING_BENCH_IMPLS`, `FANRING_BENCH_SAMPLES`,
+`FANRING_BENCH_WARMUP_SECS`, and `FANRING_BENCH_OUT`. MPMC also accepts
+`FANRING_BENCH_CONSUMERS`. Defaults are five one-second samples after a 250 ms
+warmup. Implementation order rotates between samples. Output includes every
+sample; summaries and charts use the median and relative median absolute
+deviation.
+
+Wake latency accepts `FANRING_WAKE_ROUNDS`, `FANRING_WAKE_WARMUP`,
+`FANRING_WAKE_SETTLE_NS`, `FANRING_WAKE_SETTLE_MODE` (`sleep` or `spin`), and
+`FANRING_WAKE_OUT`. All benchmarks append machine-readable JSONL.
