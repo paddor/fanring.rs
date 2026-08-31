@@ -23,7 +23,7 @@ impl ReadyPage {
     }
 
     #[inline]
-    pub(crate) fn id(&self) -> usize {
+    pub(crate) const fn id(&self) -> usize {
         self.id
     }
 
@@ -55,10 +55,15 @@ impl fmt::Debug for ReadyPage {
 /// final ring recheck, preventing a publication from being lost at the empty
 /// boundary.
 pub(crate) struct LaneSignal {
-    state: PaddedState,
+    readiness: LaneReadiness,
+    space_waiter: WaitCell,
+}
+
+#[repr(C, align(128))]
+struct LaneReadiness {
+    state: AtomicU8,
     page: Arc<ReadyPage>,
     bit: u64,
-    space_waiter: WaitCell,
 }
 
 pub(crate) struct ReadyMark {
@@ -69,18 +74,20 @@ pub(crate) struct ReadyMark {
 impl LaneSignal {
     pub(crate) fn new(page: Arc<ReadyPage>, lane: usize) -> Self {
         Self {
-            state: PaddedState(AtomicU8::new(IDLE)),
-            page,
-            bit: 1u64 << (lane % LANES_PER_PAGE),
+            readiness: LaneReadiness {
+                state: AtomicU8::new(IDLE),
+                page,
+                bit: 1u64 << (lane % LANES_PER_PAGE),
+            },
             space_waiter: WaitCell::new(),
         }
     }
 
     #[inline]
     pub(crate) fn mark(&self) -> ReadyMark {
-        if self.state.0.swap(PENDING, Ordering::AcqRel) == IDLE {
+        if self.readiness.state.swap(PENDING, Ordering::AcqRel) == IDLE {
             ReadyMark {
-                page: self.page.mark(self.bit),
+                page: self.readiness.page.mark(self.readiness.bit),
                 activated: true,
             }
         } else {
@@ -93,20 +100,20 @@ impl LaneSignal {
 
     #[inline]
     pub(crate) fn finish_drain(&self) {
-        self.state.0.swap(IDLE, Ordering::AcqRel);
+        self.readiness.state.swap(IDLE, Ordering::AcqRel);
     }
 
     #[inline]
     pub(crate) fn claim_after_empty(&self) -> bool {
-        self.state
-            .0
+        self.readiness
+            .state
             .compare_exchange(IDLE, PENDING, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
     #[inline]
     pub(crate) fn is_pending(&self) -> bool {
-        self.state.0.load(Ordering::Acquire) != IDLE
+        self.readiness.state.load(Ordering::Acquire) != IDLE
     }
 
     pub(crate) fn prepare_space_wait(&self) -> WaitRegistration<'_> {
@@ -122,12 +129,19 @@ impl LaneSignal {
 impl fmt::Debug for LaneSignal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LaneSignal")
-            .field("state", &self.state.0.load(Ordering::Relaxed))
-            .field("page", &self.page.id())
-            .field("bit", &self.bit)
+            .field("state", &self.readiness.state.load(Ordering::Relaxed))
+            .field("page", &self.readiness.page.id())
+            .field("bit", &self.readiness.bit)
             .finish_non_exhaustive()
     }
 }
 
-#[repr(align(128))]
-struct PaddedState(AtomicU8);
+#[cfg(all(test, target_arch = "x86_64", not(loom)))]
+mod tests {
+    use super::LaneSignal;
+
+    #[test]
+    fn lane_signal_stays_within_256_bytes() {
+        assert!(size_of::<LaneSignal>() <= 256);
+    }
+}
