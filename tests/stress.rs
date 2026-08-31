@@ -35,7 +35,8 @@ fn all_64_sender_bits_deliver() {
         for (sender_id, mut tx) in txs.into_iter().enumerate() {
             scope.spawn(move || {
                 for seq in 0..MESSAGES_PER_SENDER {
-                    let value = ((sender_id as u64) << 32) | seq as u64;
+                    let value = (u64::try_from(sender_id).expect("sender id fits u64") << 32)
+                        | u64::try_from(seq).expect("sequence fits u64");
                     send_until_ok(&mut tx, value);
                 }
             });
@@ -48,8 +49,9 @@ fn all_64_sender_bits_deliver() {
         while received < total {
             match rx.try_recv() {
                 Ok(value) => {
-                    let sender_id = (value >> 32) as usize;
-                    let seq = (value & u32::MAX as u64) as usize;
+                    let sender_id = usize::try_from(value >> 32).expect("sender id fits usize");
+                    let seq =
+                        usize::try_from(value & u64::from(u32::MAX)).expect("sequence fits usize");
                     assert_eq!(seq, seen[sender_id]);
                     seen[sender_id] += 1;
                     received += 1;
@@ -233,7 +235,10 @@ fn sender_slots_reuse_across_ready_page_boundaries() {
         let mut senders = (0..DYNAMIC_SENDERS)
             .map(|_| root.try_clone().unwrap())
             .collect::<Vec<_>>();
-        let mut slots = senders.iter().map(|tx| tx.lane_id()).collect::<Vec<_>>();
+        let mut slots = senders
+            .iter()
+            .map(fanring::mpsc::Sender::lane_id)
+            .collect::<Vec<_>>();
         slots.sort_unstable();
         assert!(slots.last().copied().unwrap() >= 129);
         if let Some(expected) = &expected_slots {

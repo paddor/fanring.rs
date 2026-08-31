@@ -1,6 +1,6 @@
 use crate::error::ChannelError;
 
-pub(crate) fn validate_capacity(capacity: usize, max: usize) -> Result<(), ChannelError> {
+pub(crate) const fn validate_capacity(capacity: usize, max: usize) -> Result<(), ChannelError> {
     if capacity == 0 {
         return Err(ChannelError::ZeroCapacity);
     }
