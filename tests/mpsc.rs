@@ -154,6 +154,31 @@ fn receiver_iterators_cover_blocking_and_ready_values() {
 }
 
 #[test]
+fn receiver_reports_sender_disconnect_before_buffer_is_drained() {
+    let (mut tx, mut rx) = channel(2);
+    tx.try_send(1).unwrap();
+    tx.try_send(2).unwrap();
+    drop(tx);
+
+    assert!(rx.is_disconnected());
+    assert_eq!(rx.recv(), Ok(1));
+    assert_eq!(rx.recv(), Ok(2));
+    assert_eq!(rx.recv(), Err(RecvError));
+}
+
+#[test]
+fn blocking_iterators_stay_exhausted_after_disconnect() {
+    let (mut tx, mut rx) = channel(1);
+    tx.try_send(1).unwrap();
+    drop(tx);
+
+    let mut iter = rx.iter();
+    assert_eq!(iter.next(), Some(1));
+    assert_eq!(iter.next(), None);
+    assert_eq!(iter.next(), None);
+}
+
+#[test]
 fn try_channel_validates_config() {
     assert_eq!(
         try_channel::<u8>(0).unwrap_err(),
@@ -207,6 +232,26 @@ fn public_errors_implement_std_error() {
     );
     assert_eq!(TrySendError::Full(1).to_string(), "sender ring is full");
     assert_eq!(TryRecvError::Empty.to_string(), "channel is empty");
+
+    assert!(ChannelError::ZeroCapacity.is_zero_capacity());
+    assert!(
+        ChannelError::CapacityTooLarge {
+            requested: 2,
+            max: 1,
+        }
+        .is_capacity_too_large()
+    );
+    assert!(TryRegisterError::Disconnected.is_disconnected());
+    assert!(SendError(1).is_disconnected());
+    assert!(TrySendError::Full(1).is_full());
+    assert!(TrySendError::Disconnected(1).is_disconnected());
+    assert!(SendTimeoutError::Timeout(1).is_timeout());
+    assert!(SendTimeoutError::Disconnected(1).is_disconnected());
+    assert!(RecvError.is_disconnected());
+    assert!(TryRecvError::Empty.is_empty());
+    assert!(TryRecvError::Disconnected.is_disconnected());
+    assert!(RecvTimeoutError::Timeout.is_timeout());
+    assert!(RecvTimeoutError::Disconnected.is_disconnected());
 }
 
 #[test]
@@ -263,7 +308,7 @@ fn full_is_per_sender() {
         rx.try_recv().unwrap(),
         rx.try_recv().unwrap(),
     ];
-    values.sort();
+    values.sort_unstable();
     assert_eq!(values, [1, 2, 10]);
 }
 
