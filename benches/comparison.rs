@@ -58,7 +58,8 @@ struct Row {
     payload_bytes: usize,
     producers: usize,
     capacity_per_sender: usize,
-    total_capacity: usize,
+    nominal_capacity: usize,
+    capacity_model: &'static str,
     seconds: f64,
     items: u64,
     items_per_sec: f64,
@@ -736,7 +737,12 @@ fn row<T>(
         payload_bytes: size_of::<T>(),
         producers: config.producers,
         capacity_per_sender: config.capacity_per_sender,
-        total_capacity: config.total_capacity(),
+        nominal_capacity: config.total_capacity(),
+        capacity_model: if implementation == "fanring" {
+            "per-ring-hwm"
+        } else {
+            "shared-bound"
+        },
         seconds: elapsed.as_secs_f64(),
         items,
         items_per_sec: items as f64 / elapsed.as_secs_f64(),
