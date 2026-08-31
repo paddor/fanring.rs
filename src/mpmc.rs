@@ -6,17 +6,23 @@
 //! relaxed.
 
 use std::fmt;
-use std::ops::{Deref, DerefMut};
-use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use concurrent_queue::ConcurrentQueue;
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 
-use crate::compat::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering};
+use crate::compat::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock};
 use crate::config::validate_capacity;
+use crate::publication::PublicationTracker;
 use crate::ready::{LANES_PER_PAGE, LaneSignal, ReadyPage};
 use crate::wait::MultiWaitCell;
+
+mod receiver;
+mod sender;
+
+use receiver::{FinishLane, Lane, LaneToken, close_lane};
+pub use receiver::{IntoIter, Iter, Receiver, TryIter};
+pub use sender::Sender;
 
 pub use crate::error::{
     ChannelError, RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError,
@@ -27,12 +33,13 @@ pub use crate::error::{
 pub const MAX_CAPACITY_PER_SENDER: usize = 1usize << (usize::BITS - 2);
 
 const PREFETCH_LIMIT: usize = 64;
+const TRY_RECV_RETRIES: usize = 1;
 #[cfg(not(loom))]
 const PARK_SPINS: usize = 128;
 #[cfg(loom)]
 const PARK_SPINS: usize = 0;
 
-/// Create a bounded MPMC channel.
+/// Create an MPMC channel with one bounded ring per sender.
 ///
 /// `capacity_per_sender` must be between 1 and [`MAX_CAPACITY_PER_SENDER`] and is
 /// rounded up by `yring` to the next power of two.
@@ -46,7 +53,7 @@ pub fn channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
     try_channel(capacity_per_sender).unwrap_or_else(|error| panic!("{error}"))
 }
 
-/// Try to create a bounded MPMC channel.
+/// Try to create an MPMC channel with one bounded ring per sender.
 ///
 /// # Errors
 ///
@@ -77,8 +84,7 @@ fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
         ready_pages: ConcurrentQueue::unbounded(),
         ready_lanes: ConcurrentQueue::unbounded(),
         injector: Injector::new(),
-        stealer_generation: AtomicUsize::new(0),
-        work_handoffs: AtomicUsize::new(0),
+        publications: PublicationTracker::new(),
         registered_lanes: AtomicUsize::new(1),
         live_senders: AtomicUsize::new(1),
         live_receivers: AtomicUsize::new(1),
@@ -110,8 +116,7 @@ struct Shared<T> {
     ready_pages: ConcurrentQueue<usize>,
     ready_lanes: ConcurrentQueue<LaneToken<T>>,
     injector: Injector<T>,
-    stealer_generation: AtomicUsize,
-    work_handoffs: AtomicUsize,
+    publications: PublicationTracker,
     registered_lanes: AtomicUsize,
     live_senders: AtomicUsize,
     live_receivers: AtomicUsize,
@@ -153,7 +158,7 @@ impl<T> Shared<T> {
             .store(std::sync::Arc::new(registry.clone_stealers()));
         drop(registry);
         self.live_receivers.fetch_add(1, Ordering::AcqRel);
-        self.stealer_generation.fetch_add(1, Ordering::Release);
+        self.publications.notify_change();
         (id, local)
     }
 
@@ -163,7 +168,7 @@ impl<T> Shared<T> {
         self.stealers
             .store(std::sync::Arc::new(registry.clone_stealers()));
         drop(registry);
-        self.stealer_generation.fetch_add(1, Ordering::Release);
+        self.publications.notify_change();
     }
 
     #[inline]
@@ -181,12 +186,7 @@ impl<T> Shared<T> {
         let Ok(page_id) = self.ready_pages.pop() else {
             return false;
         };
-        let lanes = lock(&self.registry).take_ready_lanes(page_id);
-        for lane in lanes {
-            self.ready_lanes
-                .push(lane)
-                .unwrap_or_else(|_| unreachable!("ready-lane queue is never closed"));
-        }
+        lock(&self.registry).publish_ready_lanes(page_id, &self.ready_lanes);
         true
     }
 
@@ -344,12 +344,11 @@ impl<T> Registry<T> {
         slot.lane = Some(lane);
     }
 
-    fn take_ready_lanes(&mut self, page_id: usize) -> Vec<LaneToken<T>> {
+    fn publish_ready_lanes(&mut self, page_id: usize, ready_lanes: &ConcurrentQueue<LaneToken<T>>) {
         let Some(page) = self.pages.get(page_id) else {
-            return Vec::new();
+            return;
         };
         let mut bits = page.take();
-        let mut lanes = Vec::with_capacity(bits.count_ones() as usize);
         while bits != 0 {
             let bit = bits.trailing_zeros() as usize;
             bits &= bits - 1;
@@ -361,12 +360,13 @@ impl<T> Registry<T> {
                 continue;
             };
             if lane.signal.is_pending() {
-                lanes.push(lane);
+                ready_lanes
+                    .push(lane)
+                    .unwrap_or_else(|_| unreachable!("ready-lane queue is never closed"));
             } else {
                 slot.lane = Some(lane);
             }
         }
-        lanes
     }
 
     fn retire_lane(&mut self, key: LaneKey) {
@@ -385,894 +385,5 @@ impl<T> Registry<T> {
             .iter_mut()
             .filter_map(|slot| slot.lane.take())
             .collect()
-    }
-}
-
-/// Sending half.
-///
-/// Each sender owns one SPSC ring producer. Registering senders has no fixed
-/// limit.
-#[derive(Debug)]
-pub struct Sender<T> {
-    shared: Arc<Shared<T>>,
-    producer: yring::Producer<T>,
-    key: LaneKey,
-    signal: Arc<LaneSignal>,
-}
-
-impl<T> Sender<T> {
-    /// Try to register another sender.
-    #[must_use]
-    pub fn try_clone(&self) -> Option<Self> {
-        self.try_register().ok()
-    }
-
-    /// Try to register another sender and report disconnection.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TryRegisterError::Disconnected`] when every receiver is gone.
-    pub fn try_register(&self) -> Result<Self, TryRegisterError> {
-        let (key, signal, producer) = self.shared.register_sender()?;
-        Ok(Self {
-            shared: self.shared.clone(),
-            producer,
-            key,
-            signal,
-        })
-    }
-
-    /// Try to send one value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TrySendError::Full`] when this sender's lane is full, or
-    /// [`TrySendError::Disconnected`] when every receiver is gone.
-    #[inline]
-    pub fn try_send(&mut self, value: T) -> Result<(), TrySendError<T>> {
-        let (result, wake_receiver) = self.try_send_inner(value);
-        if wake_receiver {
-            self.shared.data_waiters.notify_one();
-        }
-        result
-    }
-
-    #[inline]
-    fn try_send_inner(&mut self, value: T) -> (Result<(), TrySendError<T>>, bool) {
-        if !self.shared.receiver_alive.load(Ordering::Acquire) {
-            return (Err(TrySendError::Disconnected(value)), false);
-        }
-
-        match self.producer.push(value) {
-            Ok(()) => {
-                self.producer.flush();
-                let wake_receiver = self.shared.mark_ready(&self.signal);
-                (Ok(()), wake_receiver)
-            }
-            Err(value) => {
-                if !self.shared.receiver_alive.load(Ordering::Acquire)
-                    || self.producer.is_consumer_dropped()
-                {
-                    (Err(TrySendError::Disconnected(value)), false)
-                } else {
-                    (Err(TrySendError::Full(value)), false)
-                }
-            }
-        }
-    }
-
-    /// Send one value, blocking while this sender's ring is full.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SendError`] with the unsent value when every receiver
-    /// disconnects.
-    #[inline]
-    pub fn send(&mut self, value: T) -> Result<(), SendError<T>> {
-        match self.try_send(value) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Disconnected(value)) => Err(SendError(value)),
-            Err(TrySendError::Full(value)) => self.send_slow(value),
-        }
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn send_slow(&mut self, mut value: T) -> Result<(), SendError<T>> {
-        for _ in 0..PARK_SPINS {
-            std::hint::spin_loop();
-            match self.try_send(value) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Disconnected(value)) => return Err(SendError(value)),
-                Err(TrySendError::Full(returned)) => value = returned,
-            }
-        }
-
-        loop {
-            match self.try_send(value) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Disconnected(value)) => return Err(SendError(value)),
-                Err(TrySendError::Full(returned)) => value = returned,
-            }
-
-            let signal = self.signal.clone();
-            let wait = signal.prepare_space_wait();
-            let (result, wake_receiver) = self.try_send_inner(value);
-            match result {
-                Ok(()) => {
-                    wait.cancel();
-                    if wake_receiver {
-                        self.shared.data_waiters.notify_one();
-                    }
-                    return Ok(());
-                }
-                Err(TrySendError::Disconnected(value)) => {
-                    wait.cancel();
-                    return Err(SendError(value));
-                }
-                Err(TrySendError::Full(returned)) => value = returned,
-            }
-            wait.wait();
-        }
-    }
-
-    /// Send one value, blocking up to `timeout` while this sender's ring is
-    /// full.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SendTimeoutError::Timeout`] with the unsent value when the
-    /// timeout expires, or [`SendTimeoutError::Disconnected`] when every
-    /// receiver disconnects.
-    pub fn send_timeout(&mut self, value: T, timeout: Duration) -> Result<(), SendTimeoutError<T>> {
-        let Some(deadline) = Instant::now().checked_add(timeout) else {
-            return self
-                .send(value)
-                .map_err(|SendError(value)| SendTimeoutError::Disconnected(value));
-        };
-        self.send_deadline(value, deadline)
-    }
-
-    /// Send one value, blocking until `deadline` while this sender's ring is
-    /// full.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SendTimeoutError::Timeout`] with the unsent value at the
-    /// deadline, or [`SendTimeoutError::Disconnected`] when every receiver
-    /// disconnects.
-    pub fn send_deadline(
-        &mut self,
-        mut value: T,
-        deadline: Instant,
-    ) -> Result<(), SendTimeoutError<T>> {
-        loop {
-            match self.try_send(value) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Disconnected(value)) => {
-                    return Err(SendTimeoutError::Disconnected(value));
-                }
-                Err(TrySendError::Full(returned)) => value = returned,
-            }
-
-            let signal = self.signal.clone();
-            let wait = signal.prepare_space_wait();
-            let (result, wake_receiver) = self.try_send_inner(value);
-            match result {
-                Ok(()) => {
-                    wait.cancel();
-                    if wake_receiver {
-                        self.shared.data_waiters.notify_one();
-                    }
-                    return Ok(());
-                }
-                Err(TrySendError::Disconnected(value)) => {
-                    wait.cancel();
-                    return Err(SendTimeoutError::Disconnected(value));
-                }
-                Err(TrySendError::Full(returned)) => value = returned,
-            }
-
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                wait.cancel();
-                return Err(SendTimeoutError::Timeout(value));
-            }
-            if wait.wait_timeout(remaining) {
-                match self.try_send(value) {
-                    Ok(()) => return Ok(()),
-                    Err(TrySendError::Disconnected(value)) => {
-                        return Err(SendTimeoutError::Disconnected(value));
-                    }
-                    Err(TrySendError::Full(value)) => {
-                        return Err(SendTimeoutError::Timeout(value));
-                    }
-                }
-            }
-        }
-    }
-
-    /// Return this sender's lane slot.
-    #[inline]
-    #[must_use]
-    pub fn lane_id(&self) -> usize {
-        self.key.slot
-    }
-
-    /// Return this sender's capacity after `yring` rounding.
-    #[inline]
-    #[must_use]
-    pub fn capacity(&self) -> usize {
-        self.producer.capacity()
-    }
-
-    /// Return whether every receiver has been dropped.
-    #[inline]
-    #[must_use]
-    pub fn is_disconnected(&self) -> bool {
-        !self.shared.receiver_alive.load(Ordering::Acquire)
-    }
-
-    /// Return a snapshot of the number of live senders.
-    #[inline]
-    #[must_use]
-    pub fn sender_count(&self) -> usize {
-        self.shared.live_senders.load(Ordering::Relaxed)
-    }
-
-    /// Return a snapshot of the number of live receivers.
-    #[inline]
-    #[must_use]
-    pub fn receiver_count(&self) -> usize {
-        self.shared.live_receivers.load(Ordering::Relaxed)
-    }
-
-    /// Return whether both senders belong to the same channel.
-    #[inline]
-    #[must_use]
-    pub fn same_channel(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.shared, &other.shared)
-    }
-}
-
-impl<T> Drop for Sender<T> {
-    fn drop(&mut self) {
-        self.producer.close();
-        let _ = self.shared.mark_ready(&self.signal);
-        if self.shared.live_senders.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.shared.data_waiters.notify_all();
-        } else {
-            self.shared.data_waiters.notify_one();
-        }
-    }
-}
-
-/// Receiving half.
-///
-/// Clones compete for messages. Each receiver has a local work queue whose
-/// buffered items remain stealable by other receivers.
-pub struct Receiver<T> {
-    shared: Arc<Shared<T>>,
-    id: usize,
-    local: Worker<T>,
-    steal_cursor: usize,
-    capacity_per_sender: usize,
-}
-
-impl<T> Clone for Receiver<T> {
-    fn clone(&self) -> Self {
-        let (id, local) = self.shared.register_receiver();
-        Self {
-            shared: self.shared.clone(),
-            id,
-            local,
-            steal_cursor: 0,
-            capacity_per_sender: self.capacity_per_sender,
-        }
-    }
-}
-
-impl<T> Receiver<T> {
-    /// Try to receive one value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TryRecvError::Empty`] when no value is currently available, or
-    /// [`TryRecvError::Disconnected`] after all senders and buffered values are
-    /// gone.
-    #[inline]
-    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        loop {
-            let (result, effects) = self.try_recv_inner();
-            let retry = effects.has_effect() && matches!(result, Err(TryRecvError::Empty));
-            self.apply_effects(effects);
-            if !retry {
-                return result;
-            }
-        }
-    }
-
-    #[inline]
-    fn try_recv_inner(&mut self) -> (Result<T, TryRecvError>, Effects) {
-        loop {
-            let (work_generation, work_contended) = match self.pop_work() {
-                WorkPop::Item(value) => return (Ok(value), Effects::default()),
-                WorkPop::Empty {
-                    generation,
-                    contended,
-                } => (generation, contended),
-            };
-
-            let Some(lane) = self.acquire_lane() else {
-                if work_contended {
-                    std::hint::spin_loop();
-                    continue;
-                }
-                let disconnected = self.is_disconnected();
-                // Receiver drop publishes local work before changing this
-                // generation. Retry if the first work scan raced that handoff.
-                if disconnected
-                    && (work_generation != self.shared.stealer_generation.load(Ordering::Acquire)
-                        || self.shared.work_handoffs.load(Ordering::Acquire) != 0)
-                {
-                    continue;
-                }
-                return (
-                    Err(if disconnected {
-                        TryRecvError::Disconnected
-                    } else {
-                        TryRecvError::Empty
-                    }),
-                    Effects::default(),
-                );
-            };
-            match self.drain_lane(lane) {
-                LaneDrain::Item { value, effects } => return (Ok(value), effects),
-                LaneDrain::Empty(effects) => {
-                    if effects.has_effect() {
-                        return (Err(TryRecvError::Empty), effects);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Receive one value, blocking while the channel is empty.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RecvError`] after all senders and buffered values are gone.
-    #[inline]
-    pub fn recv(&mut self) -> Result<T, RecvError> {
-        match self.try_recv() {
-            Ok(value) => Ok(value),
-            Err(TryRecvError::Disconnected) => Err(RecvError),
-            Err(TryRecvError::Empty) => self.recv_slow(),
-        }
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn recv_slow(&mut self) -> Result<T, RecvError> {
-        for _ in 0..PARK_SPINS {
-            std::hint::spin_loop();
-            match self.try_recv() {
-                Ok(value) => return Ok(value),
-                Err(TryRecvError::Disconnected) => return Err(RecvError),
-                Err(TryRecvError::Empty) => {}
-            }
-        }
-
-        loop {
-            match self.try_recv() {
-                Ok(value) => return Ok(value),
-                Err(TryRecvError::Disconnected) => return Err(RecvError),
-                Err(TryRecvError::Empty) => {}
-            }
-
-            let shared = self.shared.clone();
-            let wait = shared.data_waiters.prepare();
-            let (result, effects) = self.try_recv_inner();
-            match result {
-                Ok(value) => {
-                    wait.cancel();
-                    self.apply_effects(effects);
-                    return Ok(value);
-                }
-                Err(TryRecvError::Disconnected) => {
-                    wait.cancel();
-                    return Err(RecvError);
-                }
-                Err(TryRecvError::Empty) if effects.has_effect() => {
-                    wait.cancel();
-                    self.apply_effects(effects);
-                }
-                Err(TryRecvError::Empty) => wait.wait(),
-            }
-        }
-    }
-
-    /// Receive one value, blocking for at most `timeout` while the channel is
-    /// empty.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RecvTimeoutError::Timeout`] when the timeout expires, or
-    /// [`RecvTimeoutError::Disconnected`] after the channel disconnects.
-    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<T, RecvTimeoutError> {
-        let Some(deadline) = Instant::now().checked_add(timeout) else {
-            return self
-                .recv()
-                .map_err(|RecvError| RecvTimeoutError::Disconnected);
-        };
-        self.recv_deadline(deadline)
-    }
-
-    /// Receive one value, blocking until `deadline` while the channel is
-    /// empty.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RecvTimeoutError::Timeout`] at the deadline, or
-    /// [`RecvTimeoutError::Disconnected`] after the channel disconnects.
-    pub fn recv_deadline(&mut self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        loop {
-            match self.try_recv() {
-                Ok(value) => return Ok(value),
-                Err(TryRecvError::Disconnected) => {
-                    return Err(RecvTimeoutError::Disconnected);
-                }
-                Err(TryRecvError::Empty) => {}
-            }
-
-            let shared = self.shared.clone();
-            let wait = shared.data_waiters.prepare();
-            let (result, effects) = self.try_recv_inner();
-            match result {
-                Ok(value) => {
-                    wait.cancel();
-                    self.apply_effects(effects);
-                    return Ok(value);
-                }
-                Err(TryRecvError::Disconnected) => {
-                    wait.cancel();
-                    return Err(RecvTimeoutError::Disconnected);
-                }
-                Err(TryRecvError::Empty) if effects.has_effect() => {
-                    wait.cancel();
-                    self.apply_effects(effects);
-                    continue;
-                }
-                Err(TryRecvError::Empty) => {}
-            }
-
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                wait.cancel();
-                return Err(RecvTimeoutError::Timeout);
-            }
-            if wait.wait_timeout(remaining) {
-                match self.try_recv() {
-                    Ok(value) => return Ok(value),
-                    Err(TryRecvError::Disconnected) => {
-                        return Err(RecvTimeoutError::Disconnected);
-                    }
-                    Err(TryRecvError::Empty) => return Err(RecvTimeoutError::Timeout),
-                }
-            }
-        }
-    }
-
-    fn pop_work(&mut self) -> WorkPop<T> {
-        if let Some(value) = self.local.pop() {
-            return WorkPop::Item(value);
-        }
-
-        let generation = self.shared.stealer_generation.load(Ordering::Acquire);
-        let mut contended = false;
-        match self.shared.injector.steal_batch_and_pop(&self.local) {
-            Steal::Success(value) => return WorkPop::Item(value),
-            Steal::Retry => contended = true,
-            Steal::Empty => {}
-        }
-
-        let stealers = self.shared.stealers.load();
-        let len = stealers.len();
-        for offset in 0..len {
-            let index = (self.steal_cursor + offset) % len;
-            let (id, stealer) = &stealers[index];
-            if *id == self.id {
-                continue;
-            }
-            match stealer.steal_batch_and_pop(&self.local) {
-                Steal::Success(value) => {
-                    self.steal_cursor = index.wrapping_add(1);
-                    return WorkPop::Item(value);
-                }
-                Steal::Retry => contended = true,
-                Steal::Empty => {}
-            }
-        }
-        if len != 0 {
-            self.steal_cursor = self.steal_cursor.wrapping_add(1) % len;
-        }
-        WorkPop::Empty {
-            generation,
-            contended,
-        }
-    }
-
-    fn acquire_lane(&self) -> Option<LaneToken<T>> {
-        loop {
-            self.shared.activate_one_page();
-            if let Ok(lane) = self.shared.ready_lanes.pop() {
-                return Some(lane);
-            }
-            if self.shared.ready_pages.is_empty() {
-                return None;
-            }
-        }
-    }
-
-    fn drain_lane(&self, mut lane: LaneToken<T>) -> LaneDrain<T> {
-        if lane.cached_available == 0 {
-            lane.cached_available = lane.consumer.prefetch();
-            if lane.cached_available == 0 {
-                let released = lane.release_pending().then(|| lane.signal.clone());
-                return match self.shared.finish_empty_lane(lane) {
-                    FinishLane::Ready(lane) => {
-                        self.requeue_lane(lane);
-                        LaneDrain::Empty(Effects {
-                            released,
-                            wake: Wake::One,
-                        })
-                    }
-                    FinishLane::Parked => LaneDrain::Empty(Effects {
-                        released,
-                        wake: Wake::None,
-                    }),
-                    FinishLane::Retired { wake_all } => LaneDrain::Empty(Effects {
-                        released,
-                        wake: if wake_all { Wake::All } else { Wake::None },
-                    }),
-                };
-            }
-        }
-
-        let batch = lane.cached_available.min(PREFETCH_LIMIT);
-        let value = lane
-            .consumer
-            .pop()
-            .expect("cached_available guarantees prefetched data");
-        for _ in 1..batch {
-            self.local.push(
-                lane.consumer
-                    .pop()
-                    .expect("batch is bounded by cached availability"),
-            );
-        }
-        lane.cached_available -= batch;
-        lane.unreleased += batch;
-        let released = (lane.unreleased >= lane.release_batch && lane.release_pending())
-            .then(|| lane.signal.clone());
-
-        let mut wake = if batch > 1 { Wake::All } else { Wake::None };
-        if lane.cached_available != 0 {
-            self.requeue_lane(lane);
-            wake = wake.merge(Wake::One);
-        } else {
-            match self.shared.finish_empty_lane(lane) {
-                FinishLane::Ready(lane) => {
-                    self.requeue_lane(lane);
-                    wake = wake.merge(Wake::One);
-                }
-                FinishLane::Parked => {}
-                FinishLane::Retired { wake_all } => {
-                    if wake_all {
-                        wake = Wake::All;
-                    }
-                }
-            }
-        }
-
-        LaneDrain::Item {
-            value,
-            effects: Effects { released, wake },
-        }
-    }
-
-    fn requeue_lane(&self, lane: LaneToken<T>) {
-        self.shared
-            .ready_lanes
-            .push(lane)
-            .unwrap_or_else(|_| unreachable!("ready-lane queue is never closed"));
-    }
-
-    fn apply_effects(&self, effects: Effects) {
-        if let Some(signal) = effects.released {
-            signal.notify_space();
-        }
-        match effects.wake {
-            Wake::None => {}
-            Wake::One => self.shared.data_waiters.notify_one(),
-            Wake::All => self.shared.data_waiters.notify_all(),
-        }
-    }
-
-    /// Return whether all senders are gone and every lane is drained.
-    #[inline]
-    #[must_use]
-    pub fn is_disconnected(&self) -> bool {
-        self.shared.live_senders.load(Ordering::Acquire) == 0
-            && self.shared.registered_lanes.load(Ordering::Acquire) == 0
-    }
-
-    /// Return per-sender capacity after `yring` rounding.
-    #[inline]
-    #[must_use]
-    pub fn capacity_per_sender(&self) -> usize {
-        self.capacity_per_sender
-    }
-
-    /// Return a snapshot of the number of live senders.
-    #[inline]
-    #[must_use]
-    pub fn sender_count(&self) -> usize {
-        self.shared.live_senders.load(Ordering::Relaxed)
-    }
-
-    /// Return a snapshot of the number of live receivers.
-    #[inline]
-    #[must_use]
-    pub fn receiver_count(&self) -> usize {
-        self.shared.live_receivers.load(Ordering::Relaxed)
-    }
-
-    /// Return whether both receivers belong to the same channel.
-    #[inline]
-    #[must_use]
-    pub fn same_channel(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.shared, &other.shared)
-    }
-
-    /// Iterate until every sender disconnects and buffered values are drained.
-    #[inline]
-    #[must_use]
-    pub fn iter(&mut self) -> Iter<'_, T> {
-        Iter { receiver: self }
-    }
-
-    /// Iterate over values immediately available without blocking.
-    #[inline]
-    #[must_use]
-    pub fn try_iter(&mut self) -> TryIter<'_, T> {
-        TryIter { receiver: self }
-    }
-}
-
-impl<T> Drop for Receiver<T> {
-    fn drop(&mut self) {
-        self.shared.work_handoffs.fetch_add(1, Ordering::AcqRel);
-        let mut published = false;
-        while let Some(value) = self.local.pop() {
-            self.shared.injector.push(value);
-            published = true;
-        }
-        self.shared.unregister_receiver(self.id);
-        self.shared.work_handoffs.fetch_sub(1, Ordering::Release);
-
-        let previous = self.shared.live_receivers.fetch_sub(1, Ordering::AcqRel);
-        if previous == 1 {
-            self.shared.close_all_receivers();
-        } else if published {
-            self.shared.data_waiters.notify_all();
-        }
-    }
-}
-
-impl<T> fmt::Debug for Receiver<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Receiver")
-            .field("id", &self.id)
-            .field("local_items", &self.local.len())
-            .field(
-                "registered_lanes",
-                &self.shared.registered_lanes.load(Ordering::Relaxed),
-            )
-            .field(
-                "work_handoffs",
-                &self.shared.work_handoffs.load(Ordering::Relaxed),
-            )
-            .field(
-                "live_receivers",
-                &self.shared.live_receivers.load(Ordering::Relaxed),
-            )
-            .field("capacity_per_sender", &self.capacity_per_sender())
-            .finish_non_exhaustive()
-    }
-}
-
-/// Blocking iterator over a borrowed receiver.
-#[derive(Debug)]
-pub struct Iter<'a, T> {
-    receiver: &'a mut Receiver<T>,
-}
-
-impl<T> Iterator for Iter<'_, T> {
-    type Item = T;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.receiver.recv().ok()
-    }
-}
-
-impl<T> std::iter::FusedIterator for Iter<'_, T> {}
-
-/// Nonblocking iterator over a borrowed receiver.
-#[derive(Debug)]
-pub struct TryIter<'a, T> {
-    receiver: &'a mut Receiver<T>,
-}
-
-impl<T> Iterator for TryIter<'_, T> {
-    type Item = T;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.receiver.try_recv().ok()
-    }
-}
-
-/// Blocking iterator that owns its receiver.
-#[derive(Debug)]
-pub struct IntoIter<T> {
-    receiver: Receiver<T>,
-}
-
-impl<T> Iterator for IntoIter<T> {
-    type Item = T;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.receiver.recv().ok()
-    }
-}
-
-impl<T> std::iter::FusedIterator for IntoIter<T> {}
-
-#[allow(
-    clippy::into_iter_without_iter,
-    reason = "channel convention names the blocking iterator iter"
-)]
-impl<'a, T> IntoIterator for &'a mut Receiver<T> {
-    type Item = T;
-    type IntoIter = Iter<'a, T>;
-
-    #[inline]
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-
-impl<T> IntoIterator for Receiver<T> {
-    type Item = T;
-    type IntoIter = IntoIter<T>;
-
-    #[inline]
-    fn into_iter(self) -> Self::IntoIter {
-        IntoIter { receiver: self }
-    }
-}
-
-struct Lane<T> {
-    key: LaneKey,
-    signal: Arc<LaneSignal>,
-    consumer: yring::Consumer<T>,
-    cached_available: usize,
-    unreleased: usize,
-    release_batch: usize,
-}
-
-struct LaneToken<T>(Box<Lane<T>>);
-
-impl<T> LaneToken<T> {
-    fn new(lane: Lane<T>) -> Self {
-        Self(Box::new(lane))
-    }
-}
-
-impl<T> Deref for LaneToken<T> {
-    type Target = Lane<T>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T> DerefMut for LaneToken<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl<T> Lane<T> {
-    fn new(key: LaneKey, signal: Arc<LaneSignal>, consumer: yring::Consumer<T>) -> Self {
-        let release_batch = consumer.capacity().min(PREFETCH_LIMIT);
-        Self {
-            key,
-            signal,
-            consumer,
-            cached_available: 0,
-            unreleased: 0,
-            release_batch,
-        }
-    }
-
-    fn release_pending(&mut self) -> bool {
-        if self.unreleased == 0 {
-            return false;
-        }
-        self.consumer.release();
-        self.unreleased = 0;
-        true
-    }
-}
-
-enum FinishLane<T> {
-    Ready(LaneToken<T>),
-    Parked,
-    Retired { wake_all: bool },
-}
-
-enum LaneDrain<T> {
-    Item { value: T, effects: Effects },
-    Empty(Effects),
-}
-
-enum WorkPop<T> {
-    Item(T),
-    Empty { generation: usize, contended: bool },
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum Wake {
-    #[default]
-    None,
-    One,
-    All,
-}
-
-impl Wake {
-    fn merge(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::All, _) | (_, Self::All) => Self::All,
-            (Self::One, _) | (_, Self::One) => Self::One,
-            (Self::None, Self::None) => Self::None,
-        }
-    }
-}
-
-#[derive(Default)]
-struct Effects {
-    released: Option<Arc<LaneSignal>>,
-    wake: Wake,
-}
-
-impl Effects {
-    fn has_effect(&self) -> bool {
-        self.released.is_some() || self.wake != Wake::None
-    }
-}
-
-fn close_lane<T>(mut lane: LaneToken<T>) {
-    lane.consumer.close();
-    lane.signal.notify_space();
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> crate::compat::MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
     }
 }

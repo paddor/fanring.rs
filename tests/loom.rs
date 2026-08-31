@@ -247,6 +247,44 @@ fn mpmc_two_receivers_take_distinct_messages() {
 }
 
 #[test]
+fn mpmc_batch_publication_after_disconnect_preserves_values() {
+    model(|| {
+        let (mut tx, mut rx0) = mpmc::channel(2);
+        let mut rx1 = rx0.clone();
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        drop(tx);
+
+        let first = thread::spawn(move || rx0.recv().unwrap());
+        let second = thread::spawn(move || rx1.recv().unwrap());
+        let mut values = [first.join().unwrap(), second.join().unwrap()];
+        values.sort_unstable();
+        assert_eq!(values, [1, 2]);
+    });
+}
+
+#[test]
+fn mpmc_multiple_batch_publishers_preserve_values() {
+    model(|| {
+        let (mut tx0, mut rx0) = mpmc::channel(2);
+        let mut tx1 = tx0.try_clone().unwrap();
+        let mut rx1 = rx0.clone();
+        tx0.try_send(1).unwrap();
+        tx0.try_send(2).unwrap();
+        tx1.try_send(3).unwrap();
+        tx1.try_send(4).unwrap();
+        drop(tx0);
+        drop(tx1);
+
+        let first = thread::spawn(move || [rx0.recv().unwrap(), rx0.recv().unwrap()]);
+        let second = thread::spawn(move || [rx1.recv().unwrap(), rx1.recv().unwrap()]);
+        let mut values = [first.join().unwrap(), second.join().unwrap()].concat();
+        values.sort_unstable();
+        assert_eq!(values, [1, 2, 3, 4]);
+    });
+}
+
+#[test]
 fn mpmc_disconnect_wakes_receiver() {
     model(|| {
         let (tx, mut rx) = mpmc::channel::<u8>(1);

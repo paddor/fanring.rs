@@ -5,5 +5,6 @@ mod config;
 mod error;
 pub mod mpmc;
 pub mod mpsc;
+mod publication;
 mod ready;
 mod wait;

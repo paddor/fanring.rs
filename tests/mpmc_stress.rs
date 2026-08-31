@@ -17,9 +17,19 @@ const RACE_ROUNDS: usize = 2;
 const RACE_ROUNDS: usize = 100;
 
 #[cfg(miri)]
+const PUBLICATION_RACE_ROUNDS: usize = 2;
+#[cfg(not(miri))]
+const PUBLICATION_RACE_ROUNDS: usize = 20_000;
+
+#[cfg(miri)]
 const CHURN_MESSAGES: usize = 128;
 #[cfg(not(miri))]
 const CHURN_MESSAGES: usize = 20_000;
+
+#[cfg(miri)]
+const DISCONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(not(miri))]
+const DISCONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 
 struct DropCount(Arc<AtomicUsize>);
 
@@ -178,7 +188,7 @@ fn buffered_last_sender_drop_wakes_every_receiver() {
                     let barrier = barrier.clone();
                     scope.spawn(move || {
                         barrier.wait();
-                        rx.recv_timeout(Duration::from_secs(1))
+                        rx.recv_timeout(DISCONNECT_WAIT_TIMEOUT)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -203,7 +213,13 @@ fn buffered_last_sender_drop_wakes_every_receiver() {
 
 #[test]
 fn many_receivers_share_every_value_exactly_once() {
+    #[cfg(miri)]
+    const RECEIVERS: usize = 4;
+    #[cfg(not(miri))]
     const RECEIVERS: usize = 32;
+    #[cfg(miri)]
+    const MESSAGES: usize = 64;
+    #[cfg(not(miri))]
     const MESSAGES: usize = 8_192;
 
     let seen = Arc::new(
@@ -261,6 +277,100 @@ fn receiver_drop_racing_steal_preserves_every_value() {
         values.push(0);
         values.sort_unstable();
         assert_eq!(values, (0..64).collect::<Vec<_>>());
+    }
+}
+
+#[test]
+fn batch_publication_never_reports_premature_disconnect() {
+    for _ in 0..PUBLICATION_RACE_ROUNDS {
+        let (mut tx, mut rx0) = channel(64);
+        let mut rx1 = rx0.clone();
+        for value in 0..64 {
+            tx.try_send(value).unwrap();
+        }
+        drop(tx);
+
+        let barrier = Arc::new(Barrier::new(3));
+        let (mut rx0, first0, mut rx1, first1) = std::thread::scope(|scope| {
+            let barrier0 = barrier.clone();
+            let worker0 = scope.spawn(move || {
+                barrier0.wait();
+                let result = rx0.try_recv();
+                (rx0, result)
+            });
+            let barrier1 = barrier.clone();
+            let worker1 = scope.spawn(move || {
+                barrier1.wait();
+                let result = rx1.try_recv();
+                (rx1, result)
+            });
+            barrier.wait();
+            let (rx0, first0) = worker0.join().unwrap();
+            let (rx1, first1) = worker1.join().unwrap();
+            (rx0, first0, rx1, first1)
+        });
+
+        let mut terminal_seen = matches!(first0, Err(TryRecvError::Disconnected))
+            || matches!(first1, Err(TryRecvError::Disconnected));
+        let mut values = [first0, first1]
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+
+        loop {
+            let mut progress = false;
+            for receiver in [&mut rx0, &mut rx1] {
+                match receiver.try_recv() {
+                    Ok(value) => {
+                        assert!(!terminal_seen, "values appeared after disconnect");
+                        values.push(value);
+                        progress = true;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => terminal_seen = true,
+                }
+            }
+            if values.len() == 64 {
+                break;
+            }
+            assert!(progress, "buffered values became unreachable");
+        }
+
+        values.sort_unstable();
+        assert_eq!(values, (0..64).collect::<Vec<_>>());
+        assert_eq!(rx0.try_recv(), Err(TryRecvError::Disconnected));
+        assert_eq!(rx1.try_recv(), Err(TryRecvError::Disconnected));
+    }
+}
+
+#[test]
+fn batch_publication_with_live_sender_never_reports_disconnect() {
+    for _ in 0..RACE_ROUNDS {
+        let (mut tx, mut rx0) = channel(64);
+        let mut rx1 = rx0.clone();
+        for value in 0..64 {
+            tx.try_send(value).unwrap();
+        }
+
+        let barrier = Arc::new(Barrier::new(3));
+        let (first0, first1) = std::thread::scope(|scope| {
+            let barrier0 = barrier.clone();
+            let worker0 = scope.spawn(move || {
+                barrier0.wait();
+                rx0.try_recv()
+            });
+            let barrier1 = barrier.clone();
+            let worker1 = scope.spawn(move || {
+                barrier1.wait();
+                rx1.try_recv()
+            });
+            barrier.wait();
+            (worker0.join().unwrap(), worker1.join().unwrap())
+        });
+
+        assert_ne!(first0, Err(TryRecvError::Disconnected));
+        assert_ne!(first1, Err(TryRecvError::Disconnected));
+        drop(tx);
     }
 }
 
@@ -323,7 +433,10 @@ fn sender_slots_reuse_across_ready_page_boundaries() {
         let mut senders = (0..DYNAMIC_SENDERS)
             .map(|_| root.try_clone().unwrap())
             .collect::<Vec<_>>();
-        let mut slots = senders.iter().map(|tx| tx.lane_id()).collect::<Vec<_>>();
+        let mut slots = senders
+            .iter()
+            .map(fanring::mpmc::Sender::lane_id)
+            .collect::<Vec<_>>();
         slots.sort_unstable();
         assert!(slots.last().copied().unwrap() >= 129);
         if let Some(expected) = &expected_slots {
