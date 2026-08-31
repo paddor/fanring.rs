@@ -1,8 +1,10 @@
 #![cfg_attr(test, allow(dead_code, unused_imports))]
 
-use std::fs::{self, OpenOptions};
+mod support;
+
+use std::fs;
 use std::hint::black_box;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
@@ -11,12 +13,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use support::{Sampling, append_jsonl, median_and_relative_mad};
+
 #[derive(Debug, Clone, Copy)]
 struct Config {
     producers: usize,
     consumers: usize,
     capacity_per_sender: usize,
     duration: Duration,
+    sample: usize,
+    samples: usize,
+    expected_rows: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +64,9 @@ struct Row {
     seconds: f64,
     items: u64,
     items_per_sec: f64,
+    sample: usize,
+    samples: usize,
+    expected_rows: usize,
 }
 
 enum SendAttempt {
@@ -90,8 +100,9 @@ fn main() {
         std::env::var("FANRING_BENCH_SECS")
             .ok()
             .and_then(|value| value.parse().ok())
-            .unwrap_or(2.0),
+            .unwrap_or(1.0),
     );
+    let sampling = Sampling::from_env();
     let total_capacity = total_capacity();
     let out_path = std::env::var_os("FANRING_BENCH_OUT")
         .map(PathBuf::from)
@@ -111,30 +122,40 @@ fn main() {
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent).expect("create benchmark output dir");
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&out_path)
-        .expect("open benchmark JSONL");
-    let mut out = BufWriter::new(file);
+    let mut out = append_jsonl(&out_path);
 
     println!(
-        "MPMC comparison ({}, {:.2}s per config, capacity {}, output {})\n",
+        "MPMC comparison ({}, {} x {:.2}s, {:.2}s warmup, capacity {}, output {})\n",
         mode.label(),
+        sampling.samples,
         duration.as_secs_f64(),
+        sampling.warmup.as_secs_f64(),
         total_capacity,
         out_path.display()
     );
 
-    let configs = producer_counts()
+    let producer_counts = producer_counts();
+    let consumer_counts = consumer_counts();
+    let expected_rows = producer_counts.len()
+        * consumer_counts.len()
+        * selected_payload_count(&payload_filter)
+        * selected_implementation_count(&impl_filter)
+        * sampling.samples;
+    let configs = producer_counts
         .into_iter()
         .flat_map(|producers| {
-            consumer_counts().into_iter().map(move |consumers| Config {
-                producers,
-                consumers,
-                capacity_per_sender: capacity_per_sender(total_capacity, producers),
-                duration,
-            })
+            consumer_counts
+                .iter()
+                .copied()
+                .map(move |consumers| Config {
+                    producers,
+                    consumers,
+                    capacity_per_sender: capacity_per_sender(total_capacity, producers),
+                    duration,
+                    sample: 0,
+                    samples: sampling.samples,
+                    expected_rows,
+                })
         })
         .collect::<Vec<_>>();
 
@@ -144,6 +165,7 @@ fn main() {
             &mut out,
             &configs,
             &impl_filter,
+            sampling,
             mode,
             Payload {
                 label: "u64",
@@ -157,6 +179,7 @@ fn main() {
             &mut out,
             &configs,
             &impl_filter,
+            sampling,
             mode,
             Payload {
                 label: "bytes64",
@@ -170,6 +193,7 @@ fn main() {
             &mut out,
             &configs,
             &impl_filter,
+            sampling,
             mode,
             Payload {
                 label: "bytes256",
@@ -186,39 +210,78 @@ fn run_payload<T>(
     out: &mut impl Write,
     configs: &[Config],
     impl_filter: &Filter,
+    sampling: Sampling,
     mode: Mode,
     payload: Payload<T>,
 ) where
     T: Copy + Send + 'static,
 {
+    type BenchFn<T> = fn(&RunContext, Config, Mode, Payload<T>) -> Row;
+
+    let mut implementations: Vec<(&str, BenchFn<T>)> = Vec::new();
+    if impl_filter.matches("fanring-mpmc") {
+        implementations.push(("fanring-mpmc", bench_fanring::<T>));
+    }
+    if impl_filter.matches("crossbeam-channel") {
+        implementations.push(("crossbeam-channel", bench_crossbeam::<T>));
+    }
+    if impl_filter.matches("flume") {
+        implementations.push(("flume", bench_flume::<T>));
+    }
+    if impl_filter.matches("kanal") {
+        implementations.push(("kanal", bench_kanal::<T>));
+    }
+    if implementations.is_empty() {
+        return;
+    }
+
     println!("--- {} ({} bytes) ---", payload.label, size_of::<T>());
     for &config in configs {
-        let mut rows = Vec::new();
-        if impl_filter.matches("fanring-mpmc") {
-            rows.push(bench_fanring(context, config, mode, payload));
-        }
-        if impl_filter.matches("crossbeam-channel") {
-            rows.push(bench_crossbeam(context, config, mode, payload));
-        }
-        if impl_filter.matches("flume") {
-            rows.push(bench_flume(context, config, mode, payload));
-        }
-        if impl_filter.matches("kanal") {
-            rows.push(bench_kanal(context, config, mode, payload));
-        }
-
         println!(
             "  producers={:<2} consumers={:<2} capacity_per_sender={:<4}",
             config.producers, config.consumers, config.capacity_per_sender
         );
-        for row in rows {
-            println!(
-                "    {:<18} {:>8.2}M items/s",
-                row.implementation,
-                row.items_per_sec / 1_000_000.0
+        if !sampling.warmup.is_zero() {
+            let warmup = Config {
+                duration: sampling.warmup,
+                ..config
+            };
+            for (_, bench) in &implementations {
+                let _ = bench(context, warmup, mode, payload);
+            }
+        }
+
+        let mut rows = Vec::new();
+        for sample in 0..sampling.samples {
+            let measured = Config { sample, ..config };
+            let start = sample % implementations.len();
+            for offset in 0..implementations.len() {
+                let (_, bench) = implementations[(start + offset) % implementations.len()];
+                let row = bench(context, measured, mode, payload);
+                println!(
+                    "    sample={:<2} {:<18} {:>8.2}M items/s",
+                    sample + 1,
+                    row.implementation,
+                    row.items_per_sec / 1_000_000.0
+                );
+                serde_json::to_writer(&mut *out, &row).expect("write benchmark row");
+                writeln!(out).expect("write benchmark newline");
+                rows.push(row);
+            }
+        }
+
+        for (implementation, _) in &implementations {
+            let (median, relative_mad) = median_and_relative_mad(
+                rows.iter()
+                    .filter(|row| row.implementation == *implementation)
+                    .map(|row| row.items_per_sec),
             );
-            serde_json::to_writer(&mut *out, &row).expect("write benchmark row");
-            writeln!(out).expect("write benchmark newline");
+            println!(
+                "    {:<18} median {:>8.2}M items/s  MAD {:>5.2}%",
+                implementation,
+                median / 1_000_000.0,
+                relative_mad
+            );
         }
         println!();
     }
@@ -369,7 +432,6 @@ where
     let start = Instant::now();
     thread::sleep(config.duration);
     stop.store(true, Ordering::Relaxed);
-    let elapsed = start.elapsed();
 
     let sent = sender_handles
         .into_iter()
@@ -379,6 +441,7 @@ where
         .into_iter()
         .map(|handle| handle.join().expect("consumer thread"))
         .sum::<u64>();
+    let elapsed = start.elapsed();
     assert_eq!(sent, received, "{implementation} lost messages");
 
     Row {
@@ -395,6 +458,9 @@ where
         seconds: elapsed.as_secs_f64(),
         items: received,
         items_per_sec: received as f64 / elapsed.as_secs_f64(),
+        sample: config.sample,
+        samples: config.samples,
+        expected_rows: config.expected_rows,
     }
 }
 
@@ -587,6 +653,20 @@ fn producer_counts() -> Vec<usize> {
 
 fn consumer_counts() -> Vec<usize> {
     counts_from_env("FANRING_BENCH_CONSUMERS", &[1, 2, 4, 8])
+}
+
+fn selected_payload_count(filter: &Filter) -> usize {
+    ["u64", "bytes64", "bytes256"]
+        .into_iter()
+        .filter(|payload| filter.matches(payload))
+        .count()
+}
+
+fn selected_implementation_count(filter: &Filter) -> usize {
+    ["fanring-mpmc", "crossbeam-channel", "flume", "kanal"]
+        .into_iter()
+        .filter(|implementation| filter.matches(implementation))
+        .count()
 }
 
 fn counts_from_env(name: &str, default: &[usize]) -> Vec<usize> {
