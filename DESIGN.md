@@ -20,8 +20,11 @@ list. The number of producers is limited only by available memory.
 
 The MPMC registry stores idle consumers directly in lane slots. A ready page
 activation moves matching consumers into a lock-free ready-lane queue. It also
-tracks one work stealer per live receiver. Receiver creation, receiver drop,
-and stealer-list refresh use the registry mutex.
+tracks one work stealer per live receiver. Receiver creation and drop rebuild a
+single immutable stealer snapshot under the registry mutex and publish it with
+`ArcSwap`. Receivers load that snapshot without locking only after their local
+deque and the shared injector miss. Persistent stealer storage is linear in the
+number of receivers.
 
 ## Send Path
 
@@ -66,7 +69,10 @@ parking while partial credits remain unpublished.
 
 Each receiver owns a FIFO work deque. A receive operation checks its local
 deque, the shared injector, and other receivers' stealers before claiming a
-ready sender lane.
+ready sender lane. Each shared source gets one steal attempt per sweep. A
+contended sweep advances the victim cursor, checks ready sender lanes, and then
+retries before parking. One busy deque cannot hide later victims or ready
+lanes.
 
 After claiming a lane, it prefetches and removes at most 64 values. The first
 value satisfies the current receive. Remaining values move to the receiver's
@@ -86,10 +92,10 @@ concurrently and permits later sender batches to overtake earlier local work.
 ## Blocking Waits
 
 Each sender lane has one producer space wait cell. MPSC has a single-waiter
-receiver data cell; MPMC has a generation-counted multi-waiter data cell. Wait
-cells combine atomics with a mutex and condition variable. Notifications first
-advance the generation. With no registered waiter, notification stays atomic
-only.
+receiver data cell. MPMC packs a waiter-present bit and monotonic notification
+generation into one atomic state; its exact waiter count lives under the
+condition-variable mutex. With no registered waiter, notification is one
+atomic operation.
 
 `send` first calls the non-blocking send path. On `Full`, it registers its lane
 waiter, retries, then sleeps only if the ring is still full. `recv` does the
@@ -102,13 +108,14 @@ A blocking sender can publish data while holding its space registration. A
 blocking receiver can release capacity while holding its data registration.
 Those opposite-direction wakeups are deferred until after the current
 registration is released. This prevents data-wait and space-wait lock-order
-inversion. With no waiter, notification is one atomic exchange and no lock.
+inversion. With no waiter, notification is one atomic operation and no lock.
 
 ## Drop
 
-Sender drop closes and activates its lane, decrements the live-sender count,
-then wakes a blocked receiver. The receiver drains buffered values before
-retiring the lane.
+Sender drop closes and activates its lane, then decrements the live-sender
+count. Earlier sender drops wake one receiver. The last sender drop wakes every
+receiver. Receivers drain buffered values before retiring lanes; final lane
+retirement also broadcasts when needed.
 
 MPSC receiver drop marks the channel closed and closes installed and pending
 consumers. MPMC closes the channel when its last receiver drops. Earlier MPMC

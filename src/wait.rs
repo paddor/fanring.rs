@@ -134,65 +134,65 @@ impl Drop for WaitRegistration<'_> {
 /// Waiters snapshot a notification generation while holding the condition
 /// mutex. Notifications advance the generation before taking that mutex, so a
 /// waiter either observes the change or is asleep when the condition variable
-/// is signaled.
+/// is signaled. The low atomic state bit records whether any waiter exists;
+/// the exact count lives under the mutex already required by the condition
+/// variable.
 pub(crate) struct MultiWaitCell {
-    generation: PaddedWaitState,
-    waiters: AtomicUsize,
-    mutex: Mutex<()>,
+    state: PaddedWaitState,
+    mutex: Mutex<usize>,
     condvar: Condvar,
 }
 
 impl MultiWaitCell {
     pub(crate) fn new() -> Self {
         Self {
-            generation: PaddedWaitState(AtomicUsize::new(0)),
-            waiters: AtomicUsize::new(0),
-            mutex: Mutex::new(()),
+            state: PaddedWaitState(AtomicUsize::new(0)),
+            mutex: Mutex::new(0),
             condvar: Condvar::new(),
         }
     }
 
     pub(crate) fn prepare(&self) -> MultiWaitRegistration<'_> {
-        let guard = match self.mutex.lock() {
+        let mut guard = match self.mutex.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let snapshot = self.generation.0.fetch_add(0, Ordering::AcqRel);
-        self.waiters.fetch_add(1, Ordering::AcqRel);
+        *guard = guard.checked_add(1).expect("waiter count overflow");
+        let previous = self.state.0.fetch_or(WAITING, Ordering::AcqRel);
         MultiWaitRegistration {
             cell: self,
             guard: Some(guard),
-            snapshot,
+            snapshot: previous | WAITING,
         }
     }
 
     #[inline]
     pub(crate) fn notify_one(&self) {
-        self.generation.0.fetch_add(1, Ordering::Release);
-        if self.waiters.fetch_add(0, Ordering::AcqRel) == 0 {
+        let previous = self.state.0.fetch_add(NOTIFY_INCREMENT, Ordering::AcqRel);
+        if previous & WAITING == 0 {
             return;
         }
 
-        let _guard = match self.mutex.lock() {
+        let guard = match self.mutex.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if self.waiters.load(Ordering::Relaxed) != 0 {
+        if *guard != 0 {
             self.condvar.notify_one();
         }
     }
 
     pub(crate) fn notify_all(&self) {
-        self.generation.0.fetch_add(1, Ordering::Release);
-        if self.waiters.fetch_add(0, Ordering::AcqRel) == 0 {
+        let previous = self.state.0.fetch_add(NOTIFY_INCREMENT, Ordering::AcqRel);
+        if previous & WAITING == 0 {
             return;
         }
 
-        let _guard = match self.mutex.lock() {
+        let guard = match self.mutex.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if self.waiters.load(Ordering::Relaxed) != 0 {
+        if *guard != 0 {
             self.condvar.notify_all();
         }
     }
@@ -201,21 +201,20 @@ impl MultiWaitCell {
 impl fmt::Debug for MultiWaitCell {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MultiWaitCell")
-            .field("generation", &self.generation.0.load(Ordering::Relaxed))
-            .field("waiters", &self.waiters.load(Ordering::Relaxed))
+            .field("state", &self.state.0.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
 
 pub(crate) struct MultiWaitRegistration<'a> {
     cell: &'a MultiWaitCell,
-    guard: Option<MutexGuard<'a, ()>>,
+    guard: Option<MutexGuard<'a, usize>>,
     snapshot: usize,
 }
 
 impl MultiWaitRegistration<'_> {
     pub(crate) fn wait(mut self) {
-        if self.cell.generation.0.fetch_add(0, Ordering::AcqRel) != self.snapshot {
+        if self.cell.state.0.load(Ordering::Acquire) != self.snapshot {
             self.clear();
             return;
         }
@@ -229,7 +228,7 @@ impl MultiWaitRegistration<'_> {
     }
 
     pub(crate) fn wait_timeout(mut self, timeout: Duration) -> bool {
-        if self.cell.generation.0.fetch_add(0, Ordering::AcqRel) != self.snapshot {
+        if self.cell.state.0.load(Ordering::Acquire) != self.snapshot {
             self.clear();
             return false;
         }
@@ -249,7 +248,11 @@ impl MultiWaitRegistration<'_> {
     }
 
     fn clear(&mut self) {
-        self.cell.waiters.fetch_sub(1, Ordering::AcqRel);
+        let guard = self.guard.as_mut().expect("wait registration is active");
+        **guard = (**guard).checked_sub(1).expect("waiter count underflow");
+        if **guard == 0 {
+            self.cell.state.0.fetch_and(!WAITING, Ordering::AcqRel);
+        }
         self.guard.take();
     }
 }
@@ -259,5 +262,80 @@ impl Drop for MultiWaitRegistration<'_> {
         if self.guard.is_some() {
             self.clear();
         }
+    }
+}
+
+#[cfg(all(test, loom, target_pointer_width = "64"))]
+mod loom_tests {
+    use super::MultiWaitCell;
+    use super::{NOTIFY_INCREMENT, WAITING};
+    use crate::compat::{Arc, AtomicBool, Ordering};
+
+    #[test]
+    fn multi_wait_notify_one_cannot_be_lost() {
+        loom::model(|| {
+            let cell = Arc::new(MultiWaitCell::new());
+            let ready = Arc::new(AtomicBool::new(false));
+            let waiter_cell = cell.clone();
+            let waiter_ready = ready.clone();
+
+            let waiter = loom::thread::spawn(move || {
+                let registration = waiter_cell.prepare();
+                if waiter_ready.load(Ordering::Acquire) {
+                    registration.cancel();
+                } else {
+                    registration.wait();
+                }
+                assert!(waiter_ready.load(Ordering::Acquire));
+            });
+
+            ready.store(true, Ordering::Release);
+            cell.notify_one();
+            waiter.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn multi_wait_two_notifications_do_not_restore_snapshot() {
+        loom::model(|| {
+            let cell = MultiWaitCell::new();
+            let registration = cell.prepare();
+            cell.state.0.fetch_add(NOTIFY_INCREMENT, Ordering::AcqRel);
+            cell.state.0.fetch_add(NOTIFY_INCREMENT, Ordering::AcqRel);
+            assert_ne!(cell.state.0.load(Ordering::Acquire), WAITING);
+            registration.cancel();
+        });
+    }
+
+    #[test]
+    fn multi_wait_notify_all_releases_every_waiter() {
+        let mut builder = loom::model::Builder::new();
+        builder.preemption_bound = Some(2);
+        builder.max_branches = 10_000;
+        builder.check(|| {
+            let cell = Arc::new(MultiWaitCell::new());
+            let ready = Arc::new(AtomicBool::new(false));
+            let mut waiters = Vec::new();
+
+            for _ in 0..2 {
+                let waiter_cell = cell.clone();
+                let waiter_ready = ready.clone();
+                waiters.push(loom::thread::spawn(move || {
+                    let registration = waiter_cell.prepare();
+                    if waiter_ready.load(Ordering::Acquire) {
+                        registration.cancel();
+                    } else {
+                        registration.wait();
+                    }
+                    assert!(waiter_ready.load(Ordering::Acquire));
+                }));
+            }
+
+            ready.store(true, Ordering::Release);
+            cell.notify_all();
+            for waiter in waiters {
+                waiter.join().unwrap();
+            }
+        });
     }
 }

@@ -159,6 +159,84 @@ fn parked_receivers_all_observe_disconnect() {
 }
 
 #[test]
+fn buffered_last_sender_drop_wakes_every_receiver() {
+    const RECEIVERS: usize = 8;
+
+    for _ in 0..RACE_ROUNDS {
+        let (mut tx, rx0) = channel(1);
+        tx.try_send(7).unwrap();
+        let mut receivers = vec![rx0];
+        for _ in 1..RECEIVERS {
+            receivers.push(receivers[0].clone());
+        }
+        let barrier = Arc::new(Barrier::new(RECEIVERS + 1));
+
+        let results = std::thread::scope(|scope| {
+            let handles = receivers
+                .into_iter()
+                .map(|mut rx| {
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        rx.recv_timeout(Duration::from_secs(1))
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            drop(tx);
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(results.iter().filter(|result| result == &&Ok(7)).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result == &&Err(RecvTimeoutError::Disconnected))
+                .count(),
+            RECEIVERS - 1
+        );
+    }
+}
+
+#[test]
+fn many_receivers_share_every_value_exactly_once() {
+    const RECEIVERS: usize = 32;
+    const MESSAGES: usize = 8_192;
+
+    let seen = Arc::new(
+        (0..MESSAGES)
+            .map(|_| AtomicUsize::new(0))
+            .collect::<Vec<_>>(),
+    );
+    let (mut tx, rx0) = channel(64);
+    let mut receivers = vec![rx0];
+    for _ in 1..RECEIVERS {
+        receivers.push(receivers[0].clone());
+    }
+
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            for value in 0..MESSAGES {
+                tx.send(value).unwrap();
+            }
+        });
+        for mut rx in receivers {
+            let seen = seen.clone();
+            scope.spawn(move || {
+                while let Ok(value) = rx.recv() {
+                    assert_eq!(seen[value].fetch_add(1, Ordering::Relaxed), 0);
+                }
+            });
+        }
+    });
+
+    assert!(seen.iter().all(|count| count.load(Ordering::Relaxed) == 1));
+}
+
+#[test]
 fn receiver_drop_racing_steal_preserves_every_value() {
     for _ in 0..RACE_ROUNDS {
         let (mut tx, mut rx0) = channel(64);
@@ -245,7 +323,7 @@ fn sender_slots_reuse_across_ready_page_boundaries() {
         let mut senders = (0..DYNAMIC_SENDERS)
             .map(|_| root.try_clone().unwrap())
             .collect::<Vec<_>>();
-        let mut slots = senders.iter().map(|tx| tx.shard()).collect::<Vec<_>>();
+        let mut slots = senders.iter().map(|tx| tx.lane_id()).collect::<Vec<_>>();
         slots.sort_unstable();
         assert!(slots.last().copied().unwrap() >= 129);
         if let Some(expected) = &expected_slots {

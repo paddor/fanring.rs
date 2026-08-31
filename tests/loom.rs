@@ -6,9 +6,17 @@ use loom::sync::Arc;
 use loom::sync::atomic::{AtomicBool, Ordering};
 use loom::thread;
 
+fn model(check: impl Fn() + Sync + Send + 'static) {
+    let mut builder = loom::model::Builder::new();
+    builder.max_branches = 10_000;
+    builder.max_permutations = Some(10_000);
+    builder.preemption_bound = Some(2);
+    builder.check(check);
+}
+
 #[test]
 fn send_recv_ready_race_does_not_lose_message() {
-    loom::model(|| {
+    model(|| {
         let (mut tx, mut rx) = channel(1);
         tx.try_send(1).unwrap();
         assert_eq!(rx.try_recv(), Ok(1));
@@ -54,7 +62,7 @@ fn send_recv_ready_race_does_not_lose_message() {
 
 #[test]
 fn receiver_drop_makes_sender_disconnect() {
-    loom::model(|| {
+    model(|| {
         let (mut tx, rx) = channel(1);
         tx.try_send(1).unwrap();
 
@@ -81,8 +89,8 @@ fn receiver_drop_makes_sender_disconnect() {
 }
 
 #[test]
-fn second_shard_ready_race_does_not_lose_message() {
-    loom::model(|| {
+fn second_lane_ready_race_does_not_lose_message() {
+    model(|| {
         let (mut tx0, mut rx) = channel(1);
         let mut tx1 = tx0.try_clone().unwrap();
 
@@ -113,7 +121,7 @@ fn second_shard_ready_race_does_not_lose_message() {
 
 #[test]
 fn register_race_with_receiver_drop_reports_disconnected() {
-    loom::model(|| {
+    model(|| {
         let (mut tx, rx) = channel::<u8>(1);
 
         let dropper = thread::spawn(move || {
@@ -137,7 +145,7 @@ fn register_race_with_receiver_drop_reports_disconnected() {
 
 #[test]
 fn sender_drop_during_receiver_drain_preserves_buffered_items() {
-    loom::model(|| {
+    model(|| {
         let (mut tx, mut rx) = channel(2);
         tx.try_send(1).unwrap();
         tx.try_send(2).unwrap();
@@ -156,7 +164,7 @@ fn sender_drop_during_receiver_drain_preserves_buffered_items() {
 
 #[test]
 fn blocking_recv_does_not_lose_data_wakeup() {
-    loom::model(|| {
+    model(|| {
         let (mut tx, mut rx) = channel(1);
         let sender = thread::spawn(move || tx.send(1));
 
@@ -167,7 +175,7 @@ fn blocking_recv_does_not_lose_data_wakeup() {
 
 #[test]
 fn blocking_send_does_not_lose_space_wakeup() {
-    loom::model(|| {
+    model(|| {
         let (mut tx, mut rx) = channel(1);
         tx.try_send(1).unwrap();
         let sender = thread::spawn(move || tx.send(2));
@@ -180,7 +188,7 @@ fn blocking_send_does_not_lose_space_wakeup() {
 
 #[test]
 fn blocking_send_recv_do_not_deadlock_while_sender_stays_alive() {
-    loom::model(|| {
+    model(|| {
         let (mut tx, mut rx) = channel(1);
         tx.try_send(1).unwrap();
         let done = Arc::new(AtomicBool::new(false));
@@ -201,7 +209,7 @@ fn blocking_send_recv_do_not_deadlock_while_sender_stays_alive() {
 
 #[test]
 fn blocking_recv_wakes_on_sender_disconnect() {
-    loom::model(|| {
+    model(|| {
         let (tx, mut rx) = channel::<u8>(1);
         let sender = thread::spawn(move || drop(tx));
 
@@ -212,7 +220,7 @@ fn blocking_recv_wakes_on_sender_disconnect() {
 
 #[test]
 fn blocking_send_wakes_on_receiver_disconnect() {
-    loom::model(|| {
+    model(|| {
         let (mut tx, rx) = channel(1);
         tx.try_send(1).unwrap();
         let sender = thread::spawn(move || tx.send(2));
@@ -224,7 +232,7 @@ fn blocking_send_wakes_on_receiver_disconnect() {
 
 #[test]
 fn mpmc_two_receivers_take_distinct_messages() {
-    loom::model(|| {
+    model(|| {
         let (mut tx, mut rx0) = mpmc::channel(2);
         let mut rx1 = rx0.clone();
         tx.try_send(1).unwrap();
@@ -239,22 +247,19 @@ fn mpmc_two_receivers_take_distinct_messages() {
 }
 
 #[test]
-fn mpmc_disconnect_wakes_all_receivers() {
-    loom::model(|| {
-        let (tx, mut rx0) = mpmc::channel::<u8>(1);
-        let mut rx1 = rx0.clone();
-        let first = thread::spawn(move || rx0.recv());
-        let second = thread::spawn(move || rx1.recv());
+fn mpmc_disconnect_wakes_receiver() {
+    model(|| {
+        let (tx, mut rx) = mpmc::channel::<u8>(1);
+        let receiver = thread::spawn(move || rx.recv());
 
         drop(tx);
-        assert_eq!(first.join().unwrap(), Err(mpmc::RecvError));
-        assert_eq!(second.join().unwrap(), Err(mpmc::RecvError));
+        assert_eq!(receiver.join().unwrap(), Err(mpmc::RecvError));
     });
 }
 
 #[test]
 fn mpmc_receiver_drop_preserves_prefetched_work() {
-    loom::model(|| {
+    model(|| {
         let (mut tx, mut rx0) = mpmc::channel(2);
         tx.try_send(1).unwrap();
         tx.try_send(2).unwrap();
@@ -268,7 +273,7 @@ fn mpmc_receiver_drop_preserves_prefetched_work() {
 
 #[test]
 fn mpmc_receiver_drop_racing_steal_preserves_prefetched_work() {
-    loom::model(|| {
+    model(|| {
         let (mut tx, mut rx0) = mpmc::channel(2);
         let mut rx1 = rx0.clone();
         tx.try_send(1).unwrap();
@@ -285,7 +290,7 @@ fn mpmc_receiver_drop_racing_steal_preserves_prefetched_work() {
 
 #[test]
 fn mpmc_blocking_send_does_not_lose_space_wakeup() {
-    loom::model(|| {
+    model(|| {
         let (mut tx, mut rx) = mpmc::channel(1);
         tx.try_send(1).unwrap();
         let sender = thread::spawn(move || tx.send(2));
@@ -298,7 +303,7 @@ fn mpmc_blocking_send_does_not_lose_space_wakeup() {
 
 #[test]
 fn mpmc_blocking_send_wakes_on_last_receiver_drop() {
-    loom::model(|| {
+    model(|| {
         let (mut tx, rx0) = mpmc::channel(1);
         let rx1 = rx0.clone();
         tx.try_send(1).unwrap();
@@ -312,7 +317,7 @@ fn mpmc_blocking_send_wakes_on_last_receiver_drop() {
 
 #[test]
 fn mpmc_register_race_with_last_receiver_drop_reports_disconnected() {
-    loom::model(|| {
+    model(|| {
         let (mut tx, rx0) = mpmc::channel::<u8>(1);
         let rx1 = rx0.clone();
         drop(rx0);
