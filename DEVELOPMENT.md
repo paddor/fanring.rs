@@ -7,17 +7,23 @@ cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 RUSTFLAGS="--cfg loom" cargo test --lib --test loom -- --test-threads=1
+cargo +nightly miri test --test mpsc --test stress -- --test-threads=1
+MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-permissive-provenance -Zmiri-ignore-leaks" \
+  cargo +nightly miri test --all-features -- --test-threads=1
 ```
 
 The test suite covers per-sender FIFO, per-sender backpressure, disconnect
-behavior, drop cleanup, sparse lane use, MPMC receiver churn, and the 64-bit
-ready mask. Small private wait-cell Loom models are exhaustive. End-to-end
-channel models use a preemption bound of two and at most 10,000 permutations.
+behavior, drop cleanup, sparse lane use, MPMC batch publication and receiver
+churn, unusual value layouts, and the 64-bit ready mask. Small private wait-cell
+and publication-tracker Loom models are exhaustive. End-to-end channel models
+use a preemption bound of two and at most 10,000 permutations.
 
 `fanring` forbids direct `unsafe` code. Slot safety is delegated to
 `yring`, which has its own Miri/Loom coverage. Crossbeam deque and `ArcSwap`
 internals are not Loom-instrumented here; normal stress tests cover their
-integration with fanring.
+integration with fanring. The full Miri run uses Tree Borrows and ignores
+process-global leaks because `crossbeam-epoch` does not pass Miri's default
+Stacked Borrows and leak checks. The MPSC-only run keeps those checks enabled.
 
 ## Benchmarks
 
@@ -40,7 +46,7 @@ Defaults:
 - measurement: 5 samples of 1 second each
 - producers: 1, 2, 4, 8
 - MPMC consumers: 1, 2, 4, 8
-- capacity: 8192 total items
+- nominal capacity: 8192 items
 - payloads: `u64`, `[u8; 64]`, `[u8; 256]`
 
 Worker threads synchronize on a start barrier. Implementations rotate order
@@ -48,6 +54,11 @@ between samples. Shutdown and queue draining are included in elapsed time, and
 each run asserts that sent and received counts match. Output includes every
 sample and is appended to `target/fanring-bench/results.jsonl` or
 `target/fanring-bench/mpmc.jsonl`.
+
+JSONL rows record `nominal_capacity` and `capacity_model`. Fanring uses a
+per-ring HWM. MPMC receiver staging is additional. Competing channels use one
+shared bound in these benchmarks. The chart reader accepts legacy
+`total_capacity` rows.
 
 Short smoke run:
 
