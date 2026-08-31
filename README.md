@@ -1,6 +1,6 @@
 # fanring
 
-Fast bounded MPSC and MPMC channels built from one SPSC `yring` per producer.
+Fast typed MPSC and MPMC channels built from one SPSC `yring` per producer.
 
 Sender registration is dynamic. Each sender writes to its own ring, so
 producers do not contend on a shared queue tail. Choose `mpsc` for one consumer
@@ -61,14 +61,25 @@ them in batches. Receiver drop republishes its buffered work. Ordering is
 relaxed. Moving values into that second-stage queue costs more for large inline
 types; box large payloads when move bandwidth dominates.
 
+`mpmc::try_recv` may return a transient `Empty` while another receiver owns and
+publishes a batch. `Disconnected` is final: all senders are gone, sender rings
+are drained, no staged work remains, and no work publication is in flight.
+
 ## Contract
 
-- Bounded MPSC or MPMC with blocking, timeout, and non-blocking operations.
+- Per-producer-HWM MPSC or MPMC with blocking, timeout, and non-blocking
+  operations.
 - No configured producer limit.
 - One bounded SPSC ring per live sender.
-- Capacity is per sender and rounded up to a power of two.
+- Capacity is one HWM per sender and is rounded up to a power of two.
+- MPMC receiver staging is outside sender-ring HWM. Total resident items can
+  temporarily exceed the sum of sender-ring capacities.
 - `try_send` returns `Full` when that sender's ring is full.
-- `try_recv` returns `Empty` when no active ring has visible data.
+- MPSC `try_recv` returns `Empty` when no active ring has visible data.
+- MPMC `try_recv` can also return `Empty` while a competing receiver publishes
+  an internal batch.
+- Receiver `is_disconnected` becomes true as soon as all senders are dropped;
+  buffered values remain readable afterward.
 - `send` and `recv` park only after the corresponding try operation fails.
 - Blocking operations spin briefly before parking.
 - `send_timeout` and `recv_timeout` bound that parked wait.
@@ -76,9 +87,11 @@ types; box large payloads when move bandwidth dominates.
 - Active sender lanes are served in batches of at most 64 items.
 - Dropped sender slots are reused after their rings drain.
 - Receive-side batching is internal to `recv`/`try_recv`.
-- Steady send and batch-drain paths use no locks. Registration, ready-page
-  activation, lane idle transitions, receiver maintenance, and parking may
-  lock.
+- Steady successful sends and prefetched value pops take no explicit mutex.
+  Registration, ready-page activation, lane idle transitions, receiver
+  maintenance, and parking may lock.
+- Try operations are not wait-free. Dynamic queues and registry growth may
+  allocate, so allocator internals may also lock.
 - `unsafe` is forbidden in this crate. Ring storage is delegated to `yring`.
 
 ## Good Fit
@@ -93,6 +106,7 @@ types; box large payloads when move bandwidth dominates.
 
 - Need global FIFO or strict one-item round robin.
 - Need one exact capacity shared across all producers.
+- Need an exact total MPMC bound that includes receiver staging.
 - Need async wakeups.
 
 More detail: [DESIGN.md](DESIGN.md)

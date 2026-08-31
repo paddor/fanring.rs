@@ -35,7 +35,8 @@ number of receivers.
 
 ## Lane Readiness
 
-Each lane has a padded two-state signal:
+Each lane has a cache-line-aligned readiness block containing its two-state
+signal, ready page, and page bit:
 
 - `IDLE`: receiver is not tracking the lane
 - `PENDING`: lane is queued or active
@@ -86,8 +87,20 @@ by an always-busy lane. Receiver drop moves its remaining local values to the
 shared injector and wakes competitors. This is one topology for all receiver
 counts; there is no single-consumer specialization.
 
+A publication tracker protects transfers that can make work temporarily
+invisible: lane acquisition and drain, publication into a local FIFO, lane
+requeue or retirement, and receiver handoff or removal. Publishers increment a
+generation before decrementing the in-flight count. An empty receiver scan can
+return `Disconnected` only when its generation is unchanged, no publication is
+in flight, all senders are gone, and all sender lanes are retired. Contention or
+a changed generation produces a bounded retry; exhaustion reports transient
+`Empty`, never premature `Disconnected`.
+
 MPMC ordering is relaxed. This permits batches from one sender lane to execute
 concurrently and permits later sender batches to overtake earlier local work.
+Local and injector work is checked before sender lanes. This may delay a ready
+lane behind a finite staged backlog, but staged work is drained or stolen and
+sender batches remain bounded at 64 values.
 
 ## Blocking Waits
 
@@ -127,4 +140,6 @@ sends return `Disconnected`.
 MPSC ordering is FIFO within one sender lane and relaxed across lanes. MPMC
 ordering is fully relaxed. Capacity is per sender, like a per-pipe ZMQ HWM.
 Adding a sender adds another ring and another capacity allocation. No shared
-global credit counter appears on the send path.
+global credit counter appears on the send path. MPMC receiver deques and the
+injector hold prefetched values outside those ring HWMs, so the sum of ring
+capacities is a nominal bound rather than an exact total resident-item bound.
