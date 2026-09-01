@@ -199,6 +199,47 @@ fn stalled_receiver_does_not_strand_its_sender_lane() {
 }
 
 #[test]
+fn one_prefetched_batch_reaches_every_waiting_receiver() {
+    #[cfg(miri)]
+    const RECEIVERS: usize = 2;
+    #[cfg(not(miri))]
+    const RECEIVERS: usize = 8;
+
+    let (mut tx, rx0) = channel(RECEIVERS);
+    let mut receivers = vec![rx0];
+    for _ in 1..RECEIVERS {
+        receivers.push(receivers[0].clone());
+    }
+    let barrier = Arc::new(Barrier::new(RECEIVERS + 1));
+
+    let mut values = std::thread::scope(|scope| {
+        let handles = receivers
+            .into_iter()
+            .map(|mut rx| {
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    rx.recv_timeout(DISCONNECT_WAIT_TIMEOUT)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        barrier.wait();
+        for value in 0..RECEIVERS {
+            tx.try_send(value).unwrap();
+        }
+
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap().unwrap())
+            .collect::<Vec<_>>()
+    });
+
+    values.sort_unstable();
+    assert_eq!(values, (0..RECEIVERS).collect::<Vec<_>>());
+}
+
+#[test]
 fn busy_lane_cannot_hide_ready_lane() {
     let (mut busy, mut rx) = channel(128);
     let mut sparse = busy.try_clone().unwrap();
@@ -528,7 +569,7 @@ fn receiver_drop_racing_steal_preserves_every_value() {
 }
 
 #[test]
-fn batch_publication_never_reports_premature_disconnect() {
+fn staged_work_publication_never_reports_premature_disconnect() {
     for _ in 0..PUBLICATION_RACE_ROUNDS {
         let (mut tx, mut rx0) = channel(64);
         let mut rx1 = rx0.clone();
@@ -591,7 +632,7 @@ fn batch_publication_never_reports_premature_disconnect() {
 }
 
 #[test]
-fn batch_publication_with_live_sender_never_reports_disconnect() {
+fn staged_work_publication_with_live_sender_never_reports_disconnect() {
     for _ in 0..RACE_ROUNDS {
         let (mut tx, mut rx0) = channel(64);
         let mut rx1 = rx0.clone();

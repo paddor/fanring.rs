@@ -1,15 +1,13 @@
 //! Dynamic MPMC channel built from one bounded SPSC ring per sender.
 //!
-//! Senders never contend on a shared queue tail. A receiver drains up to 64
-//! values from a ready ring, returns one, and publishes the rest to its local
-//! stealable FIFO. Other receivers can steal that work in batches. Ordering is
-//! relaxed.
+//! Senders never contend on a shared queue tail. Receivers drain ready rings
+//! into bounded local queues whose work can be stolen in batches by competing
+//! receivers. Ordering is relaxed.
 
 use std::fmt;
 
 use arc_swap::ArcSwap;
 use concurrent_queue::ConcurrentQueue;
-use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 
 use crate::compat::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock};
 use crate::config::validate_capacity;
@@ -19,10 +17,12 @@ use crate::wait::MultiWaitCell;
 
 mod receiver;
 mod sender;
+mod work;
 
 use receiver::{FinishLane, Lane, LaneToken, close_lane};
 pub use receiver::{IntoIter, Iter, Receiver, TryIter};
 pub use sender::Sender;
+use work::WorkQueue;
 
 pub use crate::error::{
     ChannelError, RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError,
@@ -80,17 +80,19 @@ fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
         slot: 0,
         generation: 0,
     };
-    let local = Worker::new_fifo();
-    let stealer = local.stealer();
-    let mut registry = Registry::new(group, work_group, lane_page, stealer.clone());
+    let local = WorkQueue::bounded(PREFETCH_LIMIT);
+    let mut registry = Registry::new(group, work_group, lane_page, local.clone());
     registry.install_lane(LaneToken::new(Lane::new(key, signal.clone(), consumer)));
     let ready = std::sync::Arc::new(registry.clone_ready_topology());
     let shared = Arc::new(Shared {
         registry: Mutex::new(registry),
-        stealers: ArcSwap::from_pointee(vec![(0, stealer)]),
+        #[cfg(not(loom))]
+        work_queues: ArcSwap::from_pointee(vec![(0, local.clone())]),
+        #[cfg(loom)]
+        work_queues: Mutex::new(vec![(0, local.clone())]),
         ready: ArcSwap::new(ready.clone()),
         ready_generation: AtomicUsize::new(0),
-        injector: Injector::new(),
+        orphaned_work: WorkQueue::unbounded(),
         publications: PublicationTracker::new(),
         registered_lanes: AtomicUsize::new(1),
         live_senders: AtomicUsize::new(1),
@@ -125,10 +127,13 @@ fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
 
 struct Shared<T> {
     registry: Mutex<Registry<T>>,
-    stealers: ArcSwap<Vec<(usize, Stealer<T>)>>,
+    #[cfg(not(loom))]
+    work_queues: ArcSwap<Vec<(usize, WorkQueue<T>)>>,
+    #[cfg(loom)]
+    work_queues: Mutex<Vec<(usize, WorkQueue<T>)>>,
     ready: ArcSwap<ReadyTopology<T>>,
     ready_generation: AtomicUsize,
-    injector: Injector<T>,
+    orphaned_work: WorkQueue<T>,
     publications: PublicationTracker,
     registered_lanes: AtomicUsize,
     live_senders: AtomicUsize,
@@ -167,13 +172,17 @@ impl<T> Shared<T> {
         Ok((key, signal, producer))
     }
 
-    fn register_receiver(&self) -> (usize, Worker<T>) {
-        let local = Worker::new_fifo();
-        let stealer = local.stealer();
+    fn register_receiver(&self) -> (usize, WorkQueue<T>) {
+        let local = WorkQueue::bounded(PREFETCH_LIMIT);
         let mut registry = lock(&self.registry);
-        let id = registry.register_receiver(stealer);
-        self.stealers
-            .store(std::sync::Arc::new(registry.clone_stealers()));
+        let id = registry.register_receiver(local.clone());
+        #[cfg(not(loom))]
+        self.work_queues
+            .store(std::sync::Arc::new(registry.clone_work_queues()));
+        #[cfg(loom)]
+        {
+            *lock(&self.work_queues) = registry.clone_work_queues();
+        }
         drop(registry);
         self.live_receivers.fetch_add(1, Ordering::AcqRel);
         self.publications.notify_change();
@@ -183,8 +192,13 @@ impl<T> Shared<T> {
     fn unregister_receiver(&self, id: usize) {
         let mut registry = lock(&self.registry);
         registry.unregister_receiver(id);
-        self.stealers
-            .store(std::sync::Arc::new(registry.clone_stealers()));
+        #[cfg(not(loom))]
+        self.work_queues
+            .store(std::sync::Arc::new(registry.clone_work_queues()));
+        #[cfg(loom)]
+        {
+            *lock(&self.work_queues) = registry.clone_work_queues();
+        }
         drop(registry);
         self.publications.notify_change();
     }
@@ -248,13 +262,7 @@ impl<T> Shared<T> {
                 close_lane(lane);
             }
         }
-        loop {
-            match self.injector.steal() {
-                Steal::Success(value) => drop(value),
-                Steal::Retry => {}
-                Steal::Empty => break,
-            }
-        }
+        while self.orphaned_work.pop().is_some() {}
         self.data_waiters.notify_all();
     }
 }
@@ -352,7 +360,7 @@ struct Registry<T> {
     groups: Vec<Arc<ReadyGroup>>,
     work_groups: Vec<Arc<ReadyGroup>>,
     pages: Vec<Arc<LanePage<T>>>,
-    stealers: Vec<Option<Stealer<T>>>,
+    work_queues: Vec<Option<WorkQueue<T>>>,
     free_receivers: Vec<usize>,
 }
 
@@ -361,7 +369,7 @@ impl<T> Registry<T> {
         group: Arc<ReadyGroup>,
         work_group: Arc<ReadyGroup>,
         page: Arc<LanePage<T>>,
-        stealer: Stealer<T>,
+        work_queue: WorkQueue<T>,
     ) -> Self {
         Self {
             slots: vec![Slot {
@@ -372,34 +380,34 @@ impl<T> Registry<T> {
             groups: vec![group],
             work_groups: vec![work_group],
             pages: vec![page],
-            stealers: vec![Some(stealer)],
+            work_queues: vec![Some(work_queue)],
             free_receivers: Vec::new(),
         }
     }
 
-    fn register_receiver(&mut self, stealer: Stealer<T>) -> usize {
+    fn register_receiver(&mut self, work_queue: WorkQueue<T>) -> usize {
         if let Some(id) = self.free_receivers.pop() {
-            debug_assert!(self.stealers[id].is_none());
-            self.stealers[id] = Some(stealer);
+            debug_assert!(self.work_queues[id].is_none());
+            self.work_queues[id] = Some(work_queue);
             id
         } else {
-            let id = self.stealers.len();
-            self.stealers.push(Some(stealer));
+            let id = self.work_queues.len();
+            self.work_queues.push(Some(work_queue));
             id
         }
     }
 
     fn unregister_receiver(&mut self, id: usize) {
-        if self.stealers[id].take().is_some() {
+        if self.work_queues[id].take().is_some() {
             self.free_receivers.push(id);
         }
     }
 
-    fn clone_stealers(&self) -> Vec<(usize, Stealer<T>)> {
-        self.stealers
+    fn clone_work_queues(&self) -> Vec<(usize, WorkQueue<T>)> {
+        self.work_queues
             .iter()
             .enumerate()
-            .filter_map(|(id, stealer)| stealer.clone().map(|stealer| (id, stealer)))
+            .filter_map(|(id, queue)| queue.clone().map(|queue| (id, queue)))
             .collect()
     }
 

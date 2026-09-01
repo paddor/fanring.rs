@@ -3,8 +3,6 @@ use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
-use crossbeam_deque::{Steal, Worker};
-
 use crate::compat::{Arc, Ordering};
 use crate::publication::Publication;
 use crate::ready::{LaneSignal, PAGES_PER_GROUP};
@@ -16,12 +14,11 @@ use super::{
 
 /// Receiving half.
 ///
-/// Clones compete for messages. Each receiver has a local work queue whose
-/// buffered items remain stealable by other receivers.
+/// Clones compete for messages through bounded stealable work queues.
 pub struct Receiver<T> {
     pub(super) shared: Arc<Shared<T>>,
     pub(super) id: usize,
-    pub(super) local: Worker<T>,
+    pub(super) local: super::WorkQueue<T>,
     pub(super) steal_cursor: usize,
     pub(super) ready: RefCell<std::sync::Arc<ReadyTopology<T>>>,
     pub(super) seen_ready_generation: Cell<usize>,
@@ -77,22 +74,11 @@ impl<T> Receiver<T> {
     #[inline]
     fn try_recv_inner(&mut self) -> (Result<T, TryRecvError>, Effects) {
         for attempt in 0..=TRY_RECV_RETRIES {
-            let (work_generation, work_contended) = match self.pop_work() {
+            let work_generation = match self.pop_work() {
                 WorkPop::Item(value) => return (Ok(value), Effects::default()),
-                WorkPop::Empty {
-                    generation,
-                    contended,
-                } => (generation, contended),
+                WorkPop::Empty { generation } => generation,
             };
-
             let Some((lane, publication)) = self.acquire_lane() else {
-                if work_contended {
-                    if attempt != TRY_RECV_RETRIES {
-                        std::hint::spin_loop();
-                        continue;
-                    }
-                    return (Err(TryRecvError::Empty), Effects::default());
-                }
                 match self.empty_scan_state(work_generation) {
                     EmptyScan::Changed if attempt != TRY_RECV_RETRIES => continue,
                     EmptyScan::Changed | EmptyScan::Publishing | EmptyScan::Open => {
@@ -115,6 +101,51 @@ impl<T> Receiver<T> {
             }
         }
         (Err(TryRecvError::Empty), Effects::default())
+    }
+
+    fn pop_work(&mut self) -> WorkPop<T> {
+        if let Some(value) = self.local.pop() {
+            return WorkPop::Item(value);
+        }
+
+        let generation = self.shared.publications.snapshot();
+        if let Some(value) = self.shared.orphaned_work.pop() {
+            return WorkPop::Item(value);
+        }
+        if self.has_ready_lane() {
+            return WorkPop::Empty { generation };
+        }
+
+        #[cfg(not(loom))]
+        let work_queues = self.shared.work_queues.load();
+        #[cfg(loom)]
+        let work_queues = crate::compat::lock(&self.shared.work_queues);
+        let len = work_queues.len();
+        for offset in 0..len {
+            let index = (self.steal_cursor + offset) % len;
+            let (id, queue) = &work_queues[index];
+            if *id == self.id || queue.len() == 0 {
+                continue;
+            }
+            let publication = self.shared.publications.begin();
+            let stolen = queue.steal_batch_into(&self.local);
+            drop(publication);
+            if let Some(value) = stolen {
+                self.steal_cursor = index.wrapping_add(1);
+                return WorkPop::Item(value);
+            }
+        }
+        if len != 0 {
+            self.steal_cursor = self.steal_cursor.wrapping_add(1) % len;
+        }
+        WorkPop::Empty { generation }
+    }
+
+    fn has_ready_lane(&self) -> bool {
+        self.refresh_ready_topology();
+        let ready = self.ready.borrow();
+        ready.ready_groups.iter().any(|group| group.has_ready())
+            || ready.work_groups.iter().any(|group| group.has_ready())
     }
 
     #[inline]
@@ -260,45 +291,6 @@ impl<T> Receiver<T> {
                     Err(TryRecvError::Empty) => return Err(RecvTimeoutError::Timeout),
                 }
             }
-        }
-    }
-
-    fn pop_work(&mut self) -> WorkPop<T> {
-        if let Some(value) = self.local.pop() {
-            return WorkPop::Item(value);
-        }
-
-        let generation = self.shared.publications.snapshot();
-        let mut contended = false;
-        match self.shared.injector.steal_batch_and_pop(&self.local) {
-            Steal::Success(value) => return WorkPop::Item(value),
-            Steal::Retry => contended = true,
-            Steal::Empty => {}
-        }
-
-        let stealers = self.shared.stealers.load();
-        let len = stealers.len();
-        for offset in 0..len {
-            let index = (self.steal_cursor + offset) % len;
-            let (id, stealer) = &stealers[index];
-            if *id == self.id {
-                continue;
-            }
-            match stealer.steal_batch_and_pop(&self.local) {
-                Steal::Success(value) => {
-                    self.steal_cursor = index.wrapping_add(1);
-                    return WorkPop::Item(value);
-                }
-                Steal::Retry => contended = true,
-                Steal::Empty => {}
-            }
-        }
-        if len != 0 {
-            self.steal_cursor = self.steal_cursor.wrapping_add(1) % len;
-        }
-        WorkPop::Empty {
-            generation,
-            contended,
         }
     }
 
@@ -548,11 +540,7 @@ impl<T> Receiver<T> {
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let publication = self.shared.publications.begin();
-        let mut published = false;
-        while let Some(value) = self.local.pop() {
-            self.shared.injector.push(value);
-            published = true;
-        }
+        let published = self.local.drain_into(&self.shared.orphaned_work);
         self.shared.unregister_receiver(self.id);
         drop(publication);
 
@@ -731,7 +719,7 @@ enum LaneDrain<T> {
 
 enum WorkPop<T> {
     Item(T),
-    Empty { generation: usize, contended: bool },
+    Empty { generation: usize },
 }
 
 enum EmptyScan {
