@@ -34,7 +34,25 @@ is covered by normal stress tests and sanitizer runs.
 
 ## Release
 
-Update `Cargo.toml` and `CHANGELOG.md`, then run:
+`release-plz` runs on every push to `main`
+(`.github/workflows/release-plz.yml`). It opens or updates a release PR. After
+that PR merges, it creates an annotated `v<version>` tag, publishes to
+crates.io, and creates a GitHub release. Configuration lives in
+`release-plz.toml`; changelogs remain hand-curated.
+
+Publishing uses crates.io trusted publishing through GitHub Actions OIDC.
+Configure the trusted publisher with:
+
+```text
+GitHub owner: paddor
+GitHub repository: fanring.rs
+Workflow filename: release-plz.yml
+Environment name: (none)
+```
+
+Review the release-plz PR, verify its semver bump, and move the relevant
+`Unreleased` changelog entries into a dated version section. Before merging the
+release PR, run:
 
 ```sh
 cargo +1.93.0 test --all-features --locked
@@ -44,8 +62,8 @@ cargo package --locked
 cargo publish --dry-run --locked
 ```
 
-Publishing and tagging are separate explicit steps after review. The release
-tag is `v` followed by the package version.
+Merging the release PR is the explicit publish step. CI then tags and publishes
+the version through trusted publishing.
 
 ## Benchmarks
 
