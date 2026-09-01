@@ -1,4 +1,6 @@
-use std::time::Instant;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use fanring::mpmc::{
     RecvError, RecvTimeoutError, SendTimeoutError, TryRecvError, TrySendError, channel,
@@ -99,6 +101,46 @@ fn deadlines_report_unsatisfied_operation() {
         tx.send_deadline(2, Instant::now()),
         Err(SendTimeoutError::Timeout(2))
     );
+}
+
+#[test]
+fn failed_send_paths_return_ownership_exactly_once() {
+    struct Tracked(Arc<AtomicUsize>);
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let (mut tx, rx0) = channel(1);
+    let rx1 = rx0.clone();
+    tx.try_send(Tracked(drops.clone()))
+        .unwrap_or_else(|_| unreachable!());
+
+    let timed_out = match tx.send_timeout(Tracked(drops.clone()), Duration::ZERO) {
+        Err(SendTimeoutError::Timeout(value)) => value,
+        _ => panic!("full lane must time out"),
+    };
+    drop(timed_out);
+
+    let still_full = match tx.try_send(Tracked(drops.clone())) {
+        Err(TrySendError::Full(value)) => value,
+        _ => panic!("first receiver keeps full lane connected"),
+    };
+    drop(rx0);
+    assert!(!tx.is_disconnected());
+    drop(rx1);
+
+    let disconnected = match tx.try_send(still_full) {
+        Err(TrySendError::Disconnected(value)) => value,
+        _ => panic!("last receiver drop must disconnect sender"),
+    };
+    drop(disconnected);
+    drop(tx);
+
+    assert_eq!(drops.load(Ordering::Relaxed), 3);
 }
 
 #[test]

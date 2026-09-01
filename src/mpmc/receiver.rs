@@ -58,7 +58,7 @@ impl<T> Receiver<T> {
     /// # Errors
     ///
     /// Returns [`TryRecvError::Empty`] when no value is currently available, or
-    /// while another receiver publishes a batch. Returns
+    /// while bounded lane maintenance or another receiver moves work. Returns
     /// [`TryRecvError::Disconnected`] after all senders and buffered values are
     /// gone and no publication is in flight.
     #[inline]
