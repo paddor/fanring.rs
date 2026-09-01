@@ -30,9 +30,9 @@ jobs:
         run: cargo +stable update
       - name: Run tests
         run: cargo +${{ matrix.rust }} test --all-features --locked
-      - name: Run release MPMC stress tests
+      - name: Run release channel stress tests
         if: matrix.rust == 'stable'
-        run: cargo +stable test --release --test mpmc_stress --locked -- --test-threads=1
+        run: cargo +stable test --release --test mpmc_stress --test stress --locked -- --test-threads=1
 
   quality:
     name: Quality
