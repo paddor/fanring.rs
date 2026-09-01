@@ -1,3 +1,4 @@
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
@@ -6,10 +7,11 @@ use crossbeam_deque::{Steal, Worker};
 
 use crate::compat::{Arc, Ordering};
 use crate::publication::Publication;
-use crate::ready::LaneSignal;
+use crate::ready::{LaneSignal, PAGES_PER_GROUP};
 
 use super::{
-    PARK_SPINS, PREFETCH_LIMIT, RecvError, RecvTimeoutError, Shared, TRY_RECV_RETRIES, TryRecvError,
+    PARK_SPINS, PREFETCH_LIMIT, ReadyTopology, RecvError, RecvTimeoutError, Shared,
+    TRY_RECV_RETRIES, TryRecvError,
 };
 
 /// Receiving half.
@@ -21,17 +23,30 @@ pub struct Receiver<T> {
     pub(super) id: usize,
     pub(super) local: Worker<T>,
     pub(super) steal_cursor: usize,
+    pub(super) ready: RefCell<std::sync::Arc<ReadyTopology<T>>>,
+    pub(super) seen_ready_generation: Cell<usize>,
+    pub(super) ready_group_cursor: Cell<usize>,
+    pub(super) ready_page_cursor: Cell<usize>,
+    pub(super) direct_page_cursor: Cell<usize>,
+    pub(super) prefer_work: Cell<bool>,
     pub(super) capacity_per_sender: usize,
 }
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
         let (id, local) = self.shared.register_receiver();
+        let (ready, seen_ready_generation) = self.shared.ready_snapshot();
         Self {
             shared: self.shared.clone(),
             id,
             local,
             steal_cursor: 0,
+            ready: RefCell::new(ready),
+            seen_ready_generation: Cell::new(seen_ready_generation),
+            ready_group_cursor: Cell::new(0),
+            ready_page_cursor: Cell::new(0),
+            direct_page_cursor: Cell::new(0),
+            prefer_work: Cell::new(false),
             capacity_per_sender: self.capacity_per_sender,
         }
     }
@@ -288,19 +303,98 @@ impl<T> Receiver<T> {
     }
 
     fn acquire_lane(&self) -> Option<(LaneToken<T>, Publication<'_>)> {
-        loop {
-            if self.shared.ready_lanes.is_empty() && self.shared.ready_pages.is_empty() {
-                return None;
-            }
+        self.refresh_ready_topology();
+        let ready = self.ready.borrow();
+        let prefer_work = self.prefer_work.replace(!self.prefer_work.get());
+        if !prefer_work && let Some(lane) = self.acquire_ready_lane(&ready) {
+            return Some(lane);
+        }
+
+        let page_count = ready.pages.len();
+        let direct_page = self.direct_page_cursor.get() % page_count;
+        if !ready.pages[direct_page].is_empty() {
             let publication = self.shared.publications.begin();
-            self.shared.activate_one_page();
-            if let Ok(lane) = self.shared.ready_lanes.pop() {
+            if let Some(lane) = ready.pages[direct_page].pop_direct() {
+                self.direct_page_cursor.set((direct_page + 1) % page_count);
                 return Some((lane, publication));
             }
-            if self.shared.ready_pages.is_empty() {
-                return None;
-            }
+            drop(publication);
         }
+
+        if let Some(lane) = self.acquire_work_lane(&ready) {
+            return Some(lane);
+        }
+        if prefer_work {
+            return self.acquire_ready_lane(&ready);
+        }
+        None
+    }
+
+    fn acquire_work_lane<'a>(
+        &'a self,
+        ready: &ReadyTopology<T>,
+    ) -> Option<(LaneToken<T>, Publication<'a>)> {
+        let group_count = ready.work_groups.len();
+        let start = self.ready_group_cursor.get() % group_count;
+        let page_start = self.ready_page_cursor.get();
+
+        for offset in 0..group_count {
+            let group_index = (start + offset) % group_count;
+            let group = &ready.work_groups[group_index];
+            if !group.has_ready() {
+                continue;
+            }
+            let publication = self.shared.publications.begin();
+            let Some(page_bit) = group.take_one_from(page_start) else {
+                drop(publication);
+                continue;
+            };
+            self.ready_group_cursor.set((group_index + 1) % group_count);
+            self.ready_page_cursor.set((page_bit + 1) % PAGES_PER_GROUP);
+            let page_id = group.id() * PAGES_PER_GROUP + page_bit;
+            self.direct_page_cursor
+                .set((page_id + 1) % ready.pages.len());
+            if let Some(lane) = ready
+                .pages
+                .get(page_id)
+                .and_then(|page| page.pop_after_claim())
+            {
+                return Some((lane, publication));
+            }
+            drop(publication);
+        }
+        None
+    }
+
+    fn acquire_ready_lane<'a>(
+        &'a self,
+        ready: &ReadyTopology<T>,
+    ) -> Option<(LaneToken<T>, Publication<'a>)> {
+        let group_count = ready.ready_groups.len();
+        let start = self.ready_group_cursor.get() % group_count;
+        let page_start = self.ready_page_cursor.get();
+        for offset in 0..group_count {
+            let group_index = (start + offset) % group_count;
+            let group = &ready.ready_groups[group_index];
+            if !group.has_ready() {
+                continue;
+            }
+            let publication = self.shared.publications.begin();
+            let Some(page_bit) = group.take_one_from(page_start) else {
+                drop(publication);
+                continue;
+            };
+            self.ready_group_cursor.set((group_index + 1) % group_count);
+            self.ready_page_cursor.set((page_bit + 1) % PAGES_PER_GROUP);
+            let page_id = group.id() * PAGES_PER_GROUP + page_bit;
+            self.direct_page_cursor
+                .set((page_id + 1) % ready.pages.len());
+            if let Some(lane) = self.shared.activate_page(page_id) {
+                return Some((lane, publication));
+            }
+            drop(publication);
+        }
+        None
     }
 
     fn drain_lane(&self, mut lane: LaneToken<T>) -> LaneDrain<T> {
@@ -371,10 +465,18 @@ impl<T> Receiver<T> {
     }
 
     fn requeue_lane(&self, lane: LaneToken<T>) {
-        self.shared
-            .ready_lanes
-            .push(lane)
-            .unwrap_or_else(|_| unreachable!("ready-lane queue is never closed"));
+        let page_id = lane.key.slot / super::LANES_PER_PAGE;
+        self.ready.borrow().pages[page_id].push(lane);
+    }
+
+    fn refresh_ready_topology(&self) {
+        let generation = self.shared.ready_generation.load(Ordering::Acquire);
+        if generation == self.seen_ready_generation.get() {
+            return;
+        }
+        let (ready, generation) = self.shared.ready_snapshot();
+        self.ready.replace(ready);
+        self.seen_ready_generation.set(generation);
     }
 
     fn apply_effects(&self, effects: Effects) {

@@ -5,11 +5,9 @@
 
 use std::fmt;
 
-use concurrent_queue::ConcurrentQueue;
-
 use crate::compat::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock};
 use crate::config::validate_capacity;
-use crate::ready::{LANES_PER_PAGE, LaneSignal, ReadyPage};
+use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
 use crate::wait::WaitCell;
 
 mod receiver;
@@ -69,7 +67,8 @@ pub fn try_channel<T>(
 
 fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
     let (producer, consumer) = yring::spsc(capacity_per_sender);
-    let page = Arc::new(ReadyPage::new(0));
+    let group = Arc::new(ReadyGroup::new(0));
+    let page = Arc::new(ReadyPage::new(0, group.clone()));
     let signal = Arc::new(LaneSignal::new(page.clone(), 0));
     let key = LaneKey {
         slot: 0,
@@ -79,10 +78,10 @@ fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
         registry: Mutex::new(Registry {
             pending: Vec::new(),
             free: Vec::new(),
+            groups: vec![group.clone()],
             pages: vec![page.clone()],
             next_slot: 1,
         }),
-        ready_pages: ConcurrentQueue::unbounded(),
         registry_generation: AtomicUsize::new(0),
         registered_lanes: AtomicUsize::new(1),
         live_senders: AtomicUsize::new(1),
@@ -101,8 +100,10 @@ fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
         Receiver {
             shared,
             lanes: vec![Some(Lane::new(key, signal, consumer))],
+            groups: vec![group],
             pages: vec![page],
-            active: std::collections::VecDeque::new(),
+            active: std::collections::VecDeque::with_capacity(1),
+            ready_group_cursor: 0,
             seen_registry_generation: 0,
             items_until_ready_poll: READY_POLL_INTERVAL,
             capacity_per_sender: capacity_per_sender.next_power_of_two(),
@@ -112,7 +113,6 @@ fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
 
 struct Shared<T> {
     registry: Mutex<Registry<T>>,
-    ready_pages: ConcurrentQueue<usize>,
     registry_generation: AtomicUsize,
     registered_lanes: AtomicUsize,
     live_senders: AtomicUsize,
@@ -152,13 +152,7 @@ impl<T> Shared<T> {
 
     #[inline]
     fn mark_ready(&self, signal: &LaneSignal) -> bool {
-        let mark = signal.mark();
-        if let Some(page) = mark.page {
-            self.ready_pages
-                .push(page)
-                .expect("ready-page queue is never closed");
-        }
-        mark.activated
+        signal.mark()
     }
 }
 
@@ -194,6 +188,7 @@ struct PendingLane<T> {
 struct Registry<T> {
     pending: Vec<PendingLane<T>>,
     free: Vec<LaneKey>,
+    groups: Vec<Arc<ReadyGroup>>,
     pages: Vec<Arc<ReadyPage>>,
     next_slot: usize,
 }
@@ -210,7 +205,14 @@ impl<T> Registry<T> {
         });
         let page_id = key.slot / LANES_PER_PAGE;
         while self.pages.len() <= page_id {
-            self.pages.push(Arc::new(ReadyPage::new(self.pages.len())));
+            let id = self.pages.len();
+            let group_id = id / PAGES_PER_GROUP;
+            while self.groups.len() <= group_id {
+                self.groups
+                    .push(Arc::new(ReadyGroup::new(self.groups.len())));
+            }
+            self.pages
+                .push(Arc::new(ReadyPage::new(id, self.groups[group_id].clone())));
         }
         (key, self.pages[page_id].clone())
     }

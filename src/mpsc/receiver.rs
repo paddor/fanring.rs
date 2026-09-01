@@ -4,7 +4,7 @@ use std::mem;
 use std::time::{Duration, Instant};
 
 use crate::compat::{Arc, Ordering, lock};
-use crate::ready::{LANES_PER_PAGE, LaneSignal, ReadyPage};
+use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
 
 use super::{
     LaneKey, PARK_SPINS, PREFETCH_LIMIT, READY_POLL_INTERVAL, RecvError, RecvTimeoutError, Shared,
@@ -18,8 +18,10 @@ use super::{
 pub struct Receiver<T> {
     pub(super) shared: Arc<Shared<T>>,
     pub(super) lanes: Vec<Option<Lane<T>>>,
+    pub(super) groups: Vec<Arc<ReadyGroup>>,
     pub(super) pages: Vec<Arc<ReadyPage>>,
     pub(super) active: VecDeque<LaneKey>,
+    pub(super) ready_group_cursor: usize,
     pub(super) seen_registry_generation: usize,
     pub(super) items_until_ready_poll: usize,
     pub(super) capacity_per_sender: usize,
@@ -293,25 +295,34 @@ impl<T> Receiver<T> {
 
     fn collect_ready(&mut self, all: bool) {
         self.refresh_registry();
-        while let Ok(page_id) = self.shared.ready_pages.pop() {
-            if page_id >= self.pages.len() {
-                self.refresh_registry();
-            }
-            let Some(page) = self.pages.get(page_id).cloned() else {
+        let group_count = self.groups.len();
+        for offset in 0..group_count {
+            let group_index = (self.ready_group_cursor + offset) % group_count;
+            let mut page_bits = self.groups[group_index].take_all();
+            if page_bits == 0 {
                 continue;
-            };
-            let mut bits = page.take();
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                let slot = page_id * LANES_PER_PAGE + bit;
-                let Some(lane) = self.lanes.get(slot).and_then(Option::as_ref) else {
+            }
+            while page_bits != 0 {
+                let page_bit = page_bits.trailing_zeros() as usize;
+                page_bits &= page_bits - 1;
+                let page_id = group_index * PAGES_PER_GROUP + page_bit;
+                let Some(page) = self.pages.get(page_id) else {
                     continue;
                 };
-                if lane.signal.is_pending() {
-                    self.active.push_back(lane.key);
+                let mut lane_bits = page.take();
+                while lane_bits != 0 {
+                    let lane_bit = lane_bits.trailing_zeros() as usize;
+                    lane_bits &= lane_bits - 1;
+                    let slot = page_id * LANES_PER_PAGE + lane_bit;
+                    let Some(lane) = self.lanes.get(slot).and_then(Option::as_ref) else {
+                        continue;
+                    };
+                    if lane.signal.is_pending() {
+                        self.active.push_back(lane.key);
+                    }
                 }
             }
+            self.ready_group_cursor = (group_index + 1) % group_count;
             if !all {
                 break;
             }
@@ -324,14 +335,16 @@ impl<T> Receiver<T> {
             return;
         }
 
-        let (pending, pages, seen) = {
+        let (pending, groups, pages, seen) = {
             let mut registry = lock(&self.shared.registry);
             (
                 mem::take(&mut registry.pending),
+                registry.groups.clone(),
                 registry.pages.clone(),
                 self.shared.registry_generation.load(Ordering::Relaxed),
             )
         };
+        self.groups = groups;
         self.pages = pages;
         for pending in pending {
             if self.lanes.len() <= pending.key.slot {
@@ -340,6 +353,10 @@ impl<T> Receiver<T> {
             debug_assert!(self.lanes[pending.key.slot].is_none());
             self.lanes[pending.key.slot] =
                 Some(Lane::new(pending.key, pending.signal, pending.consumer));
+        }
+        if self.active.capacity() < self.lanes.len() {
+            self.active
+                .reserve(self.lanes.len().saturating_sub(self.active.len()));
         }
         self.seen_registry_generation = seen;
     }

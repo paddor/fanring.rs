@@ -14,7 +14,7 @@ use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use crate::compat::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock};
 use crate::config::validate_capacity;
 use crate::publication::PublicationTracker;
-use crate::ready::{LANES_PER_PAGE, LaneSignal, ReadyPage};
+use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
 use crate::wait::MultiWaitCell;
 
 mod receiver;
@@ -68,7 +68,10 @@ pub fn try_channel<T>(
 
 fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
     let (producer, consumer) = yring::spsc(capacity_per_sender);
-    let page = Arc::new(ReadyPage::new(0));
+    let group = Arc::new(ReadyGroup::new(0));
+    let work_group = Arc::new(ReadyGroup::new(0));
+    let page = Arc::new(ReadyPage::new(0, group.clone()));
+    let lane_page = Arc::new(LanePage::new(page.clone(), work_group.clone()));
     let signal = Arc::new(LaneSignal::new(page.clone(), 0));
     let key = LaneKey {
         slot: 0,
@@ -76,13 +79,14 @@ fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
     };
     let local = Worker::new_fifo();
     let stealer = local.stealer();
-    let mut registry = Registry::new(page, stealer.clone());
+    let mut registry = Registry::new(group, work_group, lane_page, stealer.clone());
     registry.install_lane(LaneToken::new(Lane::new(key, signal.clone(), consumer)));
+    let ready = std::sync::Arc::new(registry.clone_ready_topology());
     let shared = Arc::new(Shared {
         registry: Mutex::new(registry),
         stealers: ArcSwap::from_pointee(vec![(0, stealer)]),
-        ready_pages: ConcurrentQueue::unbounded(),
-        ready_lanes: ConcurrentQueue::unbounded(),
+        ready: ArcSwap::new(ready.clone()),
+        ready_generation: AtomicUsize::new(0),
         injector: Injector::new(),
         publications: PublicationTracker::new(),
         registered_lanes: AtomicUsize::new(1),
@@ -105,6 +109,12 @@ fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
             id: 0,
             local,
             steal_cursor: 0,
+            ready: std::cell::RefCell::new(ready),
+            seen_ready_generation: std::cell::Cell::new(0),
+            ready_group_cursor: std::cell::Cell::new(0),
+            ready_page_cursor: std::cell::Cell::new(0),
+            direct_page_cursor: std::cell::Cell::new(0),
+            prefer_work: std::cell::Cell::new(false),
             capacity_per_sender: capacity_per_sender.next_power_of_two(),
         },
     )
@@ -113,8 +123,8 @@ fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
 struct Shared<T> {
     registry: Mutex<Registry<T>>,
     stealers: ArcSwap<Vec<(usize, Stealer<T>)>>,
-    ready_pages: ConcurrentQueue<usize>,
-    ready_lanes: ConcurrentQueue<LaneToken<T>>,
+    ready: ArcSwap<ReadyTopology<T>>,
+    ready_generation: AtomicUsize,
     injector: Injector<T>,
     publications: PublicationTracker,
     registered_lanes: AtomicUsize,
@@ -139,10 +149,15 @@ impl<T> Shared<T> {
             return Err(TryRegisterError::Disconnected);
         }
 
-        let (key, page) = registry.allocate_lane();
+        let (key, page, topology_changed) = registry.allocate_lane();
         let signal = Arc::new(LaneSignal::new(page, key.slot));
         let (producer, consumer) = yring::spsc(self.capacity_per_sender);
         registry.install_lane(LaneToken::new(Lane::new(key, signal.clone(), consumer)));
+        if topology_changed {
+            self.ready
+                .store(std::sync::Arc::new(registry.clone_ready_topology()));
+            self.ready_generation.fetch_add(1, Ordering::Release);
+        }
         // Receiver teardown consumes the registry and counters together.
         self.registered_lanes.fetch_add(1, Ordering::Release);
         self.live_senders.fetch_add(1, Ordering::AcqRel);
@@ -171,23 +186,23 @@ impl<T> Shared<T> {
         self.publications.notify_change();
     }
 
-    #[inline]
-    fn mark_ready(&self, signal: &LaneSignal) -> bool {
-        let mark = signal.mark();
-        if let Some(page) = mark.page {
-            self.ready_pages
-                .push(page)
-                .expect("ready-page queue is never closed");
+    fn ready_snapshot(&self) -> (std::sync::Arc<ReadyTopology<T>>, usize) {
+        loop {
+            let generation = self.ready_generation.load(Ordering::Acquire);
+            let ready = self.ready.load_full();
+            if generation == self.ready_generation.load(Ordering::Acquire) {
+                return (ready, generation);
+            }
         }
-        mark.activated
     }
 
-    fn activate_one_page(&self) -> bool {
-        let Ok(page_id) = self.ready_pages.pop() else {
-            return false;
-        };
-        lock(&self.registry).publish_ready_lanes(page_id, &self.ready_lanes);
-        true
+    #[inline]
+    fn mark_ready(&self, signal: &LaneSignal) -> bool {
+        signal.mark()
+    }
+
+    fn activate_page(&self, page_id: usize) -> Option<LaneToken<T>> {
+        lock(&self.registry).take_ready_lane(page_id)
     }
 
     fn finish_empty_lane(&self, mut lane: LaneToken<T>) -> FinishLane<T> {
@@ -224,8 +239,11 @@ impl<T> Shared<T> {
         for lane in idle {
             close_lane(lane);
         }
-        while let Ok(lane) = self.ready_lanes.pop() {
-            close_lane(lane);
+        let ready = self.ready.load();
+        for page in &ready.pages {
+            while let Some(lane) = page.pop_direct() {
+                close_lane(lane);
+            }
         }
         loop {
             match self.injector.steal() {
@@ -270,22 +288,86 @@ struct Slot<T> {
     lane: Option<LaneToken<T>>,
 }
 
+struct LanePage<T> {
+    ready: Arc<ReadyPage>,
+    work_group: Arc<ReadyGroup>,
+    work_bit: u64,
+    lanes: ConcurrentQueue<LaneToken<T>>,
+}
+
+impl<T> LanePage<T> {
+    fn new(ready: Arc<ReadyPage>, work_group: Arc<ReadyGroup>) -> Self {
+        let work_bit = 1u64 << (ready.id() % PAGES_PER_GROUP);
+        Self {
+            ready,
+            work_group,
+            work_bit,
+            lanes: ConcurrentQueue::bounded(LANES_PER_PAGE),
+        }
+    }
+
+    #[inline]
+    fn push(&self, lane: LaneToken<T>) {
+        self.lanes
+            .push(lane)
+            .unwrap_or_else(|_| unreachable!("one ready token exists per lane"));
+        self.work_group.mark(self.work_bit);
+    }
+
+    /// Pop after claiming the page's summary bit.
+    ///
+    /// Re-publish before the pop so another receiver can claim a different
+    /// queued lane without waiting for this receiver to finish its pop.
+    #[inline]
+    fn pop_after_claim(&self) -> Option<LaneToken<T>> {
+        if !self.lanes.is_empty() {
+            self.work_group.mark(self.work_bit);
+        }
+        self.lanes.pop().ok()
+    }
+
+    #[inline]
+    fn pop_direct(&self) -> Option<LaneToken<T>> {
+        self.lanes.pop().ok()
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.lanes.is_empty()
+    }
+}
+
+struct ReadyTopology<T> {
+    ready_groups: Vec<Arc<ReadyGroup>>,
+    work_groups: Vec<Arc<ReadyGroup>>,
+    pages: Vec<Arc<LanePage<T>>>,
+}
+
 struct Registry<T> {
     slots: Vec<Slot<T>>,
     free: Vec<LaneKey>,
-    pages: Vec<Arc<ReadyPage>>,
+    groups: Vec<Arc<ReadyGroup>>,
+    work_groups: Vec<Arc<ReadyGroup>>,
+    pages: Vec<Arc<LanePage<T>>>,
     stealers: Vec<Option<Stealer<T>>>,
     free_receivers: Vec<usize>,
 }
 
 impl<T> Registry<T> {
-    fn new(page: Arc<ReadyPage>, stealer: Stealer<T>) -> Self {
+    fn new(
+        group: Arc<ReadyGroup>,
+        work_group: Arc<ReadyGroup>,
+        page: Arc<LanePage<T>>,
+        stealer: Stealer<T>,
+    ) -> Self {
         Self {
             slots: vec![Slot {
                 generation: 0,
                 lane: None,
             }],
             free: Vec::new(),
+            groups: vec![group],
+            work_groups: vec![work_group],
             pages: vec![page],
             stealers: vec![Some(stealer)],
             free_receivers: Vec::new(),
@@ -318,7 +400,7 @@ impl<T> Registry<T> {
             .collect()
     }
 
-    fn allocate_lane(&mut self) -> (LaneKey, Arc<ReadyPage>) {
+    fn allocate_lane(&mut self) -> (LaneKey, Arc<ReadyPage>, bool) {
         let key = self.free.pop().unwrap_or_else(|| {
             let key = LaneKey {
                 slot: self.slots.len(),
@@ -331,10 +413,27 @@ impl<T> Registry<T> {
             key
         });
         let page_id = key.slot / LANES_PER_PAGE;
+        let old_page_count = self.pages.len();
         while self.pages.len() <= page_id {
-            self.pages.push(Arc::new(ReadyPage::new(self.pages.len())));
+            let id = self.pages.len();
+            let group_id = id / PAGES_PER_GROUP;
+            while self.groups.len() <= group_id {
+                self.groups
+                    .push(Arc::new(ReadyGroup::new(self.groups.len())));
+                self.work_groups
+                    .push(Arc::new(ReadyGroup::new(self.work_groups.len())));
+            }
+            let ready = Arc::new(ReadyPage::new(id, self.groups[group_id].clone()));
+            self.pages.push(Arc::new(LanePage::new(
+                ready,
+                self.work_groups[group_id].clone(),
+            )));
         }
-        (key, self.pages[page_id].clone())
+        (
+            key,
+            self.pages[page_id].ready.clone(),
+            self.pages.len() != old_page_count,
+        )
     }
 
     fn install_lane(&mut self, lane: LaneToken<T>) {
@@ -344,11 +443,10 @@ impl<T> Registry<T> {
         slot.lane = Some(lane);
     }
 
-    fn publish_ready_lanes(&mut self, page_id: usize, ready_lanes: &ConcurrentQueue<LaneToken<T>>) {
-        let Some(page) = self.pages.get(page_id) else {
-            return;
-        };
-        let mut bits = page.take();
+    fn take_ready_lane(&mut self, page_id: usize) -> Option<LaneToken<T>> {
+        let page = self.pages.get(page_id)?;
+        let mut selected = None;
+        let mut bits = page.ready.take();
         while bits != 0 {
             let bit = bits.trailing_zeros() as usize;
             bits &= bits - 1;
@@ -360,12 +458,23 @@ impl<T> Registry<T> {
                 continue;
             };
             if lane.signal.is_pending() {
-                ready_lanes
-                    .push(lane)
-                    .unwrap_or_else(|_| unreachable!("ready-lane queue is never closed"));
+                if selected.is_none() {
+                    selected = Some(lane);
+                } else {
+                    page.push(lane);
+                }
             } else {
                 slot.lane = Some(lane);
             }
+        }
+        selected
+    }
+
+    fn clone_ready_topology(&self) -> ReadyTopology<T> {
+        ReadyTopology {
+            ready_groups: self.groups.clone(),
+            work_groups: self.work_groups.clone(),
+            pages: self.pages.clone(),
         }
     }
 
