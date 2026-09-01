@@ -4,8 +4,7 @@ Fast typed MPSC and MPMC channels built from one SPSC `yring` per producer.
 
 Sender registration is dynamic. Each sender writes to its own ring, so
 producers do not contend on a shared queue tail. MPSC drains those rings
-directly; MPMC distributes internally batched work through stealable
-receiver-local FIFOs.
+directly; MPMC stages prefetched batches in stealable receiver-local queues.
 
 Requires Rust 1.93 or newer.
 
@@ -65,15 +64,15 @@ let b = rx1.recv().unwrap();
 assert_ne!(a, b);
 ```
 
-`mpmc` drains ready sender rings in batches of at most 64. One item is returned
-and the rest enter the receiver's local FIFO, where other receivers can steal
-them in batches. Receiver drop republishes its buffered work. Ordering is
-relaxed. Moving values into that second-stage queue costs more for large inline
-types; box large payloads when move bandwidth dominates.
+`mpmc` drains up to 64 values from a ready sender ring into a bounded local work
+queue. Competing receivers steal up to eight values at a time. Receiver drop
+republishes its buffered work. Ordering is relaxed. Moving values into that
+second-stage queue costs more for large inline types; box large payloads when
+move bandwidth dominates.
 
 `mpmc::try_recv` may return a transient `Empty` while bounded lane maintenance
 or another receiver moves work. `Disconnected` is final: all senders are gone,
-sender rings are drained, no staged work remains, and no work publication is in
+sender rings and staged queues are drained, and no work publication is in
 flight.
 
 ## Contract

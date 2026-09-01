@@ -7,30 +7,29 @@ cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 RUSTFLAGS="--cfg loom" cargo test --lib --test loom -- --test-threads=1
-cargo +nightly miri test --test mpsc --test stress -- --test-threads=1
-MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-permissive-provenance -Zmiri-ignore-leaks" \
+cargo +nightly miri test --all-features -- --test-threads=1
+MIRIFLAGS="-Zmiri-tree-borrows" \
   cargo +nightly miri test --all-features -- --test-threads=1
 ```
 
 The test suite covers per-sender FIFO, per-sender backpressure, disconnect and
 timeout races, drop cleanup, dynamic lane registration and reuse, ready
-page/group boundaries, starvation bounds, MPMC batch publication and receiver
+page/group boundaries, starvation bounds, MPMC batch stealing and receiver
 churn, randomized endpoint state machines, unusual value layouts, and the
 64-bit ready mask. Small private wait-cell, readiness, and publication-tracker
 Loom models are exhaustive. End-to-end channel models use a preemption bound
 of two and at most 10,000 permutations.
 
-Loom reduces pages and groups to two entries and the MPMC batch limit to two,
-so small models cross topology and requeue boundaries. `LOOM_MAX_BRANCHES`,
+Loom reduces pages and groups to two entries and the MPMC work-queue capacity
+and release batch to two, so small models cross topology and requeue
+boundaries. `LOOM_MAX_BRANCHES`,
 `LOOM_MAX_PERMUTATIONS`, and `LOOM_MAX_PREEMPTIONS` override the end-to-end
 defaults for deeper local runs.
 
 `fanring` forbids direct `unsafe` code. Slot safety is delegated to
-`yring`, which has its own Miri/Loom coverage. Crossbeam deque and `ArcSwap`
-internals are not Loom-instrumented here; normal stress tests cover their
-integration with fanring. The full Miri run uses Tree Borrows and ignores
-process-global leaks because `crossbeam-epoch` does not pass Miri's default
-Stacked Borrows and leak checks. The MPSC-only run keeps those checks enabled.
+`yring`, which has its own Miri/Loom coverage. MPMC lane queues use
+`concurrent-queue`'s Loom backend. `ArcSwap` topology publication is covered by
+normal stress tests and sanitizer runs.
 
 ## Release
 

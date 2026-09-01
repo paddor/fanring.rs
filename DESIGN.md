@@ -26,11 +26,11 @@ tokens. The immutable page/group topology is published with `ArcSwap` only
 when registration crosses a 64-lane boundary; each receiver caches it until a
 generation change.
 
-The registry also tracks one work stealer per live receiver. Receiver creation
-and drop rebuild a single immutable stealer snapshot under the registry mutex
+The registry also tracks one bounded work queue per live receiver. Receiver
+creation and drop rebuild an immutable queue snapshot under the registry mutex
 and publish it with `ArcSwap`. Receivers load that snapshot without locking
-only after their local deque and the shared injector miss. Persistent stealer
-storage is linear in the number of receivers.
+only after their own queue, the shared orphan queue, and visible sender lanes
+miss. Persistent work-queue storage is linear in the number of receivers.
 
 ## Send Path
 
@@ -80,18 +80,17 @@ parking while partial credits remain unpublished.
 
 ## MPMC Receive Path
 
-Each receiver owns a FIFO work deque. A receive operation checks its local
-deque, the shared injector, and other receivers' stealers before claiming a
-ready sender lane. Each shared source gets one steal attempt per sweep. A
-contended sweep advances the victim cursor, checks ready sender lanes, and then
-retries before parking. One busy deque cannot hide later victims or ready
-lanes.
+Each receiver owns a bounded lock-free work queue. A receive first checks its
+local queue and the shared orphan queue. If a sender lane is visibly ready, it
+claims that lane before stealing so multiple producers naturally spread across
+receivers. Otherwise it rotates through the other receiver queues and steals a
+batch.
 
-After claiming a lane, it prefetches and removes at most 64 values. The first
-value satisfies the current receive. Remaining values move to the receiver's
-local deque and are immediately stealable in batches. The lane token is then
-requeued or returned to the registry; no receiver retains a sender lane between
-API calls.
+After claiming a lane, a receiver prefetches and removes at most 64 values. The
+first value satisfies the current receive. Remaining values move to the local
+work queue and become immediately stealable. A steal returns one value and
+moves at most seven more into the thief's local queue, bounding transfer work
+while amortizing victim discovery.
 
 Receivers normally pop directly from a remembered page queue, allowing
 multiple receivers to claim different lanes concurrently. Bitmap summaries
@@ -102,26 +101,22 @@ remain inside the publication tracker. Page queues are bounded by the 64 lane
 tokens that can belong to them, so steady requeue traffic performs no heap
 allocation.
 
-Draining a receiver's local work before claiming another lane preserves
-batching. Requeuing every sender lane after at most 64 values bounds domination
-by an always-busy lane. Receiver drop moves its remaining local values to the
-shared injector and wakes competitors. This is one topology for all receiver
-counts; there is no single-consumer specialization.
+Local queues are bounded by the largest 64-value prefetch batch and allocate
+once when a receiver is created. Receiver drop moves any remaining local values
+to the shared unbounded orphan queue and wakes competitors. This is one
+topology for all receiver counts; there is no single-consumer specialization.
 
 A publication tracker protects transfers that can make work temporarily
-invisible: lane acquisition and drain, publication into a local FIFO, lane
-requeue or retirement, and receiver handoff or removal. Publishers increment a
-generation before decrementing the in-flight count. An empty receiver scan can
-return `Disconnected` only when its generation is unchanged, no publication is
-in flight, all senders are gone, and all sender lanes are retired. Contention or
-a changed generation produces a bounded retry; exhaustion reports transient
-`Empty`, never premature `Disconnected`.
+invisible: lane acquisition and drain, work-queue stealing, lane requeue or
+retirement, and receiver handoff or removal. Publishers increment a generation
+before decrementing the in-flight count. An empty receiver scan can return
+`Disconnected` only when its generation is unchanged, no publication is in
+flight, all senders are gone, and all sender lanes are retired. A changed
+generation produces a bounded retry; exhaustion reports transient `Empty`,
+never premature `Disconnected`.
 
-MPMC ordering is relaxed. This permits batches from one sender lane to execute
-concurrently and permits later sender batches to overtake earlier local work.
-Local and injector work is checked before sender lanes. This may delay a ready
-lane behind a finite staged backlog, but staged work is drained or stolen and
-sender batches remain bounded at 64 values.
+MPMC ordering is relaxed. Batches from one sender can execute concurrently, and
+values from different sender rings may overtake each other.
 
 ## Blocking Waits
 
@@ -161,6 +156,6 @@ sends return `Disconnected`.
 MPSC ordering is FIFO within one sender lane and relaxed across lanes. MPMC
 ordering is fully relaxed. Capacity is per sender, like a per-pipe ZMQ HWM.
 Adding a sender adds another ring and another capacity allocation. No shared
-global credit counter appears on the send path. MPMC receiver deques and the
-injector hold prefetched values outside those ring HWMs, so the sum of ring
+global credit counter appears on the send path. MPMC receiver queues and the
+orphan queue hold prefetched values outside those ring HWMs, so the sum of ring
 capacities is a nominal bound rather than an exact total resident-item bound.
