@@ -210,7 +210,7 @@ fanring
 +/-2.6%
 </text>
 <text x="28" y="190" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-crossbeam-channel
+crossbeam-channel 0.5.16
 </text>
 <rect x="186" y="178" width="71" height="25" opacity="1" fill="#243550" stroke="none"/>
 <text x="221" y="186" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
@@ -325,7 +325,7 @@ crossbeam-channel
 +/-4.6%
 </text>
 <text x="28" y="219" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-flume
+flume 0.12.0
 </text>
 <rect x="186" y="207" width="71" height="25" opacity="1" fill="#1D2A3F" stroke="none"/>
 <text x="221" y="215" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
@@ -440,7 +440,7 @@ flume
 +/-1.6%
 </text>
 <text x="28" y="248" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-kanal
+kanal 0.1.1
 </text>
 <rect x="186" y="236" width="71" height="25" opacity="1" fill="#192132" stroke="none"/>
 <text x="221" y="244" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
@@ -757,7 +757,7 @@ fanring
 +/-1.7%
 </text>
 <text x="28" y="426" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-crossbeam-channel
+crossbeam-channel 0.5.16
 </text>
 <rect x="186" y="414" width="71" height="25" opacity="1" fill="#4C81C3" stroke="none"/>
 <rect x="186" y="414" width="71" height="25" opacity="1" fill="none" stroke="#E5E7EB"/>
@@ -874,7 +874,7 @@ crossbeam-channel
 +/-5.5%
 </text>
 <text x="28" y="455" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-flume
+flume 0.12.0
 </text>
 <rect x="186" y="443" width="71" height="25" opacity="1" fill="#1F2D44" stroke="none"/>
 <text x="221" y="451" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
@@ -989,7 +989,7 @@ flume
 +/-3.9%
 </text>
 <text x="28" y="484" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-kanal
+kanal 0.1.1
 </text>
 <rect x="186" y="472" width="71" height="25" opacity="1" fill="#1B2639" stroke="none"/>
 <text x="221" y="480" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
@@ -1304,7 +1304,7 @@ fanring
 +/-2.1%
 </text>
 <text x="28" y="662" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-crossbeam-channel
+crossbeam-channel 0.5.16
 </text>
 <rect x="186" y="650" width="71" height="25" opacity="1" fill="#5A9AE9" stroke="none"/>
 <rect x="186" y="650" width="71" height="25" opacity="1" fill="none" stroke="#E5E7EB"/>
@@ -1423,7 +1423,7 @@ crossbeam-channel
 +/-4.6%
 </text>
 <text x="28" y="691" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-flume
+flume 0.12.0
 </text>
 <rect x="186" y="679" width="71" height="25" opacity="1" fill="#23344F" stroke="none"/>
 <text x="221" y="687" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
@@ -1538,7 +1538,7 @@ flume
 +/-4.0%
 </text>
 <text x="28" y="720" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-kanal
+kanal 0.1.1
 </text>
 <rect x="186" y="708" width="71" height="25" opacity="1" fill="#273C5B" stroke="none"/>
 <text x="221" y="716" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">

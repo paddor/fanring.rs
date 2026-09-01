@@ -11,6 +11,11 @@ Requires Rust 1.93 or newer.
 
 ## Performance
 
+Throughput across thread counts and payload sizes on the system named in each
+chart, measured with the `performance` governor and CPU turbo disabled. Cells
+show median millions of items per second; lighter cells are faster and white
+outlines mark each topology's winner.
+
 #### MPSC
 
 ![MPSC benchmark chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/mpsc.svg)
