@@ -12,19 +12,25 @@ The MPSC registry contains:
 - pending consumers awaiting receiver adoption
 - reusable lane slots with generation counters
 - ready pages covering 64 lane slots each
+- ready groups summarizing 64 pages each
 
 Registration allocates a yring, assigns a slot, and publishes its consumer to
 the pending list. The receiver imports pending consumers when the registry
 generation changes. A disconnected empty lane returns its slot to the free
 list. The number of producers is limited only by available memory.
 
-The MPMC registry stores idle consumers directly in lane slots. A ready page
-activation moves matching consumers into a lock-free ready-lane queue. It also
-tracks one work stealer per live receiver. Receiver creation and drop rebuild a
-single immutable stealer snapshot under the registry mutex and publish it with
-`ArcSwap`. Receivers load that snapshot without locking only after their local
-deque and the shared injector miss. Persistent stealer storage is linear in the
-number of receivers.
+The MPMC registry stores idle consumers directly in lane slots. Each page owns
+a fixed 64-entry lock-free lane-token queue, allocated when that page is added.
+Separate bitmap groups summarize newly ready registry lanes and requeued lane
+tokens. The immutable page/group topology is published with `ArcSwap` only
+when registration crosses a 64-lane boundary; each receiver caches it until a
+generation change.
+
+The registry also tracks one work stealer per live receiver. Receiver creation
+and drop rebuild a single immutable stealer snapshot under the registry mutex
+and publish it with `ArcSwap`. Receivers load that snapshot without locking
+only after their local deque and the shared injector miss. Persistent stealer
+storage is linear in the number of receivers.
 
 ## Send Path
 
@@ -43,8 +49,9 @@ signal, ready page, and page bit:
 
 After flushing the yring, every publication atomically swaps the signal to
 `PENDING`. Only an `IDLE`-to-`PENDING` transition sets the lane bit in its ready
-page. A page transition from empty to nonempty publishes the page ID to a
-lock-free queue. Later publications coalesce into the existing pending lane.
+page. A page transition from empty to nonempty sets its bit in a ready group.
+Later publications coalesce into the existing pending lane. One group lookup
+covers 4,096 sender lanes without allocating or touching a shared queue tail.
 
 At visible empty, the receiver swaps the signal to `IDLE` and then prefetches
 the yring again. A producer that published before the swap synchronizes through
@@ -55,10 +62,10 @@ without scanning every registered lane.
 
 ## MPSC Receive Path
 
-The receiver takes ready page IDs, swaps each page's bits to zero, and appends
-those lanes to a local active deque. It serves up to 64 items from one lane
-before rotating it to the back. Newly ready pages are polled at the same
-interval, so an always-busy lane cannot hide new producers.
+The receiver claims ready-group bits, swaps each selected page's lane bits to
+zero, and appends those lanes to a local active deque. It serves up to 64 items
+from one lane before rotating it to the back. Newly ready groups are polled at
+the same interval, so an always-busy lane cannot hide new producers.
 
 `yring::prefetch` caches all flushed items with one Acquire load. Pops are
 non-atomic. Consumed capacity is released after `min(64, lane capacity)` items
@@ -80,6 +87,15 @@ value satisfies the current receive. Remaining values move to the receiver's
 local deque and are immediately stealable in batches. The lane token is then
 requeued or returned to the registry; no receiver retains a sender lane between
 API calls.
+
+Receivers normally pop directly from a remembered page queue, allowing
+multiple receivers to claim different lanes concurrently. Bitmap summaries
+find work on other pages without a linear scan. Raw registry readiness and
+requeued work alternate priority, and both page and group cursors rotate, so a
+busy page cannot hide sparse lanes. Clearing a bitmap bit and moving its token
+remain inside the publication tracker. Page queues are bounded by the 64 lane
+tokens that can belong to them, so steady requeue traffic performs no heap
+allocation.
 
 Draining a receiver's local work before claiming another lane preserves
 batching. Requeuing every sender lane after at most 64 values bounds domination

@@ -90,8 +90,10 @@ are drained, no staged work remains, and no work publication is in flight.
 - Steady successful sends and prefetched value pops take no explicit mutex.
   Registration, ready-page activation, lane idle transitions, receiver
   maintenance, and parking may lock.
-- Try operations are not wait-free. Dynamic queues and registry growth may
-  allocate, so allocator internals may also lock.
+- Ready indexing uses fixed-capacity page queues and hierarchical bitmaps. It
+  does not allocate while the producer topology is unchanged. Registration,
+  receiver creation or teardown, and registry growth may allocate.
+- Try operations are lock-free on their common paths, but not wait-free.
 - `unsafe` is forbidden in this crate. Ring storage is delegated to `yring`.
 
 ## Good Fit
