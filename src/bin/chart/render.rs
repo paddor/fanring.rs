@@ -6,6 +6,7 @@ use plotters::element::{PathElement, Rectangle, Text};
 use plotters::prelude::{Color, IntoFont, RGBColor, SVGBackend, ShapeStyle, TextStyle};
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 
+use super::hardware::chart_hardware;
 use super::{
     BACKGROUND_COLOR, ChartError, ChartResult, DrawResultExt, GRID_COLOR, MUTED_TEXT_COLOR,
     Measurement, Row, SERIES, TEXT_COLOR,
@@ -505,7 +506,7 @@ fn chart_subtitle(rows: &[Row]) -> String {
 
     format!(
         "{}; {} operations; {} samples; nominal capacity {} items",
-        simplify_cpu_name(&row.cpu),
+        chart_hardware(&row.cpu),
         row.mode,
         row.samples,
         row.nominal_capacity
@@ -526,16 +527,6 @@ fn capacity_footnote(rows: &[Row], is_mpmc: bool) -> String {
     } else {
         "Capacity: fanring uses per-ring HWM; others use one shared bound".to_string()
     }
-}
-
-fn simplify_cpu_name(cpu: &str) -> String {
-    cpu.replace("(R)", "")
-        .replace("(TM)", "")
-        .replace("CPU ", "")
-        .replace(" @ 3.20GHz", "")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 pub(super) fn unknown_cpu() -> String {

@@ -127,6 +127,25 @@ Default output: `doc/charts/mpsc.svg`.
 The chart tool selects the latest complete run, aggregates samples by median,
 and shows relative median absolute deviation below each throughput value.
 
+Generate the two-topology summary chart from the latest complete MPSC and MPMC
+runs:
+
+```sh
+cargo run --features charts --bin fanring-chart -- --summary
+```
+
+Default output: `doc/charts/summary.svg`.
+
+Chart subtitles use the ignored `.chart_hw` file in the repository root:
+
+```text
+prefix=Linux VM on a 2018 Mac Mini
+postfix=6 cores, performance governor, turbo off
+```
+
+`FANRING_HW_LABEL` overrides the complete label. `FANRING_HW_PREFIX` and
+`FANRING_HW_POSTFIX` override the corresponding file values.
+
 Custom paths:
 
 ```sh
@@ -137,4 +156,10 @@ cargo run --features charts --bin fanring-chart -- \
 cargo run --features charts --bin fanring-chart -- \
   --input target/fanring-bench/mpmc.jsonl \
   --output doc/charts/mpmc.svg
+
+cargo run --features charts --bin fanring-chart -- \
+  --summary \
+  --mpsc-input target/fanring-bench/results.jsonl \
+  --mpmc-input target/fanring-bench/mpmc.jsonl \
+  --output doc/charts/summary.svg
 ```
