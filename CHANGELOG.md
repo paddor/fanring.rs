@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- Replaced the MPMC receiver's crossbeam work-stealing deque with internal
+  bounded work queues, batched transfers, and private sole-receiver staging.
+- Kept benchmark charts on complete nonblocking runs and refreshed comparison
+  data with explicit hardware topology metadata.
+
+### Validation
+
+- Expanded Loom coverage for receiver clone, drop, publication, topology, and
+  work-stealing races.
+- Rechecked MPMC ownership and concurrency with Miri, Tree Borrows, ThreadSanitizer,
+  randomized stress tests, and deeper bounded Loom exploration.
+
 ## [0.2.0] - 2026-09-01
 
 ### Breaking
@@ -54,5 +70,6 @@ All notable changes to this project are documented here.
 
 - Initial bounded, nonblocking MPSC implementation with a fixed sender limit.
 
+[Unreleased]: https://github.com/paddor/fanring.rs/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/paddor/fanring.rs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/paddor/fanring.rs/tree/v0.1.0
