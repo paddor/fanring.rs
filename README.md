@@ -102,6 +102,12 @@ flight.
 - Need an exact total MPMC bound that includes receiver staging.
 - Need async wakeups.
 
-More detail: [DESIGN.md](DESIGN.md)
+## Further reading
 
-Release history: [CHANGELOG.md](CHANGELOG.md)
+* More detail: [DESIGN.md](DESIGN.md)
+* Development and benchmark reproduction: [DEVELOPMENT.md](DEVELOPMENT.md)
+* Release history: [CHANGELOG.md](CHANGELOG.md)
+
+## License
+
+[ISC](LICENSE)
