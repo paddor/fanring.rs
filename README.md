@@ -6,6 +6,8 @@ Sender registration is dynamic. Each sender writes to its own ring, so
 producers do not contend on a shared queue tail. Choose `mpsc` for one consumer
 or `mpmc` for cloneable competing consumers.
 
+Requires Rust 1.93 or newer.
+
 ## Performance
 
 #### MPSC
@@ -61,9 +63,10 @@ them in batches. Receiver drop republishes its buffered work. Ordering is
 relaxed. Moving values into that second-stage queue costs more for large inline
 types; box large payloads when move bandwidth dominates.
 
-`mpmc::try_recv` may return a transient `Empty` while another receiver owns and
-publishes a batch. `Disconnected` is final: all senders are gone, sender rings
-are drained, no staged work remains, and no work publication is in flight.
+`mpmc::try_recv` may return a transient `Empty` while bounded lane maintenance
+or another receiver moves work. `Disconnected` is final: all senders are gone,
+sender rings are drained, no staged work remains, and no work publication is in
+flight.
 
 ## Contract
 
@@ -76,8 +79,8 @@ are drained, no staged work remains, and no work publication is in flight.
   temporarily exceed the sum of sender-ring capacities.
 - `try_send` returns `Full` when that sender's ring is full.
 - MPSC `try_recv` returns `Empty` when no active ring has visible data.
-- MPMC `try_recv` can also return `Empty` while a competing receiver publishes
-  an internal batch.
+- MPMC `try_recv` can also return `Empty` while bounded lane maintenance or a
+  competing receiver moves internal work.
 - Receiver `is_disconnected` becomes true as soon as all senders are dropped;
   buffered values remain readable afterward.
 - `send` and `recv` park only after the corresponding try operation fails.
@@ -112,6 +115,8 @@ are drained, no staged work remains, and no work publication is in flight.
 - Need async wakeups.
 
 More detail: [DESIGN.md](DESIGN.md)
+
+Release history: [CHANGELOG.md](CHANGELOG.md)
 
 ## Benchmarks
 

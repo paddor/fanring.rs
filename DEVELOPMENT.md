@@ -32,6 +32,21 @@ integration with fanring. The full Miri run uses Tree Borrows and ignores
 process-global leaks because `crossbeam-epoch` does not pass Miri's default
 Stacked Borrows and leak checks. The MPSC-only run keeps those checks enabled.
 
+## Release
+
+Update `Cargo.toml` and `CHANGELOG.md`, then run:
+
+```sh
+cargo +1.93.0 test --all-features --locked
+cargo clippy --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+cargo package --locked
+cargo publish --dry-run --locked
+```
+
+Publishing and tagging are separate explicit steps after review. The release
+tag is `v` followed by the package version.
+
 ## Benchmarks
 
 ```sh

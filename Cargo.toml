@@ -1,13 +1,18 @@
 [package]
 name = "fanring"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.93"
 license = "ISC"
-description = "High-throughput typed MPSC and MPMC channels with per-producer HWM"
+description = "High-throughput typed MPSC and MPMC channels with per-producer backpressure"
 repository = "https://github.com/paddor/fanring.rs"
+documentation = "https://docs.rs/fanring"
+readme = "README.md"
 keywords = ["mpsc", "mpmc", "ring-buffer", "lock-free", "batching"]
 categories = ["concurrency", "data-structures"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [lints.rust]
 missing_debug_implementations = "deny"
