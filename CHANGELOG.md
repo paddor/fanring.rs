@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-02
+
 ### Changed
 
 - Replaced the MPMC receiver's crossbeam work-stealing deque with internal
@@ -70,6 +72,7 @@ All notable changes to this project are documented here.
 
 - Initial bounded, nonblocking MPSC implementation with a fixed sender limit.
 
-[Unreleased]: https://github.com/paddor/fanring.rs/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/paddor/fanring.rs/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/paddor/fanring.rs/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/paddor/fanring.rs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/paddor/fanring.rs/tree/v0.1.0
