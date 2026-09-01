@@ -171,25 +171,37 @@ fn run_summary() -> ChartResult<()> {
     let output = arg_value("--output")
         .map_or_else(|| PathBuf::from("doc/charts/summary.svg"), PathBuf::from);
 
-    let mpsc_rows = read_rows_for_run(&mpsc_input, arg_value("--mpsc-run"))?;
-    let mpmc_rows = read_rows_for_run(&mpmc_input, arg_value("--mpmc-run"))?;
+    let mpsc_rows = read_rows_for_run(&mpsc_input, arg_value("--mpsc-run"), Some("try"))?;
+    let mpmc_rows = read_rows_for_run(&mpmc_input, arg_value("--mpmc-run"), Some("try"))?;
     prepare_output(&output)?;
     draw_summary_chart(&mpsc_rows, &mpmc_rows, &output)?;
     println!("wrote {}", output.display());
     Ok(())
 }
 
-fn read_rows_for_run(path: &Path, requested_run: Option<String>) -> ChartResult<Vec<Row>> {
+fn read_rows_for_run(
+    path: &Path,
+    requested_run: Option<String>,
+    default_mode: Option<&str>,
+) -> ChartResult<Vec<Row>> {
     let rows = read_rows(path)?;
     if rows.is_empty() {
         return Err(ChartError::NoRows {
             path: path.to_path_buf(),
         });
     }
-    select_run(rows, requested_run)
+    select_run_with_default_mode(rows, requested_run, default_mode)
 }
 
 fn select_run(rows: Vec<Row>, requested_run: Option<String>) -> ChartResult<Vec<Row>> {
+    select_run_with_default_mode(rows, requested_run, None)
+}
+
+fn select_run_with_default_mode(
+    rows: Vec<Row>,
+    requested_run: Option<String>,
+    default_mode: Option<&str>,
+) -> ChartResult<Vec<Row>> {
     let run_id = if let Some(run_id) = requested_run {
         run_id
     } else {
@@ -197,12 +209,12 @@ fn select_run(rows: Vec<Row>, requested_run: Option<String>) -> ChartResult<Vec<
             .rev()
             .map(|row| row.run_id.as_str())
             .find(|run_id| {
-                run_is_complete(
-                    &rows
-                        .iter()
-                        .filter(|row| row.run_id == **run_id)
-                        .collect::<Vec<_>>(),
-                )
+                let run_rows = rows
+                    .iter()
+                    .filter(|row| row.run_id == **run_id)
+                    .collect::<Vec<_>>();
+                run_is_complete(&run_rows)
+                    && default_mode.is_none_or(|mode| run_rows.iter().all(|row| row.mode == mode))
             })
             .map(str::to_owned)
             .ok_or(ChartError::NoCompleteRun)?
@@ -268,4 +280,38 @@ fn read_rows(path: &Path) -> ChartResult<Vec<Row>> {
         }
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Row, select_run_with_default_mode};
+
+    #[test]
+    fn summary_default_ignores_newer_blocking_run() {
+        let rows = vec![row("try-run", "try"), row("blocking-run", "blocking")];
+
+        let selected = select_run_with_default_mode(rows, None, Some("try")).unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].run_id, "try-run");
+    }
+
+    fn row(run_id: &str, mode: &str) -> Row {
+        Row {
+            run_id: run_id.to_string(),
+            cpu: "cpu".to_string(),
+            mode: mode.to_string(),
+            implementation: "fanring".to_string(),
+            payload: "u64".to_string(),
+            payload_bytes: 8,
+            producers: 1,
+            consumers: None,
+            nominal_capacity: 1,
+            capacity_model: Some("per-ring-hwm".to_string()),
+            items_per_sec: 1.0,
+            sample: 0,
+            samples: 1,
+            expected_rows: 1,
+        }
+    }
 }

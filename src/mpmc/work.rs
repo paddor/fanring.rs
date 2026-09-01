@@ -181,6 +181,35 @@ mod loom_tests {
         });
     }
 
+    #[test]
+    fn drain_racing_steal_preserves_every_value() {
+        loom::model(|| {
+            let source = WorkQueue::bounded(2);
+            source.push(1);
+            source.push(2);
+
+            let orphaned = WorkQueue::unbounded();
+            let drain_source = source.clone();
+            let drain_orphaned = orphaned.clone();
+            let drain = thread::spawn(move || {
+                drain_source.drain_into(&drain_orphaned);
+            });
+            let steal_source = source.clone();
+            let steal = thread::spawn(move || drain_steal(&steal_source));
+
+            drain.join().unwrap();
+            let mut values = steal.join().unwrap();
+            while let Some(value) = source.pop() {
+                values.push(value);
+            }
+            while let Some(value) = orphaned.pop() {
+                values.push(value);
+            }
+            values.sort_unstable();
+            assert_eq!(values, [1, 2]);
+        });
+    }
+
     fn drain_steal(source: &WorkQueue<usize>) -> Vec<usize> {
         let destination = WorkQueue::bounded(2);
         let mut values = source

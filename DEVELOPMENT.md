@@ -126,8 +126,8 @@ Default output: `doc/charts/mpsc.svg`.
 The chart tool selects the latest complete run, aggregates samples by median,
 and shows relative median absolute deviation below each throughput value.
 
-Generate the two-topology summary chart from the latest complete MPSC and MPMC
-runs:
+Generate the two-topology summary chart from the latest complete nonblocking
+MPSC and MPMC runs:
 
 ```sh
 cargo run --features charts --bin fanring-chart -- --summary
