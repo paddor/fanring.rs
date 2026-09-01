@@ -32,7 +32,10 @@ pub use crate::error::{
 /// Maximum per-sender capacity accepted by [`channel`] and [`try_channel`].
 pub const MAX_CAPACITY_PER_SENDER: usize = 1usize << (usize::BITS - 2);
 
+#[cfg(not(loom))]
 const PREFETCH_LIMIT: usize = 64;
+#[cfg(loom)]
+const PREFETCH_LIMIT: usize = 2;
 const TRY_RECV_RETRIES: usize = 1;
 #[cfg(not(loom))]
 const PARK_SPINS: usize = 128;

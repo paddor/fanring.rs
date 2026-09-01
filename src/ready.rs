@@ -6,8 +6,14 @@ use crate::wait::{WaitCell, WaitRegistration};
 const IDLE: u8 = 0;
 const PENDING: u8 = 1;
 
+#[cfg(not(loom))]
 pub(crate) const LANES_PER_PAGE: usize = u64::BITS as usize;
+#[cfg(loom)]
+pub(crate) const LANES_PER_PAGE: usize = 2;
+#[cfg(not(loom))]
 pub(crate) const PAGES_PER_GROUP: usize = u64::BITS as usize;
+#[cfg(loom)]
+pub(crate) const PAGES_PER_GROUP: usize = 2;
 
 /// Top-level summary for 64 ready pages.
 pub(crate) struct ReadyGroup {
@@ -239,7 +245,7 @@ mod tests {
 
 #[cfg(all(test, loom, target_pointer_width = "64"))]
 mod loom_tests {
-    use super::{ReadyGroup, ReadyPage};
+    use super::{LaneSignal, ReadyGroup, ReadyPage};
     use crate::compat::Arc;
 
     #[test]
@@ -260,6 +266,68 @@ mod loom_tests {
             }
 
             assert_eq!(lanes & 1, 1);
+        });
+    }
+
+    #[test]
+    fn page_mark_racing_drain_is_consumed_or_republished() {
+        loom::model(|| {
+            let group = Arc::new(ReadyGroup::new(0));
+            let page = Arc::new(ReadyPage::new(0, group.clone()));
+            page.mark(1);
+
+            let sender_page = page.clone();
+            let sender = loom::thread::spawn(move || sender_page.mark(2));
+
+            assert_ne!(group.take_all(), 0);
+            let mut lanes = page.take();
+            sender.join().unwrap();
+            if group.take_all() != 0 {
+                lanes |= page.take();
+            }
+
+            assert_eq!(lanes, 3);
+        });
+    }
+
+    #[test]
+    fn concurrent_group_claims_take_distinct_pages() {
+        loom::model(|| {
+            let group = Arc::new(ReadyGroup::new(0));
+            group.mark((1 << 0) | (1 << 1));
+
+            let first_group = group.clone();
+            let first = loom::thread::spawn(move || first_group.take_one_from(0).unwrap());
+            let second_group = group.clone();
+            let second = loom::thread::spawn(move || second_group.take_one_from(0).unwrap());
+
+            let mut claimed = [first.join().unwrap(), second.join().unwrap()];
+            claimed.sort_unstable();
+            assert_eq!(claimed, [0, 1]);
+            assert_eq!(group.take_one_from(0), None);
+        });
+    }
+
+    #[test]
+    fn lane_publication_racing_empty_transition_remains_claimed_or_indexed() {
+        loom::model(|| {
+            let group = Arc::new(ReadyGroup::new(0));
+            let page = Arc::new(ReadyPage::new(0, group.clone()));
+            let signal = Arc::new(LaneSignal::new(page.clone(), 0));
+
+            assert!(signal.mark());
+            assert_ne!(group.take_all(), 0);
+            assert_ne!(page.take(), 0);
+
+            let sender_signal = signal.clone();
+            let sender = loom::thread::spawn(move || sender_signal.mark());
+            signal.finish_drain();
+            let claimed = signal.claim_after_empty();
+            sender.join().unwrap();
+
+            let indexed = group.take_all() != 0 && page.take() != 0;
+            assert!(claimed || indexed);
+            assert!(signal.is_pending());
         });
     }
 }

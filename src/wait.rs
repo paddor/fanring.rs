@@ -259,6 +259,7 @@ mod loom_tests {
     use super::{MultiWaitCell, WaitCell};
     use super::{NOTIFY_INCREMENT, WAITING};
     use crate::compat::{Arc, AtomicBool, Ordering};
+    use std::time::Duration;
 
     #[test]
     fn wait_notify_cannot_be_lost() {
@@ -297,6 +298,20 @@ mod loom_tests {
     }
 
     #[test]
+    fn timeout_racing_notify_clears_single_waiter_registration() {
+        loom::model(|| {
+            let cell = Arc::new(WaitCell::new());
+            let registration = cell.prepare();
+            let notifier_cell = cell.clone();
+            let notifier = loom::thread::spawn(move || notifier_cell.notify());
+
+            registration.wait_timeout(Duration::ZERO);
+            notifier.join().unwrap();
+            assert_eq!(cell.state.load(Ordering::Acquire) & WAITING, 0);
+        });
+    }
+
+    #[test]
     fn multi_wait_notify_one_cannot_be_lost() {
         loom::model(|| {
             let cell = Arc::new(MultiWaitCell::new());
@@ -329,6 +344,21 @@ mod loom_tests {
             cell.state.0.fetch_add(NOTIFY_INCREMENT, Ordering::AcqRel);
             assert_ne!(cell.state.0.load(Ordering::Acquire), WAITING);
             registration.cancel();
+        });
+    }
+
+    #[test]
+    fn timeout_racing_notify_clears_multi_waiter_registration() {
+        loom::model(|| {
+            let cell = Arc::new(MultiWaitCell::new());
+            let registration = cell.prepare();
+            let notifier_cell = cell.clone();
+            let notifier = loom::thread::spawn(move || notifier_cell.notify_one());
+
+            registration.wait_timeout(Duration::ZERO);
+            notifier.join().unwrap();
+            assert_eq!(cell.state.0.load(Ordering::Acquire) & WAITING, 0);
+            assert_eq!(*crate::compat::lock(&cell.mutex), 0);
         });
     }
 

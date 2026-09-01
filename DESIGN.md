@@ -67,6 +67,11 @@ zero, and appends those lanes to a local active deque. It serves up to 64 items
 from one lane before rotating it to the back. Newly ready groups are polled at
 the same interval, so an always-busy lane cannot hide new producers.
 
+After claiming a page-summary bit, the receiver refreshes the registry before
+looking up that page. After claiming lane bits, it refreshes again before
+looking up those lanes. A registration that races either snapshot is therefore
+imported before its claimed readiness bit is interpreted.
+
 `yring::prefetch` caches all flushed items with one Acquire load. Pops are
 non-atomic. Consumed capacity is released after `min(64, lane capacity)` items
 or when the lane reaches visible empty. A full release batch can span several

@@ -306,10 +306,14 @@ impl<T> Receiver<T> {
                 let page_bit = page_bits.trailing_zeros() as usize;
                 page_bits &= page_bits - 1;
                 let page_id = group_index * PAGES_PER_GROUP + page_bit;
+                // A new page can publish after its group bit was claimed.
+                self.refresh_registry();
                 let Some(page) = self.pages.get(page_id) else {
                     continue;
                 };
                 let mut lane_bits = page.take();
+                // A new lane can publish after its page bit was claimed.
+                self.refresh_registry();
                 while lane_bits != 0 {
                     let lane_bit = lane_bits.trailing_zeros() as usize;
                     lane_bits &= lane_bits - 1;
