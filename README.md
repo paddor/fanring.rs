@@ -3,8 +3,9 @@
 Fast typed MPSC and MPMC channels built from one SPSC `yring` per producer.
 
 Sender registration is dynamic. Each sender writes to its own ring, so
-producers do not contend on a shared queue tail. Choose `mpsc` for one consumer
-or `mpmc` for cloneable competing consumers.
+producers do not contend on a shared queue tail. MPSC drains those rings
+directly; MPMC distributes internally batched work through stealable
+receiver-local FIFOs.
 
 Requires Rust 1.93 or newer.
 
@@ -70,34 +71,16 @@ flight.
 
 ## Contract
 
-- Per-producer-HWM MPSC or MPMC with blocking, timeout, and non-blocking
-  operations.
-- No configured producer limit.
-- One bounded SPSC ring per live sender.
-- Capacity is one HWM per sender and is rounded up to a power of two.
-- MPMC receiver staging is outside sender-ring HWM. Total resident items can
-  temporarily exceed the sum of sender-ring capacities.
-- `try_send` returns `Full` when that sender's ring is full.
-- MPSC `try_recv` returns `Empty` when no active ring has visible data.
-- MPMC `try_recv` can also return `Empty` while bounded lane maintenance or a
-  competing receiver moves internal work.
-- Receiver `is_disconnected` becomes true as soon as all senders are dropped;
-  buffered values remain readable afterward.
-- `send` and `recv` park only after the corresponding try operation fails.
-- Blocking operations spin briefly before parking.
-- `send_timeout` and `recv_timeout` bound that parked wait.
-- MPSC is FIFO per sender; MPMC ordering is relaxed.
-- Active sender lanes are served in batches of at most 64 items.
-- Dropped sender slots are reused after their rings drain.
-- Receive-side batching is internal to `recv`/`try_recv`.
-- Steady successful sends and prefetched value pops take no explicit mutex.
-  Registration, ready-page activation, lane idle transitions, receiver
-  maintenance, and parking may lock.
-- Ready indexing uses fixed-capacity page queues and hierarchical bitmaps. It
-  does not allocate while the producer topology is unchanged. Registration,
-  receiver creation or teardown, and registry growth may allocate.
-- Try operations are lock-free on their common paths, but not wait-free.
-- `unsafe` is forbidden in this crate. Ring storage is delegated to `yring`.
+- One bounded ring per dynamic sender; capacity is a per-sender HWM rounded up
+  to a power of two.
+- MPSC preserves FIFO within each sender lane. MPMC ordering is relaxed and its
+  receiver staging can temporarily exceed sender-ring capacity.
+- Nonblocking, blocking, timeout, and deadline operations are available.
+  Blocking operations spin briefly before parking.
+- Disconnection never discards buffered values. MPMC `Empty` may be transient
+  while receivers move internal work; `Disconnected` is final.
+- Common try paths are lock-free, not wait-free. Topology changes, maintenance,
+  and parking may lock or allocate.
 
 ## Good Fit
 
@@ -117,26 +100,3 @@ flight.
 More detail: [DESIGN.md](DESIGN.md)
 
 Release history: [CHANGELOG.md](CHANGELOG.md)
-
-## Benchmarks
-
-```sh
-cargo bench --bench comparison
-FANRING_BENCH_MODE=blocking cargo bench --bench comparison
-cargo bench --bench mpmc
-FANRING_BENCH_MODE=blocking cargo bench --bench mpmc
-cargo bench --bench wake_latency
-```
-
-Comparison benches accept `FANRING_BENCH_SECS`, `FANRING_BENCH_PRODUCERS`,
-`FANRING_BENCH_CAPACITY`, `FANRING_BENCH_PAYLOADS`,
-`FANRING_BENCH_IMPLS`, `FANRING_BENCH_SAMPLES`,
-`FANRING_BENCH_WARMUP_SECS`, and `FANRING_BENCH_OUT`. MPMC also accepts
-`FANRING_BENCH_CONSUMERS`. Defaults are five one-second samples after a 250 ms
-warmup. Implementation order rotates between samples. Output includes every
-sample; summaries and charts use the median and relative median absolute
-deviation.
-
-Wake latency accepts `FANRING_WAKE_ROUNDS`, `FANRING_WAKE_WARMUP`,
-`FANRING_WAKE_SETTLE_NS`, `FANRING_WAKE_SETTLE_MODE` (`sleep` or `spin`), and
-`FANRING_WAKE_OUT`. All benchmarks append machine-readable JSONL.
