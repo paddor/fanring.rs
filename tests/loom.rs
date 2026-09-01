@@ -561,6 +561,142 @@ fn mpmc_receiver_drop_preserves_prefetched_work() {
 }
 
 #[test]
+fn mpmc_clone_makes_private_prefetch_competitive() {
+    model(|| {
+        let (mut tx, mut rx0) = mpmc::channel(2);
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        drop(tx);
+        assert_eq!(rx0.recv(), Ok(1));
+
+        let mut rx1 = rx0.clone();
+        let first = thread::spawn(move || rx0.recv());
+        let second = thread::spawn(move || rx1.recv());
+        let results = [first.join().unwrap(), second.join().unwrap()];
+
+        assert_eq!(results.iter().filter(|result| result == &&Ok(2)).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result == &&Err(mpmc::RecvError))
+                .count(),
+            1
+        );
+    });
+}
+
+#[test]
+fn mpmc_owner_drop_racing_private_prefetch_steal_preserves_work() {
+    model(|| {
+        let (mut tx, mut rx0) = mpmc::channel(2);
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        drop(tx);
+        assert_eq!(rx0.recv(), Ok(1));
+
+        let mut rx1 = rx0.clone();
+        let thief = thread::spawn(move || rx1.recv());
+        thread::yield_now();
+        drop(rx0);
+
+        assert_eq!(thief.join().unwrap(), Ok(2));
+    });
+}
+
+#[test]
+fn mpmc_last_competitor_drop_racing_prefetch_preserves_work() {
+    model(|| {
+        let (mut tx, mut rx0) = mpmc::channel(2);
+        let rx1 = rx0.clone();
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        drop(tx);
+
+        let dropper = thread::spawn(move || drop(rx1));
+        assert_eq!(rx0.recv(), Ok(1));
+        dropper.join().unwrap();
+
+        let mut rx2 = rx0.clone();
+        drop(rx0);
+        assert_eq!(rx2.recv(), Ok(2));
+        assert_eq!(rx2.try_recv(), Err(mpmc::TryRecvError::Disconnected));
+    });
+}
+
+#[test]
+fn mpmc_shared_to_private_staging_transition_preserves_work() {
+    model(|| {
+        let (mut tx, mut rx0) = mpmc::channel(2);
+        let rx1 = rx0.clone();
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        assert_eq!(rx0.recv(), Ok(1));
+
+        let dropper = thread::spawn(move || drop(rx1));
+        dropper.join().unwrap();
+        assert_eq!(rx0.recv(), Ok(2));
+
+        tx.try_send(3).unwrap();
+        tx.try_send(4).unwrap();
+        drop(tx);
+        assert_eq!(rx0.recv(), Ok(3));
+
+        let mut rx2 = rx0.clone();
+        drop(rx0);
+        assert_eq!(rx2.recv(), Ok(4));
+        assert_eq!(rx2.try_recv(), Err(mpmc::TryRecvError::Disconnected));
+    });
+}
+
+#[test]
+fn mpmc_unregister_register_race_preserves_staged_work() {
+    model(|| {
+        let (mut tx, mut rx0) = mpmc::channel(2);
+        let rx1 = rx0.clone();
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        drop(tx);
+        assert_eq!(rx0.recv(), Ok(1));
+
+        let dropper = thread::spawn(move || drop(rx1));
+        let mut rx2 = rx0.clone();
+        dropper.join().unwrap();
+        drop(rx0);
+
+        assert_eq!(rx2.recv(), Ok(2));
+        assert_eq!(rx2.try_recv(), Err(mpmc::TryRecvError::Disconnected));
+    });
+}
+
+#[test]
+fn mpmc_owner_drop_and_two_thieves_preserve_shared_work() {
+    model(|| {
+        let (mut tx, mut rx0) = mpmc::channel(2);
+        let mut rx1 = rx0.clone();
+        let mut rx2 = rx0.clone();
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        drop(tx);
+        assert_eq!(rx0.recv(), Ok(1));
+
+        let first = thread::spawn(move || rx1.recv());
+        let second = thread::spawn(move || rx2.recv());
+        thread::yield_now();
+        drop(rx0);
+        let results = [first.join().unwrap(), second.join().unwrap()];
+
+        assert_eq!(results.iter().filter(|result| result == &&Ok(2)).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result == &&Err(mpmc::RecvError))
+                .count(),
+            1
+        );
+    });
+}
+
+#[test]
 fn mpmc_receiver_drop_racing_steal_preserves_prefetched_work() {
     model(|| {
         let (mut tx, mut rx0) = mpmc::channel(2);
