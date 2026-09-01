@@ -11,16 +11,18 @@ Requires Rust 1.93 or newer.
 
 ## Performance
 
-Throughput across thread counts and payload sizes on the system named in each
-chart, measured with the `performance` governor and CPU turbo disabled. Cells
-show median millions of items per second; lighter cells are faster and white
-outlines mark each topology's winner.
+Median throughput on the system named in each chart, measured with the
+`performance` governor and CPU turbo disabled. Summary bars compare common
+`u64` topologies, while detailed heatmaps cover thread counts and payload sizes
+with lighter cells for higher throughput and white outlines for winners.
 
-#### MPSC
+![Common MPSC and MPMC benchmark cases](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/summary.svg)
+
+#### Detailed MPSC
 
 ![MPSC benchmark chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/mpsc.svg)
 
-#### MPMC
+#### Detailed MPMC
 
 ![MPMC benchmark chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/mpmc.svg)
 

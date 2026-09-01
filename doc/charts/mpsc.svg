@@ -4,7 +4,7 @@
 fanring MPSC comparison
 </text>
 <text x="512" y="35" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#9CA3AF">
-Intel Core i7-8700B; try operations; 5 samples; nominal capacity 8192 items
+Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off; try operations; 5 samples; nominal capacity 8192 items
 </text>
 <text x="512" y="73" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 u64 (8 B); median M items/s (+/- MAD); color scale 0-80; white outline = winner
