@@ -9,13 +9,18 @@ use std::path::{Path, PathBuf};
 use plotters::prelude::*;
 use serde::Deserialize;
 
+#[path = "chart/hardware.rs"]
+mod hardware;
 #[path = "chart/render.rs"]
 mod render;
+#[path = "chart/summary.rs"]
+mod summary;
 #[path = "chart/support.rs"]
 mod support;
 
 use render::draw_chart;
-use support::{arg_value, run_is_complete};
+use summary::draw_summary_chart;
+use support::{arg_value, has_arg, run_is_complete};
 
 const BACKGROUND_COLOR: RGBColor = RGBColor(0, 0, 0);
 const GRID_COLOR: RGBColor = RGBColor(55, 65, 81);
@@ -127,6 +132,14 @@ fn main() {
 }
 
 fn run() -> ChartResult<()> {
+    if has_arg("--summary") {
+        return run_summary();
+    }
+
+    run_detail()
+}
+
+fn run_detail() -> ChartResult<()> {
     let input = arg_value("--input").map_or_else(
         || PathBuf::from("target/fanring-bench/results.jsonl"),
         PathBuf::from,
@@ -139,7 +152,44 @@ fn run() -> ChartResult<()> {
         return Err(ChartError::NoRows { path: input });
     }
 
-    let requested_run = arg_value("--run");
+    let rows = select_run(rows, arg_value("--run"))?;
+    prepare_output(&output)?;
+    draw_chart(&rows, &output)?;
+    println!("wrote {}", output.display());
+    Ok(())
+}
+
+fn run_summary() -> ChartResult<()> {
+    let mpsc_input = arg_value("--mpsc-input").map_or_else(
+        || PathBuf::from("target/fanring-bench/results.jsonl"),
+        PathBuf::from,
+    );
+    let mpmc_input = arg_value("--mpmc-input").map_or_else(
+        || PathBuf::from("target/fanring-bench/mpmc.jsonl"),
+        PathBuf::from,
+    );
+    let output = arg_value("--output")
+        .map_or_else(|| PathBuf::from("doc/charts/summary.svg"), PathBuf::from);
+
+    let mpsc_rows = read_rows_for_run(&mpsc_input, arg_value("--mpsc-run"))?;
+    let mpmc_rows = read_rows_for_run(&mpmc_input, arg_value("--mpmc-run"))?;
+    prepare_output(&output)?;
+    draw_summary_chart(&mpsc_rows, &mpmc_rows, &output)?;
+    println!("wrote {}", output.display());
+    Ok(())
+}
+
+fn read_rows_for_run(path: &Path, requested_run: Option<String>) -> ChartResult<Vec<Row>> {
+    let rows = read_rows(path)?;
+    if rows.is_empty() {
+        return Err(ChartError::NoRows {
+            path: path.to_path_buf(),
+        });
+    }
+    select_run(rows, requested_run)
+}
+
+fn select_run(rows: Vec<Row>, requested_run: Option<String>) -> ChartResult<Vec<Row>> {
     let run_id = if let Some(run_id) = requested_run {
         run_id
     } else {
@@ -157,26 +207,26 @@ fn run() -> ChartResult<()> {
             .map(str::to_owned)
             .ok_or(ChartError::NoCompleteRun)?
     };
-    let rows: Vec<Row> = rows
+    let selected: Vec<Row> = rows
         .into_iter()
         .filter(|row| row.run_id == run_id)
         .collect();
-    if rows.is_empty() {
+    if selected.is_empty() {
         return Err(ChartError::RunNotFound(run_id));
     }
-    if !run_is_complete(&rows.iter().collect::<Vec<_>>()) {
+    if !run_is_complete(&selected.iter().collect::<Vec<_>>()) {
         return Err(ChartError::RunIncomplete(run_id));
     }
+    Ok(selected)
+}
 
+fn prepare_output(output: &Path) -> ChartResult<()> {
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|source| ChartError::Io {
             path: parent.to_path_buf(),
             source,
         })?;
     }
-
-    draw_chart(&rows, &output)?;
-    println!("wrote {}", output.display());
     Ok(())
 }
 

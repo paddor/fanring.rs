@@ -41,6 +41,10 @@ pub(super) fn arg_value(name: &str) -> Option<String> {
     None
 }
 
+pub(super) fn has_arg(name: &str) -> bool {
+    std::env::args().skip(1).any(|arg| arg == name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Row;
