@@ -64,11 +64,13 @@ let b = rx1.recv().unwrap();
 assert_ne!(a, b);
 ```
 
-`mpmc` drains up to 64 values from a ready sender ring into a bounded local work
-queue. Competing receivers steal up to eight values at a time. Receiver drop
-republishes its buffered work. Ordering is relaxed. Moving values into that
-second-stage queue costs more for large inline types; box large payloads when
-move bandwidth dominates.
+`mpmc` drains up to 64 values from a ready sender ring. With one receiver, the
+remaining values stay in a private deque. Cloning publishes that deque before
+the new receiver becomes visible. With multiple receivers, remaining values
+enter bounded synchronized work queues, and competitors steal up to eight at a
+time. Receiver drop republishes its buffered work. Ordering is relaxed. Moving
+values into that second-stage queue costs more for large inline types; box large
+payloads when move bandwidth dominates.
 
 `mpmc::try_recv` may return a transient `Empty` while bounded lane maintenance
 or another receiver moves work. `Disconnected` is final: all senders are gone,
@@ -85,8 +87,9 @@ flight.
   Blocking operations spin briefly before parking.
 - Disconnection never discards buffered values. MPMC `Empty` may be transient
   while receivers move internal work; `Disconnected` is final.
-- Common try paths are lock-free, not wait-free. Topology changes, maintenance,
-  and parking may lock or allocate.
+- Sender hot paths and MPSC batching avoid a shared queue lock. MPMC work
+  distribution and topology maintenance use mutexes; blocking operations may
+  park.
 
 ## Good Fit
 

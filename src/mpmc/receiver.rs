@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
@@ -19,6 +20,8 @@ pub struct Receiver<T> {
     pub(super) shared: Arc<Shared<T>>,
     pub(super) id: usize,
     pub(super) local: super::WorkQueue<T>,
+    /// Unsynchronized staging used only while this is the sole receiver.
+    pub(super) private: RefCell<VecDeque<T>>,
     pub(super) steal_cursor: usize,
     pub(super) ready: RefCell<std::sync::Arc<ReadyTopology<T>>>,
     pub(super) seen_ready_generation: Cell<usize>,
@@ -31,12 +34,17 @@ pub struct Receiver<T> {
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
+        // Make sole-receiver staging stealable before publishing another clone.
+        let publication = self.shared.publications.begin();
+        self.local.push_batch(self.private.borrow_mut().drain(..));
         let (id, local) = self.shared.register_receiver();
+        drop(publication);
         let (ready, seen_ready_generation) = self.shared.ready_snapshot();
         Self {
             shared: self.shared.clone(),
             id,
             local,
+            private: RefCell::new(VecDeque::with_capacity(PREFETCH_LIMIT)),
             steal_cursor: 0,
             ready: RefCell::new(ready),
             seen_ready_generation: Cell::new(seen_ready_generation),
@@ -104,6 +112,9 @@ impl<T> Receiver<T> {
     }
 
     fn pop_work(&mut self) -> WorkPop<T> {
+        if let Some(value) = self.private.get_mut().pop_front() {
+            return WorkPop::Item(value);
+        }
         if let Some(value) = self.local.pop() {
             return WorkPop::Item(value);
         }
@@ -419,12 +430,19 @@ impl<T> Receiver<T> {
             .consumer
             .pop()
             .expect("cached_available guarantees prefetched data");
-        for _ in 1..batch {
-            self.local.push(
+        // Only this receiver can create a second clone while the count is one.
+        if self.shared.live_receivers.load(Ordering::Acquire) == 1 {
+            self.private.borrow_mut().extend((1..batch).map(|_| {
                 lane.consumer
                     .pop()
-                    .expect("batch is bounded by cached availability"),
-            );
+                    .expect("batch is bounded by cached availability")
+            }));
+        } else {
+            self.local.push_batch((1..batch).map(|_| {
+                lane.consumer
+                    .pop()
+                    .expect("batch is bounded by cached availability")
+            }));
         }
         lane.cached_available -= batch;
         lane.unreleased += batch;
@@ -540,7 +558,10 @@ impl<T> Receiver<T> {
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let publication = self.shared.publications.begin();
-        let published = self.local.drain_into(&self.shared.orphaned_work);
+        let private = self.private.get_mut();
+        let mut published = !private.is_empty();
+        self.shared.orphaned_work.push_batch(private.drain(..));
+        published |= self.local.drain_into(&self.shared.orphaned_work);
         self.shared.unregister_receiver(self.id);
         drop(publication);
 
@@ -557,7 +578,10 @@ impl<T> fmt::Debug for Receiver<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Receiver")
             .field("id", &self.id)
-            .field("local_items", &self.local.len())
+            .field(
+                "local_items",
+                &(self.private.borrow().len() + self.local.len()),
+            )
             .field(
                 "registered_lanes",
                 &self.shared.registered_lanes.load(Ordering::Relaxed),

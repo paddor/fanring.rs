@@ -26,6 +26,7 @@ const BACKGROUND_COLOR: RGBColor = RGBColor(0, 0, 0);
 const GRID_COLOR: RGBColor = RGBColor(55, 65, 81);
 const TEXT_COLOR: RGBColor = RGBColor(229, 231, 235);
 const MUTED_TEXT_COLOR: RGBColor = RGBColor(156, 163, 175);
+const DEFAULT_CHART_MODE: &str = "try";
 
 type ChartResult<T> = Result<T, ChartError>;
 
@@ -152,7 +153,7 @@ fn run_detail() -> ChartResult<()> {
         return Err(ChartError::NoRows { path: input });
     }
 
-    let rows = select_run(rows, arg_value("--run"))?;
+    let rows = select_run_with_default_mode(rows, arg_value("--run"), Some(DEFAULT_CHART_MODE))?;
     prepare_output(&output)?;
     draw_chart(&rows, &output)?;
     println!("wrote {}", output.display());
@@ -171,8 +172,16 @@ fn run_summary() -> ChartResult<()> {
     let output = arg_value("--output")
         .map_or_else(|| PathBuf::from("doc/charts/summary.svg"), PathBuf::from);
 
-    let mpsc_rows = read_rows_for_run(&mpsc_input, arg_value("--mpsc-run"), Some("try"))?;
-    let mpmc_rows = read_rows_for_run(&mpmc_input, arg_value("--mpmc-run"), Some("try"))?;
+    let mpsc_rows = read_rows_for_run(
+        &mpsc_input,
+        arg_value("--mpsc-run"),
+        Some(DEFAULT_CHART_MODE),
+    )?;
+    let mpmc_rows = read_rows_for_run(
+        &mpmc_input,
+        arg_value("--mpmc-run"),
+        Some(DEFAULT_CHART_MODE),
+    )?;
     prepare_output(&output)?;
     draw_summary_chart(&mpsc_rows, &mpmc_rows, &output)?;
     println!("wrote {}", output.display());
@@ -191,10 +200,6 @@ fn read_rows_for_run(
         });
     }
     select_run_with_default_mode(rows, requested_run, default_mode)
-}
-
-fn select_run(rows: Vec<Row>, requested_run: Option<String>) -> ChartResult<Vec<Row>> {
-    select_run_with_default_mode(rows, requested_run, None)
 }
 
 fn select_run_with_default_mode(
@@ -287,7 +292,7 @@ mod tests {
     use super::{Row, select_run_with_default_mode};
 
     #[test]
-    fn summary_default_ignores_newer_blocking_run() {
+    fn chart_default_ignores_newer_blocking_run() {
         let rows = vec![row("try-run", "try"), row("blocking-run", "blocking")];
 
         let selected = select_run_with_default_mode(rows, None, Some("try")).unwrap();

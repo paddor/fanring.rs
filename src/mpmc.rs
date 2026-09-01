@@ -113,6 +113,9 @@ fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
             shared,
             id: 0,
             local,
+            private: std::cell::RefCell::new(std::collections::VecDeque::with_capacity(
+                PREFETCH_LIMIT,
+            )),
             steal_cursor: 0,
             ready: std::cell::RefCell::new(ready),
             seen_ready_generation: std::cell::Cell::new(0),

@@ -26,11 +26,12 @@ tokens. The immutable page/group topology is published with `ArcSwap` only
 when registration crosses a 64-lane boundary; each receiver caches it until a
 generation change.
 
-The registry also tracks one bounded work queue per live receiver. Receiver
-creation and drop rebuild an immutable queue snapshot under the registry mutex
-and publish it with `ArcSwap`. Receivers load that snapshot without locking
-only after their own queue, the shared orphan queue, and visible sender lanes
-miss. Persistent work-queue storage is linear in the number of receivers.
+The registry also tracks one bounded synchronized work queue per live receiver.
+Receiver creation and drop rebuild an immutable queue snapshot under the
+registry mutex and publish it with `ArcSwap`. Receivers load the snapshot itself
+without locking only after their own queue, the shared orphan queue, and visible
+sender lanes miss. Persistent work-queue storage is linear in the number of
+receivers.
 
 ## Send Path
 
@@ -80,17 +81,20 @@ parking while partial credits remain unpublished.
 
 ## MPMC Receive Path
 
-Each receiver owns a bounded lock-free work queue. A receive first checks its
-local queue and the shared orphan queue. If a sender lane is visibly ready, it
-claims that lane before stealing so multiple producers naturally spread across
-receivers. Otherwise it rotates through the other receiver queues and steals a
-batch.
+Each receiver owns a private deque and a bounded synchronized work queue. A
+receive first checks the private deque, its shared queue, and the shared orphan
+queue. If a sender lane is visibly ready, it claims that lane before stealing
+so multiple producers naturally spread across receivers. Otherwise it rotates
+through the other receiver queues and steals a batch.
 
 After claiming a lane, a receiver prefetches and removes at most 64 values. The
-first value satisfies the current receive. Remaining values move to the local
-work queue and become immediately stealable. A steal returns one value and
-moves at most seven more into the thief's local queue, bounding transfer work
-while amortizing victim discovery.
+first value satisfies the current receive. With one live receiver, remaining
+values move to its private deque. Cloning publishes that private work before
+registering the new receiver. With multiple receivers, remaining values move to
+the synchronized queue under one bounded critical section and become
+immediately stealable. A steal returns one value and moves at most seven more
+into the thief's queue, bounding transfer work while amortizing victim
+discovery.
 
 Receivers normally pop directly from a remembered page queue, allowing
 multiple receivers to claim different lanes concurrently. Bitmap summaries
@@ -102,9 +106,10 @@ tokens that can belong to them, so steady requeue traffic performs no heap
 allocation.
 
 Local queues are bounded by the largest 64-value prefetch batch and allocate
-once when a receiver is created. Receiver drop moves any remaining local values
-to the shared unbounded orphan queue and wakes competitors. This is one
-topology for all receiver counts; there is no single-consumer specialization.
+once when a receiver is created. Receiver drop moves private and shared local
+values to the synchronized unbounded orphan queue and wakes competitors. The
+single-receiver private deque removes synchronization from the uncontended
+receive path without changing clone or drop reachability.
 
 A publication tracker protects transfers that can make work temporarily
 invisible: lane acquisition and drain, work-queue stealing, lane requeue or

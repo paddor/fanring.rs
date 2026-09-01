@@ -11,7 +11,7 @@
 //! - [`mpsc`] has one receiver, preserves FIFO within each sender lane, and has
 //!   the smallest receive-side overhead.
 //! - [`mpmc`] has cloneable competing receivers and relaxed ordering. Receivers
-//!   stage batches in bounded lock-free queues that other receivers can steal.
+//!   stage batches in bounded queues that other receivers can steal.
 //!
 //! Both variants provide nonblocking, blocking, timeout, and deadline APIs.
 //! Capacity is a high-water mark per sender, not one shared channel bound.

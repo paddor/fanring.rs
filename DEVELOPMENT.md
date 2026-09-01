@@ -27,9 +27,10 @@ boundaries. `LOOM_MAX_BRANCHES`,
 defaults for deeper local runs.
 
 `fanring` forbids direct `unsafe` code. Slot safety is delegated to
-`yring`, which has its own Miri/Loom coverage. MPMC lane queues use
-`concurrent-queue`'s Loom backend. `ArcSwap` topology publication is covered by
-normal stress tests and sanitizer runs.
+`yring`, which has its own Miri/Loom coverage. MPMC lane-token queues use
+`concurrent-queue`'s Loom backend, while receiver work queues use the
+compatibility mutex and are directly modeled. `ArcSwap` topology publication
+is covered by normal stress tests and sanitizer runs.
 
 ## Release
 
@@ -123,8 +124,9 @@ cargo run --features charts --bin fanring-chart
 
 Default output: `doc/charts/mpsc.svg`.
 
-The chart tool selects the latest complete run, aggregates samples by median,
-and shows relative median absolute deviation below each throughput value.
+The chart tool selects the latest complete nonblocking run, aggregates samples
+by median, and shows relative median absolute deviation below each throughput
+value. An explicit run ID may select a blocking run.
 
 Generate the two-topology summary chart from the latest complete nonblocking
 MPSC and MPMC runs:
@@ -139,7 +141,7 @@ Chart subtitles use the ignored `.chart_hw` file in the repository root:
 
 ```text
 prefix=Linux VM on a 2018 Mac Mini
-postfix=6 cores, performance governor, turbo off
+postfix=6 physical cores / 12 threads, performance governor, turbo off
 ```
 
 `FANRING_HW_LABEL` overrides the complete label. `FANRING_HW_PREFIX` and

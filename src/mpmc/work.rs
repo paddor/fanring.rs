@@ -4,15 +4,20 @@
 //! and move a small batch into their own queue. The shared unbounded queue only
 //! preserves staged values when a receiver is dropped.
 
-use concurrent_queue::ConcurrentQueue;
+use std::collections::VecDeque;
 
-use crate::compat::Arc;
+use crate::compat::{Arc, Mutex, lock};
 
 const STEAL_BATCH_LIMIT: usize = 8;
 
-/// Cloneable handle to a lock-free queue of staged receiver work.
+/// Cloneable handle to a synchronized queue of staged receiver work.
 pub(super) struct WorkQueue<T> {
-    queue: Arc<ConcurrentQueue<T>>,
+    queue: Arc<Queue<T>>,
+}
+
+struct Queue<T> {
+    values: Mutex<VecDeque<T>>,
+    capacity: Option<usize>,
 }
 
 impl<T> Clone for WorkQueue<T> {
@@ -27,14 +32,20 @@ impl<T> WorkQueue<T> {
     /// Create a bounded queue for one receiver's prefetched values.
     pub(super) fn bounded(capacity: usize) -> Self {
         Self {
-            queue: Arc::new(ConcurrentQueue::bounded(capacity)),
+            queue: Arc::new(Queue {
+                values: Mutex::new(VecDeque::with_capacity(capacity)),
+                capacity: Some(capacity),
+            }),
         }
     }
 
     /// Create the shared unbounded queue used during receiver removal.
     pub(super) fn unbounded() -> Self {
         Self {
-            queue: Arc::new(ConcurrentQueue::unbounded()),
+            queue: Arc::new(Queue {
+                values: Mutex::new(VecDeque::new()),
+                capacity: None,
+            }),
         }
     }
 
@@ -42,17 +53,32 @@ impl<T> WorkQueue<T> {
     ///
     /// Bounded queues rely on the invariant that a receiver stages at most one
     /// prefetch batch while its queue is empty.
+    #[cfg(test)]
     #[inline]
     pub(super) fn push(&self, value: T) {
-        if self.queue.push(value).is_err() {
-            unreachable!("work queue capacity matches the maximum staged batch");
+        self.push_batch(std::iter::once(value));
+    }
+
+    /// Append a batch while acquiring the queue once.
+    #[inline]
+    pub(super) fn push_batch(&self, values: impl IntoIterator<Item = T>) {
+        let mut queue = lock(&self.queue.values);
+        for value in values {
+            if self
+                .queue
+                .capacity
+                .is_some_and(|capacity| queue.len() >= capacity)
+            {
+                unreachable!("work queue capacity matches the maximum staged batch");
+            }
+            queue.push_back(value);
         }
     }
 
     /// Remove one staged value, or return `None` when the queue is empty.
     #[inline]
     pub(super) fn pop(&self) -> Option<T> {
-        self.queue.pop().ok()
+        lock(&self.queue.values).pop_front()
     }
 
     /// Steal one value and move part of the remaining work to `destination`.
@@ -60,14 +86,17 @@ impl<T> WorkQueue<T> {
     /// The returned value satisfies the current receive. At most seven more
     /// values move to the thief, bounding work performed by one steal.
     pub(super) fn steal_batch_into(&self, destination: &Self) -> Option<T> {
-        let value = self.pop()?;
-        let transfer = self.queue.len().div_ceil(2).min(STEAL_BATCH_LIMIT - 1);
-        for _ in 0..transfer {
-            let Some(stolen) = self.pop() else {
-                break;
-            };
-            destination.push(stolen);
-        }
+        let (value, stolen) = {
+            let mut source = lock(&self.queue.values);
+            let value = source.pop_front()?;
+            let transfer = source.len().div_ceil(2).min(STEAL_BATCH_LIMIT - 1);
+            let mut stolen = std::array::from_fn::<_, { STEAL_BATCH_LIMIT - 1 }, _>(|_| None);
+            for slot in &mut stolen[..transfer] {
+                *slot = source.pop_front();
+            }
+            (value, stolen)
+        };
+        destination.push_batch(stolen.into_iter().flatten());
         Some(value)
     }
 
@@ -75,18 +104,19 @@ impl<T> WorkQueue<T> {
     ///
     /// Returns whether at least one value moved.
     pub(super) fn drain_into(&self, destination: &Self) -> bool {
-        let mut moved = false;
-        while let Some(value) = self.pop() {
-            destination.push(value);
-            moved = true;
-        }
+        let drained = {
+            let mut source = lock(&self.queue.values);
+            std::mem::take(&mut *source)
+        };
+        let moved = !drained.is_empty();
+        destination.push_batch(drained);
         moved
     }
 
     /// Return an instantaneous queue-length estimate.
     #[inline]
     pub(super) fn len(&self) -> usize {
-        self.queue.len()
+        lock(&self.queue.values).len()
     }
 }
 
