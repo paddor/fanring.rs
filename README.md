@@ -1,6 +1,6 @@
 # fanring
 
-Fast bounded MPSC and MPMC channels built from one SPSC `yring` per producer.
+Fast typed MPSC and MPMC channels built from one SPSC `yring` per producer.
 
 Sender registration is dynamic. Each sender writes to its own ring, so
 producers do not contend on a shared queue tail. Choose `mpsc` for one consumer
@@ -58,16 +58,28 @@ assert_ne!(a, b);
 `mpmc` drains ready sender rings in batches of at most 64. One item is returned
 and the rest enter the receiver's local FIFO, where other receivers can steal
 them in batches. Receiver drop republishes its buffered work. Ordering is
-relaxed.
+relaxed. Moving values into that second-stage queue costs more for large inline
+types; box large payloads when move bandwidth dominates.
+
+`mpmc::try_recv` may return a transient `Empty` while another receiver owns and
+publishes a batch. `Disconnected` is final: all senders are gone, sender rings
+are drained, no staged work remains, and no work publication is in flight.
 
 ## Contract
 
-- Bounded MPSC or MPMC with blocking, timeout, and non-blocking operations.
+- Per-producer-HWM MPSC or MPMC with blocking, timeout, and non-blocking
+  operations.
 - No configured producer limit.
 - One bounded SPSC ring per live sender.
-- Capacity is per sender and rounded up to a power of two.
+- Capacity is one HWM per sender and is rounded up to a power of two.
+- MPMC receiver staging is outside sender-ring HWM. Total resident items can
+  temporarily exceed the sum of sender-ring capacities.
 - `try_send` returns `Full` when that sender's ring is full.
-- `try_recv` returns `Empty` when no active ring has visible data.
+- MPSC `try_recv` returns `Empty` when no active ring has visible data.
+- MPMC `try_recv` can also return `Empty` while a competing receiver publishes
+  an internal batch.
+- Receiver `is_disconnected` becomes true as soon as all senders are dropped;
+  buffered values remain readable afterward.
 - `send` and `recv` park only after the corresponding try operation fails.
 - Blocking operations spin briefly before parking.
 - `send_timeout` and `recv_timeout` bound that parked wait.
@@ -75,9 +87,13 @@ relaxed.
 - Active sender lanes are served in batches of at most 64 items.
 - Dropped sender slots are reused after their rings drain.
 - Receive-side batching is internal to `recv`/`try_recv`.
-- Steady send and batch-drain paths use no locks. Registration, ready-page
-  activation, lane idle transitions, receiver maintenance, and parking may
-  lock.
+- Steady successful sends and prefetched value pops take no explicit mutex.
+  Registration, ready-page activation, lane idle transitions, receiver
+  maintenance, and parking may lock.
+- Ready indexing uses fixed-capacity page queues and hierarchical bitmaps. It
+  does not allocate while the producer topology is unchanged. Registration,
+  receiver creation or teardown, and registry growth may allocate.
+- Try operations are lock-free on their common paths, but not wait-free.
 - `unsafe` is forbidden in this crate. Ring storage is delegated to `yring`.
 
 ## Good Fit
@@ -92,6 +108,7 @@ relaxed.
 
 - Need global FIFO or strict one-item round robin.
 - Need one exact capacity shared across all producers.
+- Need an exact total MPMC bound that includes receiver staging.
 - Need async wakeups.
 
 More detail: [DESIGN.md](DESIGN.md)
@@ -108,8 +125,13 @@ cargo bench --bench wake_latency
 
 Comparison benches accept `FANRING_BENCH_SECS`, `FANRING_BENCH_PRODUCERS`,
 `FANRING_BENCH_CAPACITY`, `FANRING_BENCH_PAYLOADS`,
-`FANRING_BENCH_IMPLS`, and `FANRING_BENCH_OUT`. MPMC also accepts
-`FANRING_BENCH_CONSUMERS`. Wake latency accepts `FANRING_WAKE_ROUNDS`,
-`FANRING_WAKE_WARMUP`, `FANRING_WAKE_SETTLE_NS`, and
-`FANRING_WAKE_SETTLE_MODE` (`sleep` or `spin`), and `FANRING_WAKE_OUT`.
-All append machine-readable JSONL.
+`FANRING_BENCH_IMPLS`, `FANRING_BENCH_SAMPLES`,
+`FANRING_BENCH_WARMUP_SECS`, and `FANRING_BENCH_OUT`. MPMC also accepts
+`FANRING_BENCH_CONSUMERS`. Defaults are five one-second samples after a 250 ms
+warmup. Implementation order rotates between samples. Output includes every
+sample; summaries and charts use the median and relative median absolute
+deviation.
+
+Wake latency accepts `FANRING_WAKE_ROUNDS`, `FANRING_WAKE_WARMUP`,
+`FANRING_WAKE_SETTLE_NS`, `FANRING_WAKE_SETTLE_MODE` (`sleep` or `spin`), and
+`FANRING_WAKE_OUT`. All benchmarks append machine-readable JSONL.

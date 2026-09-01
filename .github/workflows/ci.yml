@@ -13,16 +13,57 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  correctness:
-    name: Correctness (without Loom)
+  test:
+    name: Test Rust ${{ matrix.rust }} (without Loom)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust:
+          - 1.93.0
+          - stable
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        run: rustup toolchain install ${{ matrix.rust }} --profile minimal
+      - name: Resolve latest compatible dependencies
+        if: matrix.rust == 'stable'
+        run: cargo +stable update
+      - name: Run tests
+        run: cargo +${{ matrix.rust }} test --all-features --locked
+      - name: Run release channel stress tests
+        if: matrix.rust == 'stable'
+        run: cargo +stable test --release --test mpmc_stress --test stress --locked -- --test-threads=1
+
+  quality:
+    name: Quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Install Rust 1.93
-        run: rustup toolchain install 1.93.0 --profile minimal --component clippy,rustfmt
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
       - name: Check formatting
-        run: cargo +1.93.0 fmt --all --check
+        run: cargo +stable fmt --all --check
       - name: Run Clippy
-        run: cargo +1.93.0 clippy --all-targets --all-features -- -D warnings
-      - name: Run tests
-        run: cargo +1.93.0 test --all-features
+        run: cargo +stable clippy --all-targets --all-features -- -D warnings
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo +stable doc --all-features --no-deps
+      - name: Verify package
+        run: cargo +stable package --locked
+
+  portability:
+    name: Check ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - i686-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+          - wasm32-unknown-unknown
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install stable Rust target
+        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+      - name: Check target
+        run: cargo +stable check --all-features --locked --target ${{ matrix.target }}

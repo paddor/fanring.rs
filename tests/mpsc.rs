@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use fanring::mpsc::{
@@ -71,6 +73,38 @@ fn blocking_timeouts_report_unsatisfied_operation() {
         tx.send_timeout(3, Duration::ZERO),
         Err(SendTimeoutError::Disconnected(3))
     );
+}
+
+#[test]
+fn failed_send_paths_return_ownership_exactly_once() {
+    struct Tracked(Arc<AtomicUsize>);
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let (mut tx, rx) = channel(1);
+    tx.try_send(Tracked(drops.clone()))
+        .unwrap_or_else(|_| unreachable!());
+
+    let timed_out = match tx.send_timeout(Tracked(drops.clone()), Duration::ZERO) {
+        Err(SendTimeoutError::Timeout(value)) => value,
+        _ => panic!("full lane must time out"),
+    };
+    drop(timed_out);
+    drop(rx);
+
+    let disconnected = match tx.try_send(Tracked(drops.clone())) {
+        Err(TrySendError::Disconnected(value)) => value,
+        _ => panic!("dropped receiver must disconnect sender"),
+    };
+    drop(disconnected);
+    drop(tx);
+
+    assert_eq!(drops.load(Ordering::Relaxed), 3);
 }
 
 #[test]
@@ -154,6 +188,31 @@ fn receiver_iterators_cover_blocking_and_ready_values() {
 }
 
 #[test]
+fn receiver_reports_sender_disconnect_before_buffer_is_drained() {
+    let (mut tx, mut rx) = channel(2);
+    tx.try_send(1).unwrap();
+    tx.try_send(2).unwrap();
+    drop(tx);
+
+    assert!(rx.is_disconnected());
+    assert_eq!(rx.recv(), Ok(1));
+    assert_eq!(rx.recv(), Ok(2));
+    assert_eq!(rx.recv(), Err(RecvError));
+}
+
+#[test]
+fn blocking_iterators_stay_exhausted_after_disconnect() {
+    let (mut tx, mut rx) = channel(1);
+    tx.try_send(1).unwrap();
+    drop(tx);
+
+    let mut iter = rx.iter();
+    assert_eq!(iter.next(), Some(1));
+    assert_eq!(iter.next(), None);
+    assert_eq!(iter.next(), None);
+}
+
+#[test]
 fn try_channel_validates_config() {
     assert_eq!(
         try_channel::<u8>(0).unwrap_err(),
@@ -174,6 +233,28 @@ fn capacity_reports_yring_rounding() {
 
     assert_eq!(tx.capacity(), 4);
     assert_eq!(rx.capacity_per_sender(), 4);
+}
+
+#[test]
+fn zero_sized_and_highly_aligned_values_round_trip() {
+    #[derive(Debug, PartialEq, Eq)]
+    struct ZeroSized;
+
+    #[repr(align(256))]
+    #[derive(Debug, PartialEq, Eq)]
+    struct Aligned(usize);
+
+    let (mut tx, mut rx) = channel(2);
+    tx.try_send(ZeroSized).unwrap();
+    tx.try_send(ZeroSized).unwrap();
+    assert_eq!(rx.try_recv(), Ok(ZeroSized));
+    assert_eq!(rx.try_recv(), Ok(ZeroSized));
+
+    let (mut tx, mut rx) = channel(2);
+    tx.try_send(Aligned(1)).unwrap();
+    tx.try_send(Aligned(2)).unwrap();
+    assert_eq!(rx.try_recv(), Ok(Aligned(1)));
+    assert_eq!(rx.try_recv(), Ok(Aligned(2)));
 }
 
 #[test]
@@ -207,6 +288,26 @@ fn public_errors_implement_std_error() {
     );
     assert_eq!(TrySendError::Full(1).to_string(), "sender ring is full");
     assert_eq!(TryRecvError::Empty.to_string(), "channel is empty");
+
+    assert!(ChannelError::ZeroCapacity.is_zero_capacity());
+    assert!(
+        ChannelError::CapacityTooLarge {
+            requested: 2,
+            max: 1,
+        }
+        .is_capacity_too_large()
+    );
+    assert!(TryRegisterError::Disconnected.is_disconnected());
+    assert!(SendError(1).is_disconnected());
+    assert!(TrySendError::Full(1).is_full());
+    assert!(TrySendError::Disconnected(1).is_disconnected());
+    assert!(SendTimeoutError::Timeout(1).is_timeout());
+    assert!(SendTimeoutError::Disconnected(1).is_disconnected());
+    assert!(RecvError.is_disconnected());
+    assert!(TryRecvError::Empty.is_empty());
+    assert!(TryRecvError::Disconnected.is_disconnected());
+    assert!(RecvTimeoutError::Timeout.is_timeout());
+    assert!(RecvTimeoutError::Disconnected.is_disconnected());
 }
 
 #[test]
@@ -263,7 +364,7 @@ fn full_is_per_sender() {
         rx.try_recv().unwrap(),
         rx.try_recv().unwrap(),
     ];
-    values.sort();
+    values.sort_unstable();
     assert_eq!(values, [1, 2, 10]);
 }
 
@@ -272,12 +373,12 @@ fn drained_sender_lane_is_reused() {
     let (tx0, mut rx) = channel::<u8>(2);
     let old_slot = {
         let tx1 = tx0.try_clone().unwrap();
-        tx1.shard()
+        tx1.lane_id()
     };
 
     assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
     let mut tx2 = tx0.try_clone().unwrap();
-    assert_eq!(tx2.shard(), old_slot);
+    assert_eq!(tx2.lane_id(), old_slot);
     tx2.try_send(7).unwrap();
     assert_eq!(rx.try_recv(), Ok(7));
 }

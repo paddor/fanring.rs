@@ -1,21 +1,28 @@
 #![cfg_attr(test, allow(dead_code, unused_imports))]
 
-use std::fs::{self, OpenOptions};
+mod support;
+
+use std::fs;
 use std::hint::black_box;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+
+use support::{Sampling, append_jsonl, median_and_relative_mad};
 
 #[derive(Debug, Clone, Copy)]
 struct Config {
     producers: usize,
     capacity_per_sender: usize,
     duration: Duration,
+    sample: usize,
+    samples: usize,
+    expected_rows: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,10 +58,14 @@ struct Row {
     payload_bytes: usize,
     producers: usize,
     capacity_per_sender: usize,
-    total_capacity: usize,
+    nominal_capacity: usize,
+    capacity_model: &'static str,
     seconds: f64,
     items: u64,
     items_per_sec: f64,
+    sample: usize,
+    samples: usize,
+    expected_rows: usize,
 }
 
 const TIME_CHECK_INTERVAL: u64 = 1024;
@@ -70,8 +81,9 @@ fn main() {
         std::env::var("FANRING_BENCH_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(2.0),
+            .unwrap_or(1.0),
     );
+    let sampling = Sampling::from_env();
     let out_path = std::env::var_os("FANRING_BENCH_OUT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/fanring-bench/results.jsonl"));
@@ -90,28 +102,33 @@ fn main() {
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent).expect("create benchmark output dir");
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&out_path)
-        .expect("open benchmark JSONL");
-    let mut out = BufWriter::new(file);
+    let mut out = append_jsonl(&out_path);
 
     println!(
-        "MPSC comparison ({}, {:.2}s per config, capacity {} items, output {})\n",
+        "MPSC comparison ({}, {} x {:.2}s, {:.2}s warmup, capacity {} items, output {})\n",
         mode.label(),
+        sampling.samples,
         duration.as_secs_f64(),
+        sampling.warmup.as_secs_f64(),
         total_capacity(),
         out_path.display()
     );
 
     let total_capacity = total_capacity();
-    let configs: Vec<Config> = producer_counts()
+    let producer_counts = producer_counts();
+    let expected_rows = producer_counts.len()
+        * selected_payload_count(&payload_filter)
+        * selected_implementation_count(&impl_filter, mode)
+        * sampling.samples;
+    let configs: Vec<Config> = producer_counts
         .into_iter()
         .map(|producers| Config {
             producers,
             capacity_per_sender: capacity_per_sender(total_capacity, producers),
             duration,
+            sample: 0,
+            samples: sampling.samples,
+            expected_rows,
         })
         .collect();
 
@@ -121,6 +138,7 @@ fn main() {
             &mut out,
             &configs,
             &impl_filter,
+            sampling,
             mode,
             Payload {
                 label: "u64",
@@ -134,6 +152,7 @@ fn main() {
             &mut out,
             &configs,
             &impl_filter,
+            sampling,
             mode,
             Payload {
                 label: "bytes64",
@@ -147,6 +166,7 @@ fn main() {
             &mut out,
             &configs,
             &impl_filter,
+            sampling,
             mode,
             Payload {
                 label: "bytes256",
@@ -163,47 +183,86 @@ fn run_payload<T>(
     out: &mut impl Write,
     configs: &[Config],
     impl_filter: &Filter,
+    sampling: Sampling,
     mode: Mode,
     payload: Payload<T>,
 ) where
     T: Copy + Default + Send + Sync + 'static,
 {
-    println!("--- {} ({} bytes) ---", payload.label, size_of::<T>());
-    for config in configs {
-        let mut rows = Vec::new();
-        if impl_filter.matches("fanring") {
-            rows.push(bench_fanring(context, *config, mode, payload));
-        }
-        if impl_filter.matches("crossbeam-channel") {
-            rows.push(bench_crossbeam_channel(context, *config, mode, payload));
-        }
-        if impl_filter.matches("flume") {
-            rows.push(bench_flume(context, *config, mode, payload));
-        }
-        if impl_filter.matches("kanal") {
-            rows.push(bench_kanal(context, *config, mode, payload));
-        }
-        if mode == Mode::Try && impl_filter.matches("concurrent-queue") {
-            rows.push(bench_concurrent_queue(context, *config, mode, payload));
-        }
-        if impl_filter.matches("thingbuf") {
-            rows.push(bench_thingbuf(context, *config, mode, payload));
-        }
+    type BenchFn<T> = fn(&RunContext, Config, Mode, Payload<T>) -> Row;
 
+    let mut implementations: Vec<(&str, BenchFn<T>)> = Vec::new();
+    if impl_filter.matches("fanring") {
+        implementations.push(("fanring", bench_fanring::<T>));
+    }
+    if impl_filter.matches("crossbeam-channel") {
+        implementations.push(("crossbeam-channel", bench_crossbeam_channel::<T>));
+    }
+    if impl_filter.matches("flume") {
+        implementations.push(("flume", bench_flume::<T>));
+    }
+    if impl_filter.matches("kanal") {
+        implementations.push(("kanal", bench_kanal::<T>));
+    }
+    if mode == Mode::Try && impl_filter.matches("concurrent-queue") {
+        implementations.push(("concurrent-queue", bench_concurrent_queue::<T>));
+    }
+    if impl_filter.matches("thingbuf") {
+        implementations.push(("thingbuf", bench_thingbuf::<T>));
+    }
+    if implementations.is_empty() {
+        return;
+    }
+
+    println!("--- {} ({} bytes) ---", payload.label, size_of::<T>());
+    for &config in configs {
         println!(
             "  producers={:<2} capacity_per_sender={:<4} total_capacity={}",
             config.producers,
             config.capacity_per_sender,
             config.total_capacity()
         );
-        for row in rows {
-            println!(
-                "    {:<18} {:>8.2}M items/s",
-                row.implementation,
-                row.items_per_sec / 1_000_000.0
+        if !sampling.warmup.is_zero() {
+            let warmup = Config {
+                duration: sampling.warmup,
+                ..config
+            };
+            for (_, bench) in &implementations {
+                let _ = bench(context, warmup, mode, payload);
+            }
+        }
+
+        let mut rows = Vec::new();
+        for sample in 0..sampling.samples {
+            let measured = Config { sample, ..config };
+            let start = sample % implementations.len();
+            for offset in 0..implementations.len() {
+                let (_, bench) = implementations[(start + offset) % implementations.len()];
+                let row = bench(context, measured, mode, payload);
+                println!(
+                    "    sample={:<2} {:<18} {:>8.2}M items/s",
+                    sample + 1,
+                    row.implementation,
+                    row.items_per_sec / 1_000_000.0
+                );
+                serde_json::to_writer(&mut *out, &row).expect("write benchmark row");
+                writeln!(out).expect("write benchmark newline");
+                rows.push(row);
+            }
+        }
+
+        for (implementation, _) in &implementations {
+            let (median, relative_mad) = median_and_relative_mad(
+                rows.iter()
+                    .filter(|row| row.implementation == *implementation)
+                    .map(|row| row.items_per_sec),
             );
-            serde_json::to_writer(&mut *out, &row).expect("write benchmark row");
-            writeln!(out).expect("write benchmark newline");
+            println!(
+                "    {:<18} median {:>8.2}M items/s  MAD {:>5.2}%",
+                implementation,
+                median / 1_000_000.0,
+                relative_mad
+            );
         }
         println!();
     }
@@ -221,28 +280,35 @@ where
         senders.push(tx);
     }
 
+    let barrier = Arc::new(Barrier::new(config.producers + 1));
     let mut handles = Vec::with_capacity(config.producers);
     for mut tx in senders {
         let stop = stop.clone();
+        let barrier = barrier.clone();
         let value = payload.value;
         handles.push(thread::spawn(move || {
+            barrier.wait();
+            let mut sent = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 match mode {
-                    Mode::Try => {
-                        if let Err(fanring::mpsc::TrySendError::Full(_)) = tx.try_send(value) {
-                            thread::yield_now();
-                        }
-                    }
+                    Mode::Try => match tx.try_send(value) {
+                        Ok(()) => sent += 1,
+                        Err(fanring::mpsc::TrySendError::Full(_)) => thread::yield_now(),
+                        Err(fanring::mpsc::TrySendError::Disconnected(_)) => break,
+                    },
                     Mode::Blocking => {
                         if tx.send(value).is_err() {
                             break;
                         }
+                        sent += 1;
                     }
                 }
             }
+            sent
         }));
     }
 
+    barrier.wait();
     let start = Instant::now();
     let deadline = start + config.duration;
     let mut messages = 0u64;
@@ -270,12 +336,17 @@ where
             },
         }
     }
-    let elapsed = start.elapsed();
     stop.store(true, Ordering::Relaxed);
-    drop(rx);
-    for handle in handles {
-        handle.join().expect("fanring producer thread");
+    while let Ok(value) = rx.recv() {
+        black_box(value);
+        messages += 1;
     }
+    let sent = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("fanring producer thread"))
+        .sum::<u64>();
+    let elapsed = start.elapsed();
+    assert_eq!(sent, messages, "fanring lost messages");
     row(context, "fanring", mode, payload, config, elapsed, messages)
 }
 
@@ -291,30 +362,37 @@ where
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = crossbeam_channel::bounded::<T>(config.total_capacity());
 
+    let barrier = Arc::new(Barrier::new(config.producers + 1));
     let mut handles = Vec::with_capacity(config.producers);
     for _ in 0..config.producers {
         let tx = tx.clone();
         let stop = stop.clone();
+        let barrier = barrier.clone();
         let value = payload.value;
         handles.push(thread::spawn(move || {
+            barrier.wait();
+            let mut sent = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 match mode {
-                    Mode::Try => {
-                        if tx.try_send(value).is_err() {
-                            thread::yield_now();
-                        }
-                    }
+                    Mode::Try => match tx.try_send(value) {
+                        Ok(()) => sent += 1,
+                        Err(crossbeam_channel::TrySendError::Full(_)) => thread::yield_now(),
+                        Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,
+                    },
                     Mode::Blocking => {
                         if tx.send(value).is_err() {
                             break;
                         }
+                        sent += 1;
                     }
                 }
             }
+            sent
         }));
     }
     drop(tx);
 
+    barrier.wait();
     let start = Instant::now();
     let deadline = start + config.duration;
     let mut messages = 0u64;
@@ -334,12 +412,17 @@ where
             break;
         }
     }
-    let elapsed = start.elapsed();
     stop.store(true, Ordering::Relaxed);
-    drop(rx);
-    for handle in handles {
-        handle.join().expect("crossbeam producer thread");
+    while let Ok(value) = rx.recv() {
+        black_box(value);
+        messages += 1;
     }
+    let sent = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("crossbeam producer thread"))
+        .sum::<u64>();
+    let elapsed = start.elapsed();
+    assert_eq!(sent, messages, "crossbeam-channel lost messages");
     row(
         context,
         "crossbeam-channel",
@@ -358,30 +441,37 @@ where
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = flume::bounded::<T>(config.total_capacity());
 
+    let barrier = Arc::new(Barrier::new(config.producers + 1));
     let mut handles = Vec::with_capacity(config.producers);
     for _ in 0..config.producers {
         let tx = tx.clone();
         let stop = stop.clone();
+        let barrier = barrier.clone();
         let value = payload.value;
         handles.push(thread::spawn(move || {
+            barrier.wait();
+            let mut sent = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 match mode {
-                    Mode::Try => {
-                        if tx.try_send(value).is_err() {
-                            thread::yield_now();
-                        }
-                    }
+                    Mode::Try => match tx.try_send(value) {
+                        Ok(()) => sent += 1,
+                        Err(flume::TrySendError::Full(_)) => thread::yield_now(),
+                        Err(flume::TrySendError::Disconnected(_)) => break,
+                    },
                     Mode::Blocking => {
                         if tx.send(value).is_err() {
                             break;
                         }
+                        sent += 1;
                     }
                 }
             }
+            sent
         }));
     }
     drop(tx);
 
+    barrier.wait();
     let start = Instant::now();
     let deadline = start + config.duration;
     let mut messages = 0u64;
@@ -401,12 +491,17 @@ where
             break;
         }
     }
-    let elapsed = start.elapsed();
     stop.store(true, Ordering::Relaxed);
-    drop(rx);
-    for handle in handles {
-        handle.join().expect("flume producer thread");
+    while let Ok(value) = rx.recv() {
+        black_box(value);
+        messages += 1;
     }
+    let sent = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("flume producer thread"))
+        .sum::<u64>();
+    let elapsed = start.elapsed();
+    assert_eq!(sent, messages, "flume lost messages");
     row(context, "flume", mode, payload, config, elapsed, messages)
 }
 
@@ -417,29 +512,36 @@ where
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = kanal::bounded::<T>(config.total_capacity());
 
+    let barrier = Arc::new(Barrier::new(config.producers + 1));
     let mut handles = Vec::with_capacity(config.producers);
     for _ in 0..config.producers {
         let tx = tx.clone();
         let stop = stop.clone();
+        let barrier = barrier.clone();
         let value = payload.value;
         handles.push(thread::spawn(move || {
+            barrier.wait();
+            let mut sent = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 match mode {
                     Mode::Try => match tx.try_send(value) {
-                        Ok(true) => {}
+                        Ok(true) => sent += 1,
                         Ok(false) | Err(_) => thread::yield_now(),
                     },
                     Mode::Blocking => {
                         if tx.send(value).is_err() {
                             break;
                         }
+                        sent += 1;
                     }
                 }
             }
+            sent
         }));
     }
     drop(tx);
 
+    barrier.wait();
     let start = Instant::now();
     let deadline = start + config.duration;
     let mut messages = 0u64;
@@ -459,12 +561,17 @@ where
             break;
         }
     }
-    let elapsed = start.elapsed();
     stop.store(true, Ordering::Relaxed);
-    drop(rx);
-    for handle in handles {
-        handle.join().expect("kanal producer thread");
+    while let Ok(value) = rx.recv() {
+        black_box(value);
+        messages += 1;
     }
+    let sent = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("kanal producer thread"))
+        .sum::<u64>();
+    let elapsed = start.elapsed();
+    assert_eq!(sent, messages, "kanal lost messages");
     row(context, "kanal", mode, payload, config, elapsed, messages)
 }
 
@@ -482,20 +589,27 @@ where
         config.total_capacity(),
     ));
 
+    let barrier = Arc::new(Barrier::new(config.producers + 1));
     let mut handles = Vec::with_capacity(config.producers);
     for _ in 0..config.producers {
         let queue = queue.clone();
         let stop = stop.clone();
+        let barrier = barrier.clone();
         let value = payload.value;
         handles.push(thread::spawn(move || {
+            barrier.wait();
+            let mut sent = 0u64;
             while !stop.load(Ordering::Relaxed) {
-                if queue.push(value).is_err() {
-                    thread::yield_now();
+                match queue.push(value) {
+                    Ok(()) => sent += 1,
+                    Err(_) => thread::yield_now(),
                 }
             }
+            sent
         }));
     }
 
+    barrier.wait();
     let start = Instant::now();
     let deadline = start + config.duration;
     let mut messages = 0u64;
@@ -510,11 +624,17 @@ where
             Err(_) => thread::yield_now(),
         }
     }
-    let elapsed = start.elapsed();
     stop.store(true, Ordering::Relaxed);
-    for handle in handles {
-        handle.join().expect("concurrent-queue producer thread");
+    let sent = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("concurrent-queue producer thread"))
+        .sum::<u64>();
+    while let Ok(value) = queue.pop() {
+        black_box(value);
+        messages += 1;
     }
+    let elapsed = start.elapsed();
+    assert_eq!(sent, messages, "concurrent-queue lost messages");
     row(
         context,
         "concurrent-queue",
@@ -533,30 +653,37 @@ where
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = thingbuf::mpsc::blocking::channel::<T>(config.total_capacity());
 
+    let barrier = Arc::new(Barrier::new(config.producers + 1));
     let mut handles = Vec::with_capacity(config.producers);
     for _ in 0..config.producers {
         let tx = tx.clone();
         let stop = stop.clone();
+        let barrier = barrier.clone();
         let value = payload.value;
         handles.push(thread::spawn(move || {
+            barrier.wait();
+            let mut sent = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 match mode {
-                    Mode::Try => {
-                        if tx.try_send(value).is_err() {
-                            thread::yield_now();
-                        }
-                    }
+                    Mode::Try => match tx.try_send(value) {
+                        Ok(()) => sent += 1,
+                        Err(thingbuf::mpsc::errors::TrySendError::Full(_)) => thread::yield_now(),
+                        Err(_) => break,
+                    },
                     Mode::Blocking => {
                         if tx.send(value).is_err() {
                             break;
                         }
+                        sent += 1;
                     }
                 }
             }
+            sent
         }));
     }
     drop(tx);
 
+    barrier.wait();
     let start = Instant::now();
     let deadline = start + config.duration;
     let mut messages = 0u64;
@@ -576,12 +703,17 @@ where
             break;
         }
     }
-    let elapsed = start.elapsed();
     stop.store(true, Ordering::Relaxed);
-    drop(rx);
-    for handle in handles {
-        handle.join().expect("thingbuf producer thread");
+    while let Some(value) = rx.recv() {
+        black_box(value);
+        messages += 1;
     }
+    let sent = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("thingbuf producer thread"))
+        .sum::<u64>();
+    let elapsed = start.elapsed();
+    assert_eq!(sent, messages, "thingbuf lost messages");
     row(
         context, "thingbuf", mode, payload, config, elapsed, messages,
     )
@@ -605,10 +737,18 @@ fn row<T>(
         payload_bytes: size_of::<T>(),
         producers: config.producers,
         capacity_per_sender: config.capacity_per_sender,
-        total_capacity: config.total_capacity(),
+        nominal_capacity: config.total_capacity(),
+        capacity_model: if implementation == "fanring" {
+            "per-ring-hwm"
+        } else {
+            "shared-bound"
+        },
         seconds: elapsed.as_secs_f64(),
         items,
         items_per_sec: items as f64 / elapsed.as_secs_f64(),
+        sample: config.sample,
+        samples: config.samples,
+        expected_rows: config.expected_rows,
     }
 }
 
@@ -669,6 +809,27 @@ fn producer_counts() -> Vec<usize> {
                 .collect()
         })
         .unwrap_or_else(|| vec![1, 2, 4, 8])
+}
+
+fn selected_payload_count(filter: &Filter) -> usize {
+    ["u64", "bytes64", "bytes256"]
+        .into_iter()
+        .filter(|payload| filter.matches(payload))
+        .count()
+}
+
+fn selected_implementation_count(filter: &Filter, mode: Mode) -> usize {
+    [
+        ("fanring", true),
+        ("crossbeam-channel", true),
+        ("flume", true),
+        ("kanal", true),
+        ("concurrent-queue", mode == Mode::Try),
+        ("thingbuf", true),
+    ]
+    .into_iter()
+    .filter(|(implementation, supported)| *supported && filter.matches(implementation))
+    .count()
 }
 
 fn total_capacity() -> usize {

@@ -1,6 +1,10 @@
-use std::time::Instant;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
-use fanring::mpmc::{RecvTimeoutError, SendTimeoutError, TrySendError, channel};
+use fanring::mpmc::{
+    RecvError, RecvTimeoutError, SendTimeoutError, TryRecvError, TrySendError, channel,
+};
 
 #[test]
 fn cloned_receivers_distribute_messages() {
@@ -38,7 +42,7 @@ fn receiver_drop_preserves_prefetched_work() {
     tx.try_send(2).unwrap();
     assert_eq!(rx0.try_recv(), Ok(1));
     drop(rx0);
-    assert_eq!(rx1.try_recv(), Ok(2));
+    assert_eq!(rx1.recv(), Ok(2));
 }
 
 #[test]
@@ -100,6 +104,46 @@ fn deadlines_report_unsatisfied_operation() {
 }
 
 #[test]
+fn failed_send_paths_return_ownership_exactly_once() {
+    struct Tracked(Arc<AtomicUsize>);
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let (mut tx, rx0) = channel(1);
+    let rx1 = rx0.clone();
+    tx.try_send(Tracked(drops.clone()))
+        .unwrap_or_else(|_| unreachable!());
+
+    let timed_out = match tx.send_timeout(Tracked(drops.clone()), Duration::ZERO) {
+        Err(SendTimeoutError::Timeout(value)) => value,
+        _ => panic!("full lane must time out"),
+    };
+    drop(timed_out);
+
+    let still_full = match tx.try_send(Tracked(drops.clone())) {
+        Err(TrySendError::Full(value)) => value,
+        _ => panic!("first receiver keeps full lane connected"),
+    };
+    drop(rx0);
+    assert!(!tx.is_disconnected());
+    drop(rx1);
+
+    let disconnected = match tx.try_send(still_full) {
+        Err(TrySendError::Disconnected(value)) => value,
+        _ => panic!("last receiver drop must disconnect sender"),
+    };
+    drop(disconnected);
+    drop(tx);
+
+    assert_eq!(drops.load(Ordering::Relaxed), 3);
+}
+
+#[test]
 fn endpoint_counts_and_identity_are_exposed() {
     let (tx0, rx0) = channel::<u8>(1);
     let tx1 = tx0.try_clone().unwrap();
@@ -140,4 +184,75 @@ fn receiver_iterators_cover_blocking_and_ready_values() {
     tx.try_send(5).unwrap();
     drop(tx);
     assert_eq!(rx.into_iter().collect::<Vec<_>>(), [5]);
+}
+
+#[test]
+fn receiver_reports_sender_disconnect_before_buffer_is_drained() {
+    let (mut tx, mut rx) = channel(2);
+    tx.try_send(1).unwrap();
+    tx.try_send(2).unwrap();
+    drop(tx);
+
+    assert!(rx.is_disconnected());
+    assert_eq!(rx.recv(), Ok(1));
+    assert_eq!(rx.recv(), Ok(2));
+    assert_eq!(rx.recv(), Err(RecvError));
+}
+
+#[test]
+fn blocking_iterators_stay_exhausted_after_disconnect() {
+    let (mut tx, mut rx) = channel(1);
+    tx.try_send(1).unwrap();
+    drop(tx);
+
+    let mut iter = rx.iter();
+    assert_eq!(iter.next(), Some(1));
+    assert_eq!(iter.next(), None);
+    assert_eq!(iter.next(), None);
+}
+
+#[test]
+fn competing_receiver_may_observe_transient_empty() {
+    let (mut tx, mut rx0) = channel(64);
+    let mut rx1 = rx0.clone();
+    for value in 0..64 {
+        tx.try_send(value).unwrap();
+    }
+
+    assert_eq!(rx0.try_recv(), Ok(0));
+    assert!(matches!(rx1.try_recv(), Ok(_) | Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn zero_sized_and_highly_aligned_values_round_trip() {
+    #[derive(Debug, PartialEq, Eq)]
+    struct ZeroSized;
+
+    #[repr(align(256))]
+    #[derive(Debug, PartialEq, Eq)]
+    struct Aligned(usize);
+
+    let (mut tx, mut rx) = channel(2);
+    tx.try_send(ZeroSized).unwrap();
+    tx.try_send(ZeroSized).unwrap();
+    assert_eq!(rx.try_recv(), Ok(ZeroSized));
+    assert_eq!(rx.try_recv(), Ok(ZeroSized));
+
+    let (mut tx, mut rx) = channel(2);
+    tx.try_send(Aligned(1)).unwrap();
+    tx.try_send(Aligned(2)).unwrap();
+    assert_eq!(rx.try_recv(), Ok(Aligned(1)));
+    assert_eq!(rx.try_recv(), Ok(Aligned(2)));
+}
+
+#[test]
+fn non_copy_values_survive_receiver_handoff() {
+    let (mut tx, mut rx0) = channel(4);
+    tx.try_send(String::from("first")).unwrap();
+    tx.try_send(String::from("second")).unwrap();
+    assert_eq!(rx0.try_recv().as_deref(), Ok("first"));
+
+    let mut rx1 = rx0.clone();
+    drop(rx0);
+    assert_eq!(rx1.recv().as_deref(), Ok("second"));
 }

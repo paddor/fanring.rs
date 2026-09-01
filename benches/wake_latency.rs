@@ -115,9 +115,10 @@ fn main() {
     let warmup = env_usize("FANRING_WAKE_WARMUP", 200);
     let settle = Duration::from_nanos(env_u64("FANRING_WAKE_SETTLE_NS", 50_000));
     let settle_mode = SettleMode::from_env();
-    let out_path = std::env::var_os("FANRING_WAKE_OUT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target/fanring-bench/wake-latency.jsonl"));
+    let out_path = std::env::var_os("FANRING_WAKE_OUT").map_or_else(
+        || PathBuf::from("target/fanring-bench/wake-latency.jsonl"),
+        PathBuf::from,
+    );
     let filter = Filter::from_env("FANRING_BENCH_IMPLS");
     let run_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -246,7 +247,7 @@ fn run_implementation<S, R, F>(
     let recv_samples = measure_recv_wake(sender, receiver, rounds, warmup, settle, settle_mode);
     write_row(
         out,
-        summarize(
+        &summarize(
             run_id,
             cpu,
             implementation,
@@ -261,7 +262,7 @@ fn run_implementation<S, R, F>(
     let send_samples = measure_send_wake(sender, receiver, rounds, warmup, settle, settle_mode);
     write_row(
         out,
-        summarize(
+        &summarize(
             run_id,
             cpu,
             implementation,
@@ -368,7 +369,8 @@ fn summarize(
     mut samples: Vec<u64>,
 ) -> Row {
     samples.sort_unstable();
-    let sum = samples.iter().map(|&value| value as u128).sum::<u128>();
+    let sum = samples.iter().map(|&value| u128::from(value)).sum::<u128>();
+    let sample_count = u128::try_from(samples.len()).expect("sample count fits u128");
     let row = Row {
         run_id: run_id.to_string(),
         cpu: cpu.to_string(),
@@ -376,8 +378,8 @@ fn summarize(
         operation,
         rounds: samples.len(),
         settle_mode: settle_mode.label(),
-        settle_ns: settle.as_nanos() as u64,
-        mean_ns: (sum / samples.len() as u128) as u64,
+        settle_ns: duration_ns(settle),
+        mean_ns: u64::try_from(sum / sample_count).expect("mean of u64 samples fits u64"),
         p50_ns: percentile(&samples, 500),
         p95_ns: percentile(&samples, 950),
         p99_ns: percentile(&samples, 990),
@@ -403,27 +405,29 @@ fn percentile(samples: &[u64], permille: usize) -> u64 {
     samples[index]
 }
 
-fn write_row(out: &mut impl Write, row: Row) {
-    serde_json::to_writer(&mut *out, &row).expect("write wake benchmark row");
+fn write_row(out: &mut impl Write, row: &Row) {
+    serde_json::to_writer(&mut *out, row).expect("write wake benchmark row");
     writeln!(out).expect("write wake benchmark newline");
 }
 
 fn elapsed_ns(clock: Instant) -> u64 {
-    clock.elapsed().as_nanos() as u64
+    duration_ns(clock.elapsed())
+}
+
+fn duration_ns(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.parse().expect("invalid usize environment value"))
-        .unwrap_or(default)
+    std::env::var(name).ok().map_or(default, |value| {
+        value.parse().expect("invalid usize environment value")
+    })
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.parse().expect("invalid u64 environment value"))
-        .unwrap_or(default)
+    std::env::var(name).ok().map_or(default, |value| {
+        value.parse().expect("invalid u64 environment value")
+    })
 }
 
 #[derive(Debug, Clone, Copy)]

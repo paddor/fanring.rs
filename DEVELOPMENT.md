@@ -3,22 +3,40 @@
 ## Checks
 
 ```sh
-cargo test --all-targets --features charts
-RUSTFLAGS="--cfg loom" cargo test --test loom
-cargo clippy --all-targets --features charts -- -D warnings
+cargo test --all-features
+cargo clippy --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+RUSTFLAGS="--cfg loom" cargo test --lib --test loom -- --test-threads=1
+cargo +nightly miri test --test mpsc --test stress -- --test-threads=1
+MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-permissive-provenance -Zmiri-ignore-leaks" \
+  cargo +nightly miri test --all-features -- --test-threads=1
 ```
 
-The test suite covers per-sender FIFO, per-sender backpressure, disconnect
-behavior, drop cleanup, sparse shard use, and the 64-bit ready mask.
-The Loom test models the ready-bit race and receiver drop handoff.
+The test suite covers per-sender FIFO, per-sender backpressure, disconnect and
+timeout races, drop cleanup, dynamic lane registration and reuse, ready
+page/group boundaries, starvation bounds, MPMC batch publication and receiver
+churn, randomized endpoint state machines, unusual value layouts, and the
+64-bit ready mask. Small private wait-cell, readiness, and publication-tracker
+Loom models are exhaustive. End-to-end channel models use a preemption bound
+of two and at most 10,000 permutations.
+
+Loom reduces pages and groups to two entries and the MPMC batch limit to two,
+so small models cross topology and requeue boundaries. `LOOM_MAX_BRANCHES`,
+`LOOM_MAX_PERMUTATIONS`, and `LOOM_MAX_PREEMPTIONS` override the end-to-end
+defaults for deeper local runs.
 
 `fanring` forbids direct `unsafe` code. Slot safety is delegated to
-`yring`, which has its own Miri/Loom coverage.
+`yring`, which has its own Miri/Loom coverage. Crossbeam deque and `ArcSwap`
+internals are not Loom-instrumented here; normal stress tests cover their
+integration with fanring. The full Miri run uses Tree Borrows and ignores
+process-global leaks because `crossbeam-epoch` does not pass Miri's default
+Stacked Borrows and leak checks. The MPSC-only run keeps those checks enabled.
 
 ## Benchmarks
 
 ```sh
 cargo bench --bench comparison
+cargo bench --bench mpmc
 ```
 
 The benchmark compares `fanring` against:
@@ -31,17 +49,31 @@ The benchmark compares `fanring` against:
 
 Defaults:
 
-- duration: 2 seconds per configuration
+- warmup: 250 ms per implementation and configuration
+- measurement: 5 samples of 1 second each
 - producers: 1, 2, 4, 8
-- capacity: 8192 total items
+- MPMC consumers: 1, 2, 4, 8
+- nominal capacity: 8192 items
 - payloads: `u64`, `[u8; 64]`, `[u8; 256]`
 
-Output is appended to `target/fanring-bench/results.jsonl`.
+Worker threads synchronize on a start barrier. Implementations rotate order
+between samples. Shutdown and queue draining are included in elapsed time, and
+each run asserts that sent and received counts match. Output includes every
+sample and is appended to `target/fanring-bench/results.jsonl` or
+`target/fanring-bench/mpmc.jsonl`.
+
+JSONL rows record `nominal_capacity` and `capacity_model`. Fanring uses a
+per-ring HWM. MPMC receiver staging is additional. Competing channels use one
+shared bound in these benchmarks. The chart reader accepts legacy
+`total_capacity` rows.
 
 Short smoke run:
 
 ```sh
-FANRING_BENCH_SECS=0.1 cargo bench --bench comparison
+FANRING_BENCH_SECS=0.1 \
+FANRING_BENCH_SAMPLES=1 \
+FANRING_BENCH_WARMUP_SECS=0 \
+cargo bench --bench comparison
 ```
 
 Focused run:
@@ -50,6 +82,7 @@ Focused run:
 FANRING_BENCH_PAYLOADS=bytes64 \
 FANRING_BENCH_PRODUCERS=8 \
 FANRING_BENCH_IMPLS=fanring,crossbeam-channel \
+FANRING_BENCH_OUT=target/fanring-bench/focused.jsonl \
 cargo bench --bench comparison
 ```
 
@@ -62,6 +95,9 @@ cargo run --features charts --bin fanring-chart
 ```
 
 Default output: `doc/charts/mpsc.svg`.
+
+The chart tool selects the latest complete run, aggregates samples by median,
+and shows relative median absolute deviation below each throughput value.
 
 Custom paths:
 
