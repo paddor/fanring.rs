@@ -27,11 +27,11 @@ type ChartResult<T> = Result<T, ChartError>;
 const SERIES: &[(&str, &str)] = &[
     ("fanring", "fanring"),
     ("fanring-mpmc", "fanring"),
-    ("crossbeam-channel", "crossbeam-channel"),
-    ("concurrent-queue", "concurrent-queue"),
-    ("thingbuf", "thingbuf"),
-    ("flume", "flume"),
-    ("kanal", "kanal"),
+    ("crossbeam-channel", "crossbeam-channel 0.5.16"),
+    ("concurrent-queue", "concurrent-queue 2.5.0"),
+    ("thingbuf", "thingbuf 0.1.6"),
+    ("flume", "flume 0.12.0"),
+    ("kanal", "kanal 0.1.1"),
 ];
 
 #[derive(Debug, Deserialize)]

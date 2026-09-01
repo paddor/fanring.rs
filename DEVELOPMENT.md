@@ -32,11 +32,29 @@ integration with fanring. The full Miri run uses Tree Borrows and ignores
 process-global leaks because `crossbeam-epoch` does not pass Miri's default
 Stacked Borrows and leak checks. The MPSC-only run keeps those checks enabled.
 
+## Release
+
+Update `Cargo.toml` and `CHANGELOG.md`, then run:
+
+```sh
+cargo +1.93.0 test --all-features --locked
+cargo clippy --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+cargo package --locked
+cargo publish --dry-run --locked
+```
+
+Publishing and tagging are separate explicit steps after review. The release
+tag is `v` followed by the package version.
+
 ## Benchmarks
 
 ```sh
 cargo bench --bench comparison
+FANRING_BENCH_MODE=blocking cargo bench --bench comparison
 cargo bench --bench mpmc
+FANRING_BENCH_MODE=blocking cargo bench --bench mpmc
+cargo bench --bench wake_latency
 ```
 
 The benchmark compares `fanring` against:
@@ -66,6 +84,16 @@ JSONL rows record `nominal_capacity` and `capacity_model`. Fanring uses a
 per-ring HWM. MPMC receiver staging is additional. Competing channels use one
 shared bound in these benchmarks. The chart reader accepts legacy
 `total_capacity` rows.
+
+Comparison benches accept `FANRING_BENCH_MODE`, `FANRING_BENCH_SECS`,
+`FANRING_BENCH_PRODUCERS`, `FANRING_BENCH_CAPACITY`,
+`FANRING_BENCH_PAYLOADS`, `FANRING_BENCH_IMPLS`, `FANRING_BENCH_SAMPLES`,
+`FANRING_BENCH_WARMUP_SECS`, and `FANRING_BENCH_OUT`. MPMC also accepts
+`FANRING_BENCH_CONSUMERS`.
+
+Wake latency accepts `FANRING_WAKE_ROUNDS`, `FANRING_WAKE_WARMUP`,
+`FANRING_WAKE_SETTLE_NS`, `FANRING_WAKE_SETTLE_MODE` (`sleep` or `spin`), and
+`FANRING_WAKE_OUT`. All benchmarks append machine-readable JSONL.
 
 Short smoke run:
 
