@@ -2,8 +2,10 @@
 
 `fanring` assigns one SPSC `yring` to each registered sender. Each sender owns
 its producer. The receive side owns the consumers. Registration and retirement
-use a mutex. Common try operations use no locks unless they cross a lane idle
-boundary or must wake an already-registered blocking peer.
+use a mutex. MPSC send and receive hot paths use no locks unless they cross a
+lane idle boundary or wake an already-registered blocking peer. MPMC sends are
+lock-free, while receives may take short locks for synchronized staged work;
+the sole-receiver private staging deque avoids those locks.
 
 ## Dynamic Registry
 
@@ -20,7 +22,8 @@ generation changes. A disconnected empty lane returns its slot to the free
 list. The number of producers is limited only by available memory.
 
 The MPMC registry stores idle consumers directly in lane slots. Each page owns
-a fixed 64-entry lock-free lane-token queue, allocated when that page is added.
+a fixed 64-entry bounded `concurrent-queue` of lane tokens, allocated when that
+page is added.
 Separate bitmap groups summarize newly ready registry lanes and requeued lane
 tokens. The immutable page/group topology is published with `ArcSwap` only
 when registration crosses a 64-lane boundary; each receiver caches it until a
@@ -32,6 +35,10 @@ registry mutex and publish it with `ArcSwap`. Receivers load the snapshot itself
 without locking only after their own queue, the shared orphan queue, and visible
 sender lanes miss. Persistent work-queue storage is linear in the number of
 receivers.
+
+Each sender handle owns one lane. Cloning a sender registers another lane.
+Retired slots carry generation counters, so stale readiness tokens cannot refer
+to a later sender.
 
 ## Send Path
 
@@ -51,8 +58,8 @@ signal, ready page, and page bit:
 After flushing the yring, every publication atomically swaps the signal to
 `PENDING`. Only an `IDLE`-to-`PENDING` transition sets the lane bit in its ready
 page. A page transition from empty to nonempty sets its bit in a ready group.
-Later publications coalesce into the existing pending lane. One group lookup
-covers 4,096 sender lanes without allocating or touching a shared queue tail.
+Later publications coalesce into the existing pending lane. The two-level
+bitmaps cover up to 4,096 sender lanes.
 
 At visible empty, the receiver swaps the signal to `IDLE` and then prefetches
 the yring again. A producer that published before the swap synchronizes through
@@ -81,9 +88,10 @@ parking while partial credits remain unpublished.
 
 ## MPMC Receive Path
 
-Each receiver owns a private deque and a bounded synchronized work queue. A
-receive first checks the private deque, its shared queue, and the shared orphan
-queue. If a sender lane is visibly ready, it claims that lane before stealing
+Each receiver has a private deque for sole-receiver staging and a bounded,
+mutex-protected `VecDeque` for stealable work. A receive first checks the
+private deque, its local queue, and the shared orphan queue. If a sender lane
+is visibly ready, it claims that lane before stealing
 so multiple producers naturally spread across receivers. Otherwise it rotates
 through the other receiver queues and steals a batch.
 
@@ -123,6 +131,11 @@ never premature `Disconnected`.
 MPMC ordering is relaxed. Batches from one sender can execute concurrently, and
 values from different sender rings may overtake each other.
 
+Service is bounded rather than strictly fair: a receiver takes at most 64
+values from one lane before rotating. Readiness and work cursors also rotate,
+so a busy lane or page cannot permanently hide other ready lanes. No latency or
+global FIFO guarantee is provided.
+
 ## Blocking Waits
 
 Each sender lane has one producer space wait cell. MPSC has a single-waiter
@@ -144,6 +157,8 @@ Those opposite-direction wakeups are deferred until after the current
 registration is released. This prevents data-wait and space-wait lock-order
 inversion. With no waiter, notification is one atomic operation and no lock.
 
+Timeout variants use the same protocol with a deadline.
+
 ## Drop
 
 Sender drop closes and activates its lane, then decrements the live-sender
@@ -164,3 +179,8 @@ Adding a sender adds another ring and another capacity allocation. No shared
 global credit counter appears on the send path. MPMC receiver queues and the
 orphan queue hold prefetched values outside those ring HWMs, so the sum of ring
 capacities is a nominal bound rather than an exact total resident-item bound.
+
+The publication protocol relies on `yring` flush/prefetch ordering and the lane
+signal exchange. A readiness bit may be stale, but a published value cannot
+become permanently invisible. Registry and staging locks are maintenance
+boundaries, not part of sender publication.
