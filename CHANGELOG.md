@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Limit published packages to crate sources and user-facing documentation.
+
 ## [0.2.1] - 2026-09-02
 
 ### Changed

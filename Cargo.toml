@@ -10,6 +10,7 @@ documentation = "https://docs.rs/fanring"
 readme = "README.md"
 keywords = ["mpsc", "mpmc", "ring-buffer", "lock-free", "batching"]
 categories = ["concurrency", "data-structures"]
+include = ["src/**/*", "README.md", "LICENSE", "CHANGELOG.md", "DESIGN.md"]
 
 [package.metadata.docs.rs]
 all-features = true
