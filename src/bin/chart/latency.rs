@@ -367,8 +367,13 @@ fn draw(rows: &[&LatencyRow], series: &[Series], topology: &str, output: &Path) 
     draw_y_grid(&area, plot_left, plot_right, plot_top, plot_bottom, y_max)?;
 
     let group_width = (plot_right - plot_left) / METRICS.len() as f64;
-    let bar_width = if series.len() == 5 { 30.0 } else { 36.0 };
     let bar_gap = 3.0;
+    let minimum_group_gap = 24.0;
+    let preferred_bar_width: f64 = if series.len() == 5 { 30.0 } else { 36.0 };
+    let available_bar_width =
+        (group_width - minimum_group_gap - series.len().saturating_sub(1) as f64 * bar_gap)
+            / series.len() as f64;
+    let bar_width = preferred_bar_width.min(available_bar_width);
     let cluster_width =
         series.len() as f64 * bar_width + series.len().saturating_sub(1) as f64 * bar_gap;
     for (metric_index, metric) in METRICS.iter().enumerate() {
