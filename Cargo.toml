@@ -1,6 +1,6 @@
 [package]
 name = "fanring"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.93"
 license = "ISC"
@@ -10,6 +10,7 @@ documentation = "https://docs.rs/fanring"
 readme = "README.md"
 keywords = ["mpsc", "mpmc", "ring-buffer", "lock-free", "batching"]
 categories = ["concurrency", "data-structures"]
+include = ["src/**/*", "README.md", "LICENSE", "CHANGELOG.md", "DESIGN.md"]
 
 [package.metadata.docs.rs]
 all-features = true
