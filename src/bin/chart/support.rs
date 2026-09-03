@@ -112,6 +112,7 @@ mod tests {
             low_watermark: 1,
             high_watermark: 1,
             items_per_sec: 1.0,
+            relative_mad: None,
             sample,
             samples,
             expected_rows: samples,

@@ -2,10 +2,7 @@
 
 mod support;
 
-use std::fs;
 use std::hint::black_box;
-use std::io::Write;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -13,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use support::{Affinity, Sampling, Saturation, append_jsonl, median_and_relative_mad};
+use support::{Affinity, JsonlResults, Sampling, Saturation, median_and_relative_mad};
 
 #[derive(Debug, Clone, Copy)]
 struct Config {
@@ -119,6 +116,7 @@ fn main() {}
 
 #[cfg(not(all(test, debug_assertions)))]
 fn main() {
+    crossfire::detect_backoff_cfg();
     let duration = Duration::from_secs_f64(
         std::env::var("FANRING_BENCH_SECS")
             .ok()
@@ -126,9 +124,7 @@ fn main() {
             .unwrap_or(1.0),
     );
     let sampling = Sampling::from_env();
-    let out_path = std::env::var_os("FANRING_BENCH_OUT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target/fanring-bench/results.jsonl"));
+    let mut results = JsonlResults::new("throughput-mpsc.jsonl");
     let payload_filter = Filter::from_env("FANRING_BENCH_PAYLOADS");
     let impl_filter = Filter::from_env("FANRING_BENCH_IMPLS");
     let mode = Mode::from_env();
@@ -147,13 +143,8 @@ fn main() {
         affinity: Affinity::from_env(),
     };
 
-    if let Some(parent) = out_path.parent() {
-        fs::create_dir_all(parent).expect("create benchmark output dir");
-    }
-    let mut out = append_jsonl(&out_path);
-
     println!(
-        "MPSC {} comparison ({}, {} x {:.2}s, {:.2}s warmup, capacity {} items, affinity {}, output {})\n",
+        "MPSC {} comparison ({}, {} x {:.2}s, {:.2}s warmup, capacity {} items, affinity {}, results {})\n",
         profile.label(),
         mode.label(),
         sampling.samples,
@@ -161,7 +152,7 @@ fn main() {
         sampling.warmup.as_secs_f64(),
         total_capacity(),
         context.affinity.description(),
-        out_path.display()
+        results.root().display()
     );
 
     let total_capacity = total_capacity();
@@ -186,7 +177,7 @@ fn main() {
     if payload_filter.matches("u64") {
         run_payload(
             &context,
-            &mut out,
+            &mut results,
             &configs,
             &impl_filter,
             sampling,
@@ -200,7 +191,7 @@ fn main() {
     if payload_filter.matches("bytes64") {
         run_payload(
             &context,
-            &mut out,
+            &mut results,
             &configs,
             &impl_filter,
             sampling,
@@ -214,7 +205,7 @@ fn main() {
     if payload_filter.matches("bytes256") {
         run_payload(
             &context,
-            &mut out,
+            &mut results,
             &configs,
             &impl_filter,
             sampling,
@@ -226,12 +217,12 @@ fn main() {
         );
     }
 
-    out.flush().expect("flush benchmark JSONL");
+    results.flush();
 }
 
 fn run_payload<T>(
     context: &RunContext,
-    out: &mut impl Write,
+    results: &mut JsonlResults,
     configs: &[Config],
     impl_filter: &Filter,
     sampling: Sampling,
@@ -248,6 +239,9 @@ fn run_payload<T>(
     }
     if impl_filter.matches("crossbeam-channel") {
         implementations.push(("crossbeam-channel", bench_crossbeam_channel::<T>));
+    }
+    if impl_filter.matches("crossfire") {
+        implementations.push(("crossfire", bench_crossfire::<T>));
     }
     if impl_filter.matches("flume") {
         implementations.push(("flume", bench_flume::<T>));
@@ -296,8 +290,7 @@ fn run_payload<T>(
                     row.implementation,
                     row.items_per_sec / 1_000_000.0
                 );
-                serde_json::to_writer(&mut *out, &row).expect("write benchmark row");
-                writeln!(out).expect("write benchmark newline");
+                results.write(row.implementation, &row);
                 rows.push(row);
             }
         }
@@ -353,6 +346,16 @@ where
         senders,
         rx,
     )
+}
+
+fn bench_crossfire<T>(context: &RunContext, config: Config, mode: Mode, payload: Payload<T>) -> Row
+where
+    T: Copy + Send + 'static,
+{
+    let (tx, rx) = crossfire::mpsc::bounded_blocking(config.total_capacity());
+    let senders = clones(&tx, config.producers);
+    drop(tx);
+    run_channel(context, "crossfire", config, mode, payload, senders, rx)
 }
 
 fn bench_flume<T>(context: &RunContext, config: Config, mode: Mode, payload: Payload<T>) -> Row
@@ -725,6 +728,38 @@ impl<T> BenchReceiver<T> for crossbeam_channel::Receiver<T> {
     }
 }
 
+impl<T: Send + 'static> BenchSender<T> for crossfire::MTx<crossfire::mpsc::Array<T>> {
+    #[inline(always)]
+    fn try_send(&mut self, value: T) -> SendAttempt {
+        match crossfire::BlockingTxTrait::try_send(self, value) {
+            Ok(()) => SendAttempt::Sent,
+            Err(crossfire::TrySendError::Full(_)) => SendAttempt::Full,
+            Err(crossfire::TrySendError::Disconnected(_)) => SendAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn send(&mut self, value: T) -> bool {
+        crossfire::BlockingTxTrait::send(self, value).is_ok()
+    }
+}
+
+impl<T: Send + 'static> BenchReceiver<T> for crossfire::Rx<crossfire::mpsc::Array<T>> {
+    #[inline(always)]
+    fn try_recv(&mut self) -> RecvAttempt<T> {
+        match crossfire::BlockingRxTrait::try_recv(self) {
+            Ok(value) => RecvAttempt::Item(value),
+            Err(crossfire::TryRecvError::Empty) => RecvAttempt::Empty,
+            Err(crossfire::TryRecvError::Disconnected) => RecvAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn recv(&mut self) -> Option<T> {
+        crossfire::BlockingRxTrait::recv(self).ok()
+    }
+}
+
 impl<T: Send + 'static> BenchSender<T> for flume::Sender<T> {
     #[inline(always)]
     fn try_send(&mut self, value: T) -> SendAttempt {
@@ -999,6 +1034,7 @@ fn selected_implementation_count(filter: &Filter, mode: Mode) -> usize {
     [
         ("fanring", true),
         ("crossbeam-channel", true),
+        ("crossfire", true),
         ("flume", true),
         ("kanal", true),
         ("concurrent-queue", mode == Mode::Try),

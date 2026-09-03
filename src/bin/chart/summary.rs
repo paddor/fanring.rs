@@ -30,6 +30,12 @@ const SERIES: &[Series] = &[
         color: RGBColor(0x60, 0xa5, 0xfa),
     },
     Series {
+        mpsc_key: "crossfire",
+        mpmc_key: Some("crossfire-mpmc"),
+        label: "crossfire 3.1.19",
+        color: RGBColor(0x22, 0xd3, 0xee),
+    },
+    Series {
         mpsc_key: "concurrent-queue",
         mpmc_key: None,
         label: "concurrent-queue 2.5.0",
@@ -448,7 +454,13 @@ mod tests {
         let mpsc = summary_values(&mpsc.collect::<Vec<_>>(), false);
         let mpmc = summary_values(&mpmc.collect::<Vec<_>>(), true);
         assert_eq!(mpsc.len(), SERIES.len());
-        assert_eq!(mpmc.len(), 4);
+        assert_eq!(
+            mpmc.len(),
+            SERIES
+                .iter()
+                .filter(|series| series.mpmc_key.is_some())
+                .count()
+        );
         for series in SERIES {
             assert_eq!(mpsc.get(series.label), Some(&1.0));
             assert_eq!(mpmc.get(series.label), series.mpmc_key.map(|_| &1.0));
@@ -492,6 +504,7 @@ mod tests {
             low_watermark: 4096,
             high_watermark: 8192,
             items_per_sec: 1_000_000.0,
+            relative_mad: None,
             sample: 0,
             samples: 1,
             expected_rows: 1,

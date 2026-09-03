@@ -1,13 +1,14 @@
 #![cfg_attr(test, allow(dead_code, unused_imports))]
 
-use std::fs::{self, OpenOptions};
-use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+mod support;
+
 use std::sync::mpsc::sync_channel;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+
+use support::JsonlResults;
 
 #[derive(Debug, Serialize)]
 struct Row {
@@ -71,6 +72,30 @@ impl BlockingReceiver for crossbeam_channel::Receiver<u64> {
     }
 }
 
+impl BlockingSender for crossfire::MTx<crossfire::mpsc::Array<u64>> {
+    fn send(&mut self, value: u64) -> bool {
+        crossfire::BlockingTxTrait::send(self, value).is_ok()
+    }
+}
+
+impl BlockingReceiver for crossfire::Rx<crossfire::mpsc::Array<u64>> {
+    fn recv(&mut self) -> Option<u64> {
+        crossfire::BlockingRxTrait::recv(self).ok()
+    }
+}
+
+impl BlockingSender for crossfire::MTx<crossfire::mpmc::Array<u64>> {
+    fn send(&mut self, value: u64) -> bool {
+        crossfire::BlockingTxTrait::send(self, value).is_ok()
+    }
+}
+
+impl BlockingReceiver for crossfire::MRx<crossfire::mpmc::Array<u64>> {
+    fn recv(&mut self) -> Option<u64> {
+        crossfire::BlockingRxTrait::recv(self).ok()
+    }
+}
+
 impl BlockingSender for flume::Sender<u64> {
     fn send(&mut self, value: u64) -> bool {
         flume::Sender::send(self, value).is_ok()
@@ -112,14 +137,13 @@ fn main() {}
 
 #[cfg(not(all(test, debug_assertions)))]
 fn main() {
+    crossfire::detect_backoff_cfg();
     let rounds = env_usize("FANRING_WAKE_ROUNDS", 10_000);
     let warmup = env_usize("FANRING_WAKE_WARMUP", 200);
     let settle = Duration::from_nanos(env_u64("FANRING_WAKE_SETTLE_NS", 50_000));
     let settle_mode = SettleMode::from_env();
-    let out_path = std::env::var_os("FANRING_WAKE_OUT").map_or_else(
-        || PathBuf::from("target/fanring-bench/wake-latency.jsonl"),
-        PathBuf::from,
-    );
+    let mut mpsc_results = JsonlResults::new("latency-mpsc.jsonl");
+    let mut mpmc_results = JsonlResults::new("latency-mpmc.jsonl");
     let filter = Filter::from_env("FANRING_BENCH_IMPLS");
     let run_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -129,21 +153,11 @@ fn main() {
     let cpu = cpu_name();
 
     assert!(rounds > 0, "wake rounds must be > 0");
-    if let Some(parent) = out_path.parent() {
-        fs::create_dir_all(parent).expect("create benchmark output dir");
-    }
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&out_path)
-        .expect("open wake benchmark JSONL");
-    let mut out = BufWriter::new(file);
-
     println!(
-        "Wake latency ({rounds} samples, {warmup} warmup, {} ns {} settle, output {})\n",
+        "Wake latency ({rounds} samples, {warmup} warmup, {} ns {} settle, results {})\n",
         settle.as_nanos(),
         settle_mode.label(),
-        out_path.display()
+        mpsc_results.root().display()
     );
 
     if filter.matches("fanring") {
@@ -155,7 +169,7 @@ fn main() {
             warmup,
             settle,
             settle_mode,
-            &mut out,
+            &mut [&mut mpsc_results],
             || fanring::mpsc::channel(1),
         );
     }
@@ -168,7 +182,7 @@ fn main() {
             warmup,
             settle,
             settle_mode,
-            &mut out,
+            &mut [&mut mpmc_results],
             || fanring::mpmc::channel(1),
         );
     }
@@ -181,8 +195,34 @@ fn main() {
             warmup,
             settle,
             settle_mode,
-            &mut out,
+            &mut [&mut mpsc_results, &mut mpmc_results],
             || crossbeam_channel::bounded(1),
+        );
+    }
+    if filter.matches("crossfire") {
+        run_implementation(
+            &run_id,
+            &cpu,
+            "crossfire",
+            rounds,
+            warmup,
+            settle,
+            settle_mode,
+            &mut [&mut mpsc_results],
+            || crossfire::mpsc::bounded_blocking(1),
+        );
+    }
+    if filter.matches("crossfire-mpmc") {
+        run_implementation(
+            &run_id,
+            &cpu,
+            "crossfire-mpmc",
+            rounds,
+            warmup,
+            settle,
+            settle_mode,
+            &mut [&mut mpmc_results],
+            || crossfire::mpmc::bounded_blocking(1),
         );
     }
     if filter.matches("flume") {
@@ -194,7 +234,7 @@ fn main() {
             warmup,
             settle,
             settle_mode,
-            &mut out,
+            &mut [&mut mpsc_results, &mut mpmc_results],
             || flume::bounded(1),
         );
     }
@@ -207,7 +247,7 @@ fn main() {
             warmup,
             settle,
             settle_mode,
-            &mut out,
+            &mut [&mut mpsc_results, &mut mpmc_results],
             || kanal::bounded(1),
         );
     }
@@ -220,12 +260,13 @@ fn main() {
             warmup,
             settle,
             settle_mode,
-            &mut out,
+            &mut [&mut mpsc_results],
             || thingbuf::mpsc::blocking::channel(1),
         );
     }
 
-    out.flush().expect("flush wake benchmark JSONL");
+    mpsc_results.flush();
+    mpmc_results.flush();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -237,7 +278,7 @@ fn run_implementation<S, R, F>(
     warmup: usize,
     settle: Duration,
     settle_mode: SettleMode,
-    out: &mut impl Write,
+    outputs: &mut [&mut JsonlResults],
     make_channel: F,
 ) where
     S: BlockingSender + 'static,
@@ -247,7 +288,7 @@ fn run_implementation<S, R, F>(
     let (sender, receiver) = make_channel();
     let recv_samples = measure_recv_wake(sender, receiver, rounds, warmup, settle, settle_mode);
     write_row(
-        out,
+        outputs,
         &summarize(
             run_id,
             cpu,
@@ -262,7 +303,7 @@ fn run_implementation<S, R, F>(
     let (sender, receiver) = make_channel();
     let send_samples = measure_send_wake(sender, receiver, rounds, warmup, settle, settle_mode);
     write_row(
-        out,
+        outputs,
         &summarize(
             run_id,
             cpu,
@@ -407,9 +448,10 @@ fn percentile(samples: &[u64], permille: usize) -> u64 {
     samples[index]
 }
 
-fn write_row(out: &mut impl Write, row: &Row) {
-    serde_json::to_writer(&mut *out, row).expect("write wake benchmark row");
-    writeln!(out).expect("write wake benchmark newline");
+fn write_row(outputs: &mut [&mut JsonlResults], row: &Row) {
+    for output in outputs {
+        output.write(row.implementation, row);
+    }
 }
 
 fn elapsed_ns(clock: Instant) -> u64 {

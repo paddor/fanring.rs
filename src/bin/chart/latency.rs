@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use plotters::coord::Shift;
 use plotters::prelude::*;
@@ -24,6 +24,7 @@ const MPSC_SERIES: &[Series] = &[
         "crossbeam-channel 0.5.16",
         RGBColor(0x60, 0xa5, 0xfa),
     ),
+    Series::new("crossfire", "crossfire 3.1.19", RGBColor(0x22, 0xd3, 0xee)),
     Series::new("thingbuf", "thingbuf 0.1.6", RGBColor(0xa7, 0x8b, 0xfa)),
     Series::new("flume", "flume 0.12.0", RGBColor(0xf4, 0x72, 0xb6)),
     Series::new("kanal", "kanal 0.1.1*", RGBColor(0xf5, 0x9e, 0x0b)),
@@ -35,6 +36,11 @@ const MPMC_SERIES: &[Series] = &[
         "crossbeam-channel",
         "crossbeam-channel 0.5.16",
         RGBColor(0x60, 0xa5, 0xfa),
+    ),
+    Series::new(
+        "crossfire-mpmc",
+        "crossfire 3.1.19",
+        RGBColor(0x22, 0xd3, 0xee),
     ),
     Series::new("flume", "flume 0.12.0", RGBColor(0xf4, 0x72, 0xb6)),
     Series::new("kanal", "kanal 0.1.1*", RGBColor(0xf5, 0x9e, 0x0b)),
@@ -98,10 +104,26 @@ struct LatencyRow {
     p99_ns: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LatencyShape {
+    cpu: String,
+    capacity: usize,
+    rounds: usize,
+    settle_mode: String,
+    settle_ns: u64,
+}
+
+struct ImplementationRun<'a> {
+    implementation: &'static str,
+    shape: LatencyShape,
+    rows: Vec<&'a LatencyRow>,
+}
+
 type Area<'a> = DrawingArea<SVGBackend<'a>, Shift>;
 
 pub(super) fn draw_latency_chart(
-    input: &Path,
+    inputs: &[PathBuf],
+    source: &Path,
     output: &Path,
     topology: &str,
     requested_run: Option<String>,
@@ -111,10 +133,13 @@ pub(super) fn draw_latency_chart(
         "mpmc" => MPMC_SERIES,
         _ => return Err(ChartError::InvalidTopology(topology.to_string())),
     };
-    let rows = read_rows(input)?;
+    let mut rows = Vec::new();
+    for input in inputs {
+        rows.extend(read_rows(input)?);
+    }
     if rows.is_empty() {
         return Err(ChartError::NoRows {
-            path: input.to_path_buf(),
+            path: source.to_path_buf(),
         });
     }
     let rows = select_run(&rows, series, requested_run)?;
@@ -163,25 +188,83 @@ fn select_run<'a>(
         return complete_rows(&selected, series).ok_or(ChartError::RunIncomplete(run_id));
     }
 
+    combine_latest_runs(rows, series).ok_or(ChartError::NoCompleteRun)
+}
+
+fn combine_latest_runs<'a>(
+    rows: &'a [LatencyRow],
+    series: &[Series],
+) -> Option<Vec<&'a LatencyRow>> {
     let mut seen = BTreeSet::new();
-    let run_ids = rows
+    let mut run_ids = rows
         .iter()
         .filter_map(|row| {
             seen.insert(row.run_id.as_str())
                 .then_some(row.run_id.as_str())
         })
         .collect::<Vec<_>>();
-    run_ids
-        .into_iter()
-        .rev()
-        .find_map(|run_id| {
+    run_ids.sort_by_key(|run_id| run_id.parse::<u128>().unwrap_or(0));
+
+    let mut runs = Vec::new();
+    for run_id in run_ids {
+        for candidate in series {
             let selected = rows
                 .iter()
-                .filter(|row| row.run_id == run_id)
+                .filter(|row| row.run_id == run_id && row.implementation == candidate.key)
                 .collect::<Vec<_>>();
-            complete_rows(&selected, series)
-        })
-        .ok_or(ChartError::NoCompleteRun)
+            if let Some(shape) = complete_implementation(&selected) {
+                runs.push(ImplementationRun {
+                    implementation: candidate.key,
+                    shape,
+                    rows: selected,
+                });
+            }
+        }
+    }
+
+    for reference in runs.iter().rev().map(|run| &run.shape) {
+        let mut combined = Vec::new();
+        for candidate in series {
+            let Some(run) = runs
+                .iter()
+                .rev()
+                .find(|run| run.implementation == candidate.key && run.shape == *reference)
+            else {
+                combined.clear();
+                break;
+            };
+            combined.extend(run.rows.iter().copied());
+        }
+        if !combined.is_empty() {
+            return Some(combined);
+        }
+    }
+    None
+}
+
+fn complete_implementation(rows: &[&LatencyRow]) -> Option<LatencyShape> {
+    let first = *rows.first()?;
+    if rows.len() != 2
+        || rows
+            .iter()
+            .any(|row| latency_shape(row) != latency_shape(first))
+        || !["recv_wake", "send_wake"]
+            .iter()
+            .all(|operation| rows.iter().any(|row| row.operation == *operation))
+    {
+        return None;
+    }
+    Some(latency_shape(first))
+}
+
+fn latency_shape(row: &LatencyRow) -> LatencyShape {
+    LatencyShape {
+        cpu: row.cpu.clone(),
+        capacity: row.capacity,
+        rounds: row.rounds,
+        settle_mode: row.settle_mode.clone(),
+        settle_ns: row.settle_ns,
+    }
 }
 
 fn complete_rows<'a>(rows: &[&'a LatencyRow], series: &[Series]) -> Option<Vec<&'a LatencyRow>> {
@@ -284,8 +367,13 @@ fn draw(rows: &[&LatencyRow], series: &[Series], topology: &str, output: &Path) 
     draw_y_grid(&area, plot_left, plot_right, plot_top, plot_bottom, y_max)?;
 
     let group_width = (plot_right - plot_left) / METRICS.len() as f64;
-    let bar_width = if series.len() == 5 { 30.0 } else { 36.0 };
     let bar_gap = 3.0;
+    let minimum_group_gap = 24.0;
+    let preferred_bar_width: f64 = if series.len() == 5 { 30.0 } else { 36.0 };
+    let available_bar_width =
+        (group_width - minimum_group_gap - series.len().saturating_sub(1) as f64 * bar_gap)
+            / series.len() as f64;
+    let bar_width = preferred_bar_width.min(available_bar_width);
     let cluster_width =
         series.len() as f64 * bar_width + series.len().saturating_sub(1) as f64 * bar_gap;
     for (metric_index, metric) in METRICS.iter().enumerate() {
@@ -528,6 +616,27 @@ mod tests {
         let selected = select_run(&rows, MPSC_SERIES, None).unwrap();
 
         assert!(selected.iter().all(|row| row.run_id == "new"));
+    }
+
+    #[test]
+    fn combines_latest_compatible_run_for_each_implementation() {
+        let mut rows = complete_run("1");
+        rows.extend([
+            row("2", "crossfire", "recv_wake"),
+            row("2", "crossfire", "send_wake"),
+        ]);
+
+        let selected = select_run(&rows, MPSC_SERIES, None).unwrap();
+
+        assert_eq!(selected.len(), MPSC_SERIES.len() * 2);
+        assert!(selected.iter().all(|row| {
+            row.run_id
+                == if row.implementation == "crossfire" {
+                    "2"
+                } else {
+                    "1"
+                }
+        }));
     }
 
     #[test]

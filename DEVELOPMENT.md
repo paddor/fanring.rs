@@ -78,6 +78,7 @@ cargo bench --bench wake_latency
 The benchmark compares `fanring` against:
 
 - `crossbeam-channel`
+- `crossfire`
 - `flume`
 - `kanal`
 - `concurrent-queue`
@@ -102,8 +103,8 @@ not support this profile because blocking sends do not expose full events.
 
 Implementations rotate order between samples. Shutdown and queue draining are
 included in elapsed time. Every run asserts that sent and received counts
-match. Output includes every sample and is appended to
-`target/fanring-bench/results.jsonl` or `target/fanring-bench/mpmc.jsonl`.
+match. Every sample is appended to
+`~/.cache/fanring/<implementation>/throughput-{mpsc,mpmc}.jsonl`.
 
 JSONL rows record `nominal_capacity`, `capacity_model`, `affinity`,
 `throughput_profile`, `low_watermark`, and `high_watermark`. Fanring uses a per-ring HWM. MPMC
@@ -115,15 +116,18 @@ Comparison benches accept `FANRING_BENCH_MODE`, `FANRING_BENCH_SECS`,
 `FANRING_BENCH_PRODUCERS`, `FANRING_BENCH_CAPACITY`,
 `FANRING_BENCH_PAYLOADS`, `FANRING_BENCH_IMPLS`, `FANRING_BENCH_SAMPLES`,
 `FANRING_BENCH_WARMUP_SECS`, `FANRING_BENCH_PROFILE`, and
-`FANRING_BENCH_AFFINITY` (`auto` or `off`), and `FANRING_BENCH_OUT`. MPMC also
-accepts `FANRING_BENCH_CONSUMERS`. `auto` is the default and records the exact
-logical CPU order in each row. Use `taskset` to restrict the available CPUs.
+`FANRING_BENCH_AFFINITY` (`auto` or `off`). MPMC also accepts
+`FANRING_BENCH_CONSUMERS`. `auto` is the default and records the exact logical
+CPU order in each row. Use `taskset` to restrict the available CPUs.
 
 Wake latency accepts `FANRING_WAKE_ROUNDS`, `FANRING_WAKE_WARMUP`,
-`FANRING_WAKE_SETTLE_NS`, `FANRING_WAKE_SETTLE_MODE` (`sleep` or `spin`), and
-`FANRING_WAKE_OUT`. It measures both a blocked receiver woken by a send and a
-blocked sender woken by a receive on capacity-one channels. All benchmarks
-append machine-readable JSONL.
+`FANRING_WAKE_SETTLE_NS`, and `FANRING_WAKE_SETTLE_MODE` (`sleep` or `spin`). It
+measures both a blocked receiver woken by a send and a blocked sender woken by
+a receive on capacity-one channels. Results are appended to
+`~/.cache/fanring/<implementation>/latency-{mpsc,mpmc}.jsonl`.
+
+`FANRING_BENCH_CACHE_DIR` overrides the `~/.cache/fanring` result root for every
+benchmark and the chart generator. Result files are append-only.
 
 Short smoke run:
 
@@ -140,7 +144,6 @@ Focused run:
 FANRING_BENCH_PAYLOADS=bytes64 \
 FANRING_BENCH_PRODUCERS=8 \
 FANRING_BENCH_IMPLS=fanring,crossbeam-channel \
-FANRING_BENCH_OUT=target/fanring-bench/focused.jsonl \
 cargo bench --bench comparison
 ```
 
@@ -160,9 +163,16 @@ cargo run --example fanring-chart
 
 Default output: `doc/charts/throughput-mpsc.svg`.
 
-The chart tool selects the latest complete nonblocking run, aggregates samples
-by median, and shows relative median absolute deviation below each throughput
-value. An explicit run ID may select a blocking run.
+The chart tool reads every implementation's append-only result file. It merges
+the latest compatible complete per-implementation runs, aggregates samples by
+median, and shows relative median absolute deviation below each throughput
+value. An explicit run ID selects one complete run and may select blocking data.
+
+Generate the MPMC detail chart:
+
+```sh
+cargo run --example fanring-chart -- --mpmc
+```
 
 Generate the two-topology summary chart from the latest complete nonblocking
 MPSC and MPMC runs:
@@ -193,26 +203,21 @@ postfix=6 physical cores / 12 threads, performance governor, turbo off
 `FANRING_HW_LABEL` overrides the complete label. `FANRING_HW_PREFIX` and
 `FANRING_HW_POSTFIX` override the corresponding file values.
 
-Custom paths:
+Use a different result root:
 
 ```sh
 cargo run --example fanring-chart -- \
-  --input target/fanring-bench/results.jsonl \
-  --output doc/charts/throughput-mpsc.svg
-
-cargo run --example fanring-chart -- \
-  --input target/fanring-bench/mpmc.jsonl \
-  --output doc/charts/throughput-mpmc.svg
+  --results-dir /path/to/fanring-results \
+  --output /path/to/throughput-mpsc.svg
 
 cargo run --example fanring-chart -- \
   --summary \
-  --mpsc-input target/fanring-bench/results.jsonl \
-  --mpmc-input target/fanring-bench/mpmc.jsonl \
-  --output doc/charts/throughput-summary.svg
+  --results-dir /path/to/fanring-results \
+  --output /path/to/throughput-summary.svg
 
 cargo run --example fanring-chart -- \
   --latency mpsc \
-  --input target/fanring-bench/wake-latency.jsonl \
+  --results-dir /path/to/fanring-results \
   --run RUN_ID \
-  --output doc/charts/latency-mpsc.svg
+  --output /path/to/latency-mpsc.svg
 ```

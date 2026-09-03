@@ -41,6 +41,7 @@ loom = "0.7"
 [dev-dependencies]
 core_affinity = "0.8.3"
 crossbeam-channel = "0.5"
+crossfire = "3.1.19"
 flume = "0.12"
 kanal = "0.1"
 plotters = { version = "0.3", default-features = false, features = ["svg_backend"] }
