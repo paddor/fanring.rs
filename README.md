@@ -8,6 +8,11 @@ directly; MPMC stages prefetched batches in stealable receiver-local queues.
 
 Requires Rust 1.93 or newer.
 
+| | Nonblocking | Blocking | Timeout | Deadline |
+| --- | --- | --- | --- | --- |
+| Send | `try_send` | `send` | `send_timeout` | `send_deadline` |
+| Receive | `try_recv` | `recv` | `recv_timeout` | `recv_deadline` |
+
 ## Performance
 
 Median throughput and blocking wake latency on the system named in each

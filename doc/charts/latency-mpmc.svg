@@ -4,19 +4,19 @@
 MPMC blocking wake latency (lower is better)
 </text>
 <text x="512" y="40" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
-Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off; capacity 1; 10000 rounds; 50 us sleep settle
+Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off; capacity 1; 10000 rounds; 50 µs sleep settle
 </text>
 <polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,225 1000,225 "/>
 <text x="62" y="225" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
-5 us
+5 µs
 </text>
 <polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,153 1000,153 "/>
 <text x="62" y="153" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
-10 us
+10 µs
 </text>
 <polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,82 1000,82 "/>
 <text x="62" y="82" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
-15 us
+15 µs
 </text>
 <polyline fill="none" opacity="1" stroke="#30363D" stroke-width="2" points="70,296 1000,296 "/>
 <rect x="110" y="169" width="36" height="127" opacity="1" fill="#F87171" stroke="none"/>
