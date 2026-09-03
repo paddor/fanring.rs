@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Add an opt-in nonblocking throughput profile that cycles queue occupancy
+  between half and full capacity.
+- Add MPSC and MPMC blocking wake-latency charts.
+- Pin throughput benchmark threads in physical-core-first order and force
+  benchmark channel adapters inline.
+
 ## [0.2.1] - 2026-09-02
 
 ### Changed

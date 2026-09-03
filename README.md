@@ -10,20 +10,27 @@ Requires Rust 1.93 or newer.
 
 ## Performance
 
-Median throughput on the system named in each chart, measured with the
-`performance` governor and CPU turbo disabled. Summary bars compare common
-`u64` topologies, while detailed heatmaps cover thread counts and payload sizes
-with lighter cells for higher throughput and white outlines for winners.
+Median throughput and blocking wake latency on the system named in each
+chart, measured with the `performance` governor and CPU turbo disabled.
+Detailed throughput heatmaps cover thread counts and payload sizes.
 
-![Common MPSC and MPMC benchmark cases](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/summary.svg)
+![Common MPSC and MPMC benchmark cases](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/throughput-summary.svg)
 
 #### Detailed MPSC
 
-![MPSC benchmark chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/mpsc.svg)
+![MPSC benchmark chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/throughput-mpsc.svg)
 
 #### Detailed MPMC
 
-![MPMC benchmark chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/mpmc.svg)
+![MPMC benchmark chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/throughput-mpmc.svg)
+
+#### MPSC wake latency
+
+![MPSC wake-latency chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/latency-mpsc.svg)
+
+#### MPMC wake latency
+
+![MPMC wake-latency chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/latency-mpmc.svg)
 
 ## MPSC
 

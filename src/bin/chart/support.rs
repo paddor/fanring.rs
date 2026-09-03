@@ -99,6 +99,7 @@ mod tests {
         Row {
             run_id: "run".to_string(),
             cpu: "cpu".to_string(),
+            affinity: "physical-first:0,1".to_string(),
             mode: "try".to_string(),
             implementation: implementation.to_string(),
             payload: "u64".to_string(),
@@ -107,6 +108,9 @@ mod tests {
             consumers: None,
             nominal_capacity: 1,
             capacity_model: Some("per-ring-hwm".to_string()),
+            throughput_profile: "saturated".to_string(),
+            low_watermark: 1,
+            high_watermark: 1,
             items_per_sec: 1.0,
             sample,
             samples,

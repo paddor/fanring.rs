@@ -102,16 +102,15 @@ pub(super) fn draw_summary_chart(
     let area = root(output, width, height)?;
     let title =
         format!("u64 channel throughput with capacity={nominal_capacity} (higher is better)");
-    chart_header(
-        &area,
-        width,
-        &title,
-        mpsc_rows
-            .first()
-            .map(|row| chart_hardware(&row.cpu))
-            .as_deref(),
-        22,
-    )?;
+    let subtitle = mpsc_rows.first().map(|row| {
+        format!(
+            "{}, {}, {}",
+            chart_hardware(&row.cpu),
+            row.affinity_label(),
+            row.throughput_profile_label()
+        )
+    });
+    chart_header(&area, width, &title, subtitle.as_deref(), 22)?;
     vtext(
         &area,
         "million items/s",
@@ -169,13 +168,25 @@ pub(super) fn draw_summary_chart(
 }
 
 fn summary_capacity(mpsc_rows: &[Row], mpmc_rows: &[Row]) -> ChartResult<usize> {
+    let profiles = mpsc_rows
+        .iter()
+        .chain(mpmc_rows)
+        .map(|row| {
+            (
+                row.affinity.as_str(),
+                row.throughput_profile.as_str(),
+                row.low_watermark,
+                row.high_watermark,
+            )
+        })
+        .collect::<BTreeSet<_>>();
     let capacities = mpsc_rows
         .iter()
         .chain(mpmc_rows)
         .filter(|row| row.payload == "u64" && row.producers == 4)
         .map(|row| row.nominal_capacity)
         .collect::<BTreeSet<_>>();
-    if capacities.len() == 1 {
+    if profiles.len() == 1 && capacities.len() == 1 {
         let capacity = *capacities.first().expect("one capacity exists");
         if capacity.is_multiple_of(4) {
             return Ok(capacity);
@@ -424,7 +435,7 @@ fn px(value: f64) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{SERIES, summary_values};
+    use super::{SERIES, summary_capacity, summary_values};
     use crate::Row;
 
     #[test]
@@ -444,10 +455,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn summary_rejects_mixed_throughput_profiles() {
+        let mpsc = vec![row("fanring", None)];
+        let mut mpmc = vec![row("fanring-mpmc", Some(4))];
+        mpmc[0].throughput_profile = "uncontrolled".to_string();
+        mpmc[0].low_watermark = 0;
+        mpmc[0].high_watermark = 0;
+
+        assert!(summary_capacity(&mpsc, &mpmc).is_err());
+    }
+
+    #[test]
+    fn summary_rejects_mixed_affinity_policies() {
+        let mpsc = vec![row("fanring", None)];
+        let mut mpmc = vec![row("fanring-mpmc", Some(4))];
+        mpmc[0].affinity = "off".to_string();
+
+        assert!(summary_capacity(&mpsc, &mpmc).is_err());
+    }
+
     fn row(implementation: &str, consumers: Option<usize>) -> Row {
         Row {
             run_id: "run".to_string(),
             cpu: "cpu".to_string(),
+            affinity: "physical-first:0,1".to_string(),
             mode: "try".to_string(),
             implementation: implementation.to_string(),
             payload: "u64".to_string(),
@@ -456,6 +488,9 @@ mod tests {
             consumers,
             nominal_capacity: 8192,
             capacity_model: Some("per-ring-hwm".to_string()),
+            throughput_profile: "saturated".to_string(),
+            low_watermark: 4096,
+            high_watermark: 8192,
             items_per_sec: 1_000_000.0,
             sample: 0,
             samples: 1,

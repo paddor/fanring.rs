@@ -1,0 +1,75 @@
+<svg viewBox="0 0 1024 445" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, sans-serif">
+<rect x="0" y="0" width="1024" height="445" opacity="1" fill="#0D1117" stroke="none"/>
+<text x="512" y="20" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="12.096774193548388" opacity="1" fill="#E6EDF3" font-weight="bold">
+MPMC blocking wake latency (lower is better)
+</text>
+<text x="512" y="40" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
+Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off; capacity 1; 10000 rounds; 50 us sleep settle
+</text>
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,225 1000,225 "/>
+<text x="62" y="225" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
+5 us
+</text>
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,153 1000,153 "/>
+<text x="62" y="153" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
+10 us
+</text>
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,82 1000,82 "/>
+<text x="62" y="82" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
+15 us
+</text>
+<polyline fill="none" opacity="1" stroke="#30363D" stroke-width="2" points="70,296 1000,296 "/>
+<rect x="110" y="169" width="36" height="127" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="149" y="201" width="36" height="95" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="188" y="172" width="36" height="124" opacity="1" fill="#F472B6" stroke="none"/>
+<rect x="227" y="264" width="36" height="32" opacity="1" fill="#F59E0B" stroke="none"/>
+<text x="186" y="336" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
+p50
+</text>
+<rect x="342" y="135" width="36" height="161" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="381" y="149" width="36" height="147" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="420" y="141" width="36" height="155" opacity="1" fill="#F472B6" stroke="none"/>
+<rect x="459" y="243" width="36" height="53" opacity="1" fill="#F59E0B" stroke="none"/>
+<text x="419" y="336" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
+p99
+</text>
+<rect x="575" y="168" width="36" height="128" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="614" y="172" width="36" height="124" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="653" y="172" width="36" height="124" opacity="1" fill="#F472B6" stroke="none"/>
+<rect x="692" y="286" width="36" height="10" opacity="1" fill="#F59E0B" stroke="none"/>
+<text x="651" y="336" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
+p50
+</text>
+<rect x="807" y="127" width="36" height="169" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="846" y="93" width="36" height="203" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="885" y="114" width="36" height="182" opacity="1" fill="#F472B6" stroke="none"/>
+<rect x="924" y="278" width="36" height="18" opacity="1" fill="#F59E0B" stroke="none"/>
+<text x="884" y="336" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
+p99
+</text>
+<text x="303" y="316" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+blocked receiver
+</text>
+<text x="768" y="316" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+blocked sender
+</text>
+<rect x="82" y="370" width="12" height="12" opacity="1" fill="#F87171" stroke="none"/>
+<text x="100" y="376" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
+fanring
+</text>
+<rect x="382" y="370" width="12" height="12" opacity="1" fill="#60A5FA" stroke="none"/>
+<text x="400" y="376" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
+crossbeam-channel 0.5.16
+</text>
+<rect x="682" y="370" width="12" height="12" opacity="1" fill="#F472B6" stroke="none"/>
+<text x="700" y="376" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
+flume 0.12.0
+</text>
+<rect x="82" y="390" width="12" height="12" opacity="1" fill="#F59E0B" stroke="none"/>
+<text x="100" y="396" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
+kanal 0.1.1*
+</text>
+<text x="512" y="425" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="7.258064516129032" opacity="1" fill="#7D8590">
+* Kanal performs up to 256 sched_yield calls before parking
+</text>
+</svg>

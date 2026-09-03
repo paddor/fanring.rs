@@ -91,27 +91,39 @@ Defaults:
 - MPMC consumers: 1, 2, 4, 8
 - nominal capacity: 8192 items
 - payloads: `u64`, `[u8; 64]`, `[u8; 256]`
+- affinity: pin benchmark threads to physical cores first, then SMT siblings
 
-Worker threads synchronize on a start barrier. Implementations rotate order
-between samples. Shutdown and queue draining are included in elapsed time, and
-each run asserts that sent and received counts match. Output includes every
-sample and is appended to `target/fanring-bench/results.jsonl` or
-`target/fanring-bench/mpmc.jsonl`.
+Default runs let queue occupancy vary naturally (`uncontrolled`). Set
+`FANRING_BENCH_PROFILE=saturated` with nonblocking mode to cycle occupancy from
+full toward half capacity. Producers report actual full events. Consumers drain
+half of nominal capacity, then wait until every producer has observed a full
+queue again. This adds no shared atomic operation per item. Blocking mode does
+not support this profile because blocking sends do not expose full events.
 
-JSONL rows record `nominal_capacity` and `capacity_model`. Fanring uses a
-per-ring HWM. MPMC receiver staging is additional. Competing channels use one
-shared bound in these benchmarks. The chart reader accepts legacy
-`total_capacity` rows.
+Implementations rotate order between samples. Shutdown and queue draining are
+included in elapsed time. Every run asserts that sent and received counts
+match. Output includes every sample and is appended to
+`target/fanring-bench/results.jsonl` or `target/fanring-bench/mpmc.jsonl`.
+
+JSONL rows record `nominal_capacity`, `capacity_model`, `affinity`,
+`throughput_profile`, `low_watermark`, and `high_watermark`. Fanring uses a per-ring HWM. MPMC
+receiver staging is additional. Competing channels use one shared bound in
+these benchmarks. The chart reader accepts legacy `total_capacity` rows but
+does not combine uncontrolled and saturated throughput runs.
 
 Comparison benches accept `FANRING_BENCH_MODE`, `FANRING_BENCH_SECS`,
 `FANRING_BENCH_PRODUCERS`, `FANRING_BENCH_CAPACITY`,
 `FANRING_BENCH_PAYLOADS`, `FANRING_BENCH_IMPLS`, `FANRING_BENCH_SAMPLES`,
-`FANRING_BENCH_WARMUP_SECS`, and `FANRING_BENCH_OUT`. MPMC also accepts
-`FANRING_BENCH_CONSUMERS`.
+`FANRING_BENCH_WARMUP_SECS`, `FANRING_BENCH_PROFILE`, and
+`FANRING_BENCH_AFFINITY` (`auto` or `off`), and `FANRING_BENCH_OUT`. MPMC also
+accepts `FANRING_BENCH_CONSUMERS`. `auto` is the default and records the exact
+logical CPU order in each row. Use `taskset` to restrict the available CPUs.
 
 Wake latency accepts `FANRING_WAKE_ROUNDS`, `FANRING_WAKE_WARMUP`,
 `FANRING_WAKE_SETTLE_NS`, `FANRING_WAKE_SETTLE_MODE` (`sleep` or `spin`), and
-`FANRING_WAKE_OUT`. All benchmarks append machine-readable JSONL.
+`FANRING_WAKE_OUT`. It measures both a blocked receiver woken by a send and a
+blocked sender woken by a receive on capacity-one channels. All benchmarks
+append machine-readable JSONL.
 
 Short smoke run:
 
@@ -132,6 +144,12 @@ FANRING_BENCH_OUT=target/fanring-bench/focused.jsonl \
 cargo bench --bench comparison
 ```
 
+Saturated occupancy run:
+
+```sh
+FANRING_BENCH_PROFILE=saturated cargo bench --bench comparison
+```
+
 ## Charts
 
 Generate an SVG from the latest benchmark run:
@@ -140,7 +158,7 @@ Generate an SVG from the latest benchmark run:
 cargo run --features charts --bin fanring-chart
 ```
 
-Default output: `doc/charts/mpsc.svg`.
+Default output: `doc/charts/throughput-mpsc.svg`.
 
 The chart tool selects the latest complete nonblocking run, aggregates samples
 by median, and shows relative median absolute deviation below each throughput
@@ -153,7 +171,17 @@ MPSC and MPMC runs:
 cargo run --features charts --bin fanring-chart -- --summary
 ```
 
-Default output: `doc/charts/summary.svg`.
+Default output: `doc/charts/throughput-summary.svg`.
+
+Generate blocking wake-latency charts from the latest complete run:
+
+```sh
+cargo run --features charts --bin fanring-chart -- --latency mpsc
+cargo run --features charts --bin fanring-chart -- --latency mpmc
+```
+
+Default outputs: `doc/charts/latency-mpsc.svg` and
+`doc/charts/latency-mpmc.svg`.
 
 Chart subtitles use the ignored `.chart_hw` file in the repository root:
 
@@ -170,15 +198,21 @@ Custom paths:
 ```sh
 cargo run --features charts --bin fanring-chart -- \
   --input target/fanring-bench/results.jsonl \
-  --output doc/charts/mpsc.svg
+  --output doc/charts/throughput-mpsc.svg
 
 cargo run --features charts --bin fanring-chart -- \
   --input target/fanring-bench/mpmc.jsonl \
-  --output doc/charts/mpmc.svg
+  --output doc/charts/throughput-mpmc.svg
 
 cargo run --features charts --bin fanring-chart -- \
   --summary \
   --mpsc-input target/fanring-bench/results.jsonl \
   --mpmc-input target/fanring-bench/mpmc.jsonl \
-  --output doc/charts/summary.svg
+  --output doc/charts/throughput-summary.svg
+
+cargo run --features charts --bin fanring-chart -- \
+  --latency mpsc \
+  --input target/fanring-bench/wake-latency.jsonl \
+  --run RUN_ID \
+  --output doc/charts/latency-mpsc.svg
 ```
