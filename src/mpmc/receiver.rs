@@ -112,6 +112,9 @@ impl<T> Receiver<T> {
     }
 
     fn pop_work(&mut self) -> WorkPop<T> {
+        // Clone publishes all private work before adding a receiver. After a
+        // 2-to-1 transition, private is therefore empty and local/orphaned work
+        // is observed before this receiver can stage another private batch.
         if let Some(value) = self.private.get_mut().pop_front() {
             return WorkPop::Item(value);
         }

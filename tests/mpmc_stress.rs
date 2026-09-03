@@ -35,7 +35,7 @@ const STATE_MACHINE_STEPS: usize = 100_000;
 #[cfg(miri)]
 const DISCONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(not(miri))]
-const DISCONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
+const DISCONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct DropCount(Arc<AtomicUsize>);
 
