@@ -71,6 +71,30 @@ impl BlockingReceiver for crossbeam_channel::Receiver<u64> {
     }
 }
 
+impl BlockingSender for crossfire::MTx<crossfire::mpsc::Array<u64>> {
+    fn send(&mut self, value: u64) -> bool {
+        crossfire::BlockingTxTrait::send(self, value).is_ok()
+    }
+}
+
+impl BlockingReceiver for crossfire::Rx<crossfire::mpsc::Array<u64>> {
+    fn recv(&mut self) -> Option<u64> {
+        crossfire::BlockingRxTrait::recv(self).ok()
+    }
+}
+
+impl BlockingSender for crossfire::MTx<crossfire::mpmc::Array<u64>> {
+    fn send(&mut self, value: u64) -> bool {
+        crossfire::BlockingTxTrait::send(self, value).is_ok()
+    }
+}
+
+impl BlockingReceiver for crossfire::MRx<crossfire::mpmc::Array<u64>> {
+    fn recv(&mut self) -> Option<u64> {
+        crossfire::BlockingRxTrait::recv(self).ok()
+    }
+}
+
 impl BlockingSender for flume::Sender<u64> {
     fn send(&mut self, value: u64) -> bool {
         flume::Sender::send(self, value).is_ok()
@@ -112,6 +136,7 @@ fn main() {}
 
 #[cfg(not(all(test, debug_assertions)))]
 fn main() {
+    crossfire::detect_backoff_cfg();
     let rounds = env_usize("FANRING_WAKE_ROUNDS", 10_000);
     let warmup = env_usize("FANRING_WAKE_WARMUP", 200);
     let settle = Duration::from_nanos(env_u64("FANRING_WAKE_SETTLE_NS", 50_000));
@@ -183,6 +208,32 @@ fn main() {
             settle_mode,
             &mut out,
             || crossbeam_channel::bounded(1),
+        );
+    }
+    if filter.matches("crossfire") {
+        run_implementation(
+            &run_id,
+            &cpu,
+            "crossfire",
+            rounds,
+            warmup,
+            settle,
+            settle_mode,
+            &mut out,
+            || crossfire::mpsc::bounded_blocking(1),
+        );
+    }
+    if filter.matches("crossfire-mpmc") {
+        run_implementation(
+            &run_id,
+            &cpu,
+            "crossfire-mpmc",
+            rounds,
+            warmup,
+            settle,
+            settle_mode,
+            &mut out,
+            || crossfire::mpmc::bounded_blocking(1),
         );
     }
     if filter.matches("flume") {

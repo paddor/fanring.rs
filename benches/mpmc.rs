@@ -114,6 +114,7 @@ fn main() {}
 
 #[cfg(not(all(test, debug_assertions)))]
 fn main() {
+    crossfire::detect_backoff_cfg();
     let duration = Duration::from_secs_f64(
         std::env::var("FANRING_BENCH_SECS")
             .ok()
@@ -252,6 +253,9 @@ fn run_payload<T>(
     if impl_filter.matches("crossbeam-channel") {
         implementations.push(("crossbeam-channel", bench_crossbeam::<T>));
     }
+    if impl_filter.matches("crossfire-mpmc") {
+        implementations.push(("crossfire-mpmc", bench_crossfire::<T>));
+    }
     if impl_filter.matches("flume") {
         implementations.push(("flume", bench_flume::<T>));
     }
@@ -350,6 +354,26 @@ where
     run_channel(
         context,
         "crossbeam-channel",
+        config,
+        mode,
+        payload,
+        senders,
+        receivers,
+    )
+}
+
+fn bench_crossfire<T>(context: &RunContext, config: Config, mode: Mode, payload: Payload<T>) -> Row
+where
+    T: Copy + Send + 'static,
+{
+    let (tx, rx) = crossfire::mpmc::bounded_blocking(config.total_capacity());
+    let senders = clones(&tx, config.producers);
+    let receivers = clones(&rx, config.consumers);
+    drop(tx);
+    drop(rx);
+    run_channel(
+        context,
+        "crossfire-mpmc",
         config,
         mode,
         payload,
@@ -773,6 +797,44 @@ where
     }
 }
 
+impl<T> BenchSender<T> for crossfire::MTx<crossfire::mpmc::Array<T>>
+where
+    T: Send + 'static,
+{
+    #[inline(always)]
+    fn try_send(&mut self, value: T) -> SendAttempt {
+        match crossfire::BlockingTxTrait::try_send(self, value) {
+            Ok(()) => SendAttempt::Sent,
+            Err(crossfire::TrySendError::Full(_)) => SendAttempt::Full,
+            Err(crossfire::TrySendError::Disconnected(_)) => SendAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn send(&mut self, value: T) -> bool {
+        crossfire::BlockingTxTrait::send(self, value).is_ok()
+    }
+}
+
+impl<T> BenchReceiver<T> for crossfire::MRx<crossfire::mpmc::Array<T>>
+where
+    T: Send + 'static,
+{
+    #[inline(always)]
+    fn try_recv(&mut self) -> RecvAttempt<T> {
+        match crossfire::BlockingRxTrait::try_recv(self) {
+            Ok(value) => RecvAttempt::Item(value),
+            Err(crossfire::TryRecvError::Empty) => RecvAttempt::Empty,
+            Err(crossfire::TryRecvError::Disconnected) => RecvAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn recv(&mut self) -> Option<T> {
+        crossfire::BlockingRxTrait::recv(self).ok()
+    }
+}
+
 impl<T> BenchSender<T> for flume::Sender<T>
 where
     T: Send + 'static,
@@ -931,10 +993,16 @@ fn selected_payload_count(filter: &Filter) -> usize {
 }
 
 fn selected_implementation_count(filter: &Filter) -> usize {
-    ["fanring-mpmc", "crossbeam-channel", "flume", "kanal"]
-        .into_iter()
-        .filter(|implementation| filter.matches(implementation))
-        .count()
+    [
+        "fanring-mpmc",
+        "crossbeam-channel",
+        "crossfire-mpmc",
+        "flume",
+        "kanal",
+    ]
+    .into_iter()
+    .filter(|implementation| filter.matches(implementation))
+    .count()
 }
 
 fn counts_from_env(name: &str, default: &[usize]) -> Vec<usize> {

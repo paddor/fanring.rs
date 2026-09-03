@@ -91,6 +91,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
 
 [[package]]
+name = "crossfire"
+version = "3.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "111ce8f7abfbac38b4bc4f32a3a2dda1a8034b873c90c7899f302cc9dbbc05ec"
+dependencies = [
+ "crossbeam-utils",
+ "futures-core",
+ "parking_lot",
+ "pointers",
+ "smallvec",
+]
+
+[[package]]
 name = "fanring"
 version = "0.3.0"
 dependencies = [
@@ -98,6 +111,7 @@ dependencies = [
  "concurrent-queue",
  "core_affinity",
  "crossbeam-channel",
+ "crossfire",
  "flume",
  "kanal",
  "loom",
@@ -391,6 +405,12 @@ checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
 dependencies = [
  "plotters-backend",
 ]
+
+[[package]]
+name = "pointers"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5dcdc93847ad24990939cce6e1804361e903efcb5f99daa5abd87943a9d6d7ba"
 
 [[package]]
 name = "proc-macro2"

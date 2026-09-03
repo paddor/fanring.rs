@@ -119,6 +119,7 @@ fn main() {}
 
 #[cfg(not(all(test, debug_assertions)))]
 fn main() {
+    crossfire::detect_backoff_cfg();
     let duration = Duration::from_secs_f64(
         std::env::var("FANRING_BENCH_SECS")
             .ok()
@@ -249,6 +250,9 @@ fn run_payload<T>(
     if impl_filter.matches("crossbeam-channel") {
         implementations.push(("crossbeam-channel", bench_crossbeam_channel::<T>));
     }
+    if impl_filter.matches("crossfire") {
+        implementations.push(("crossfire", bench_crossfire::<T>));
+    }
     if impl_filter.matches("flume") {
         implementations.push(("flume", bench_flume::<T>));
     }
@@ -353,6 +357,16 @@ where
         senders,
         rx,
     )
+}
+
+fn bench_crossfire<T>(context: &RunContext, config: Config, mode: Mode, payload: Payload<T>) -> Row
+where
+    T: Copy + Send + 'static,
+{
+    let (tx, rx) = crossfire::mpsc::bounded_blocking(config.total_capacity());
+    let senders = clones(&tx, config.producers);
+    drop(tx);
+    run_channel(context, "crossfire", config, mode, payload, senders, rx)
 }
 
 fn bench_flume<T>(context: &RunContext, config: Config, mode: Mode, payload: Payload<T>) -> Row
@@ -725,6 +739,38 @@ impl<T> BenchReceiver<T> for crossbeam_channel::Receiver<T> {
     }
 }
 
+impl<T: Send + 'static> BenchSender<T> for crossfire::MTx<crossfire::mpsc::Array<T>> {
+    #[inline(always)]
+    fn try_send(&mut self, value: T) -> SendAttempt {
+        match crossfire::BlockingTxTrait::try_send(self, value) {
+            Ok(()) => SendAttempt::Sent,
+            Err(crossfire::TrySendError::Full(_)) => SendAttempt::Full,
+            Err(crossfire::TrySendError::Disconnected(_)) => SendAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn send(&mut self, value: T) -> bool {
+        crossfire::BlockingTxTrait::send(self, value).is_ok()
+    }
+}
+
+impl<T: Send + 'static> BenchReceiver<T> for crossfire::Rx<crossfire::mpsc::Array<T>> {
+    #[inline(always)]
+    fn try_recv(&mut self) -> RecvAttempt<T> {
+        match crossfire::BlockingRxTrait::try_recv(self) {
+            Ok(value) => RecvAttempt::Item(value),
+            Err(crossfire::TryRecvError::Empty) => RecvAttempt::Empty,
+            Err(crossfire::TryRecvError::Disconnected) => RecvAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn recv(&mut self) -> Option<T> {
+        crossfire::BlockingRxTrait::recv(self).ok()
+    }
+}
+
 impl<T: Send + 'static> BenchSender<T> for flume::Sender<T> {
     #[inline(always)]
     fn try_send(&mut self, value: T) -> SendAttempt {
@@ -999,6 +1045,7 @@ fn selected_implementation_count(filter: &Filter, mode: Mode) -> usize {
     [
         ("fanring", true),
         ("crossbeam-channel", true),
+        ("crossfire", true),
         ("flume", true),
         ("kanal", true),
         ("concurrent-queue", mode == Mode::Try),
