@@ -155,7 +155,7 @@ FANRING_BENCH_PROFILE=saturated cargo bench --bench comparison
 Generate an SVG from the latest benchmark run:
 
 ```sh
-cargo run --features charts --bin fanring-chart
+cargo run --example fanring-chart
 ```
 
 Default output: `doc/charts/throughput-mpsc.svg`.
@@ -168,7 +168,7 @@ Generate the two-topology summary chart from the latest complete nonblocking
 MPSC and MPMC runs:
 
 ```sh
-cargo run --features charts --bin fanring-chart -- --summary
+cargo run --example fanring-chart -- --summary
 ```
 
 Default output: `doc/charts/throughput-summary.svg`.
@@ -176,8 +176,8 @@ Default output: `doc/charts/throughput-summary.svg`.
 Generate blocking wake-latency charts from the latest complete run:
 
 ```sh
-cargo run --features charts --bin fanring-chart -- --latency mpsc
-cargo run --features charts --bin fanring-chart -- --latency mpmc
+cargo run --example fanring-chart -- --latency mpsc
+cargo run --example fanring-chart -- --latency mpmc
 ```
 
 Default outputs: `doc/charts/latency-mpsc.svg` and
@@ -196,21 +196,21 @@ postfix=6 physical cores / 12 threads, performance governor, turbo off
 Custom paths:
 
 ```sh
-cargo run --features charts --bin fanring-chart -- \
+cargo run --example fanring-chart -- \
   --input target/fanring-bench/results.jsonl \
   --output doc/charts/throughput-mpsc.svg
 
-cargo run --features charts --bin fanring-chart -- \
+cargo run --example fanring-chart -- \
   --input target/fanring-bench/mpmc.jsonl \
   --output doc/charts/throughput-mpmc.svg
 
-cargo run --features charts --bin fanring-chart -- \
+cargo run --example fanring-chart -- \
   --summary \
   --mpsc-input target/fanring-bench/results.jsonl \
   --mpmc-input target/fanring-bench/mpmc.jsonl \
   --output doc/charts/throughput-summary.svg
 
-cargo run --features charts --bin fanring-chart -- \
+cargo run --example fanring-chart -- \
   --latency mpsc \
   --input target/fanring-bench/wake-latency.jsonl \
   --run RUN_ID \
