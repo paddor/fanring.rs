@@ -2,10 +2,7 @@
 
 mod support;
 
-use std::fs;
 use std::hint::black_box;
-use std::io::Write;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -13,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use support::{Affinity, Sampling, Saturation, append_jsonl, median_and_relative_mad};
+use support::{Affinity, JsonlResults, Sampling, Saturation, median_and_relative_mad};
 
 #[derive(Debug, Clone, Copy)]
 struct Config {
@@ -127,9 +124,7 @@ fn main() {
             .unwrap_or(1.0),
     );
     let sampling = Sampling::from_env();
-    let out_path = std::env::var_os("FANRING_BENCH_OUT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target/fanring-bench/results.jsonl"));
+    let mut results = JsonlResults::new("throughput-mpsc.jsonl");
     let payload_filter = Filter::from_env("FANRING_BENCH_PAYLOADS");
     let impl_filter = Filter::from_env("FANRING_BENCH_IMPLS");
     let mode = Mode::from_env();
@@ -148,13 +143,8 @@ fn main() {
         affinity: Affinity::from_env(),
     };
 
-    if let Some(parent) = out_path.parent() {
-        fs::create_dir_all(parent).expect("create benchmark output dir");
-    }
-    let mut out = append_jsonl(&out_path);
-
     println!(
-        "MPSC {} comparison ({}, {} x {:.2}s, {:.2}s warmup, capacity {} items, affinity {}, output {})\n",
+        "MPSC {} comparison ({}, {} x {:.2}s, {:.2}s warmup, capacity {} items, affinity {}, results {})\n",
         profile.label(),
         mode.label(),
         sampling.samples,
@@ -162,7 +152,7 @@ fn main() {
         sampling.warmup.as_secs_f64(),
         total_capacity(),
         context.affinity.description(),
-        out_path.display()
+        results.root().display()
     );
 
     let total_capacity = total_capacity();
@@ -187,7 +177,7 @@ fn main() {
     if payload_filter.matches("u64") {
         run_payload(
             &context,
-            &mut out,
+            &mut results,
             &configs,
             &impl_filter,
             sampling,
@@ -201,7 +191,7 @@ fn main() {
     if payload_filter.matches("bytes64") {
         run_payload(
             &context,
-            &mut out,
+            &mut results,
             &configs,
             &impl_filter,
             sampling,
@@ -215,7 +205,7 @@ fn main() {
     if payload_filter.matches("bytes256") {
         run_payload(
             &context,
-            &mut out,
+            &mut results,
             &configs,
             &impl_filter,
             sampling,
@@ -227,12 +217,12 @@ fn main() {
         );
     }
 
-    out.flush().expect("flush benchmark JSONL");
+    results.flush();
 }
 
 fn run_payload<T>(
     context: &RunContext,
-    out: &mut impl Write,
+    results: &mut JsonlResults,
     configs: &[Config],
     impl_filter: &Filter,
     sampling: Sampling,
@@ -300,8 +290,7 @@ fn run_payload<T>(
                     row.implementation,
                     row.items_per_sec / 1_000_000.0
                 );
-                serde_json::to_writer(&mut *out, &row).expect("write benchmark row");
-                writeln!(out).expect("write benchmark newline");
+                results.write(row.implementation, &row);
                 rows.push(row);
             }
         }

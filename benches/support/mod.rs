@@ -1,15 +1,23 @@
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use serde::Serialize;
+
 const LOW_WATERMARK_PERCENT: usize = 50;
 const HIGH_WATERMARK_PERCENT: usize = 100;
 const SPINS_BEFORE_YIELD: usize = 64;
+
+pub(crate) struct JsonlResults {
+    root: PathBuf,
+    file_name: &'static str,
+    writers: BTreeMap<String, BufWriter<File>>,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Sampling {
@@ -42,6 +50,65 @@ pub(crate) struct FullSignal {
     full_generation: Counters,
     index: usize,
     acknowledged: u64,
+}
+
+impl JsonlResults {
+    pub(crate) fn new(file_name: &'static str) -> Self {
+        Self {
+            root: results_root(),
+            file_name,
+            writers: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub(crate) fn write<T: Serialize>(&mut self, implementation: &str, row: &T) {
+        let directory = implementation_directory(implementation);
+        let path = result_path(&self.root, implementation, self.file_name);
+        let writer = self
+            .writers
+            .entry(directory.to_string())
+            .or_insert_with(|| {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).expect("create benchmark result directory");
+                }
+                append_jsonl(&path)
+            });
+        serde_json::to_writer(&mut *writer, row).expect("write benchmark row");
+        writeln!(writer).expect("write benchmark newline");
+    }
+
+    pub(crate) fn flush(&mut self) {
+        for writer in self.writers.values_mut() {
+            writer.flush().expect("flush benchmark JSONL");
+        }
+    }
+}
+
+fn implementation_directory(implementation: &str) -> &str {
+    implementation
+        .strip_suffix("-mpmc")
+        .unwrap_or(implementation)
+}
+
+fn result_path(root: &Path, implementation: &str, file_name: &str) -> PathBuf {
+    root.join(implementation_directory(implementation))
+        .join(file_name)
+}
+
+fn results_root() -> PathBuf {
+    std::env::var_os("FANRING_BENCH_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(
+                std::env::var_os("HOME")
+                    .expect("HOME must be set unless FANRING_BENCH_CACHE_DIR is set"),
+            )
+            .join(".cache/fanring")
+        })
 }
 
 impl Saturation {
@@ -236,7 +303,7 @@ impl Sampling {
     }
 }
 
-pub(crate) fn append_jsonl(path: &Path) -> BufWriter<File> {
+fn append_jsonl(path: &Path) -> BufWriter<File> {
     let mut file = OpenOptions::new()
         .create(true)
         .read(true)
@@ -309,8 +376,10 @@ fn env_f64(name: &str, default: f64) -> f64 {
 }
 
 #[cfg(test)]
-mod affinity_tests {
-    use super::sibling_major;
+mod tests {
+    use std::path::Path;
+
+    use super::{result_path, sibling_major};
     use core_affinity::CoreId;
 
     fn six_smt_cores() -> Vec<Vec<CoreId>> {
@@ -327,5 +396,17 @@ mod affinity_tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ids, (0..12).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn result_path_uses_topology_file_in_implementation_directory() {
+        assert_eq!(
+            result_path(
+                Path::new("/cache/fanring"),
+                "crossfire-mpmc",
+                "throughput-mpmc.jsonl"
+            ),
+            Path::new("/cache/fanring/crossfire/throughput-mpmc.jsonl")
+        );
     }
 }
