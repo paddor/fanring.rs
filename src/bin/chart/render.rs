@@ -27,7 +27,7 @@ pub(super) fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
     let payloads: Vec<String> = payloads.into_iter().map(|(payload, _)| payload).collect();
     let is_mpmc = rows.iter().any(|row| row.consumers.is_some());
     let width: u32 = if is_mpmc { 1440 } else { 1024 };
-    let section_h: u32 = 236;
+    let section_h: u32 = if is_mpmc { 236 } else { 261 };
     let header_h: u32 = 58;
     let footer_h: u32 = 24;
     let payload_count = u32::try_from(payloads.len()).expect("payload count fits u32");
@@ -187,7 +187,7 @@ fn draw_mpsc_heatmap(
         }
     }
 
-    draw_separator(area, y + 235, width)?;
+    draw_separator(area, y + 260, width)?;
     Ok(())
 }
 
