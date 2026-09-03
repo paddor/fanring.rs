@@ -46,6 +46,49 @@ fn receiver_drop_preserves_prefetched_work() {
 }
 
 #[test]
+fn returning_to_one_receiver_drains_staged_work_before_new_lanes() {
+    let (mut old_tx, mut survivor) = channel(128);
+    for value in 0..64 {
+        old_tx.try_send(value).unwrap();
+    }
+    assert_eq!(survivor.try_recv(), Ok(0));
+
+    let other = survivor.clone();
+    drop(other);
+
+    let mut hot_tx = old_tx.try_clone().unwrap();
+    for value in 64..128 {
+        hot_tx.try_send(value).unwrap();
+    }
+
+    for value in 1..64 {
+        assert_eq!(survivor.try_recv(), Ok(value));
+    }
+}
+
+#[test]
+fn receiver_drop_handoff_precedes_new_private_staging() {
+    let (mut old_tx, mut dropped) = channel(128);
+    let mut survivor = dropped.clone();
+    for value in 0..64 {
+        old_tx.try_send(value).unwrap();
+    }
+    assert_eq!(dropped.try_recv(), Ok(0));
+    drop(dropped);
+
+    let mut hot_tx = old_tx.try_clone().unwrap();
+    for value in 64..128 {
+        hot_tx.try_send(value).unwrap();
+    }
+
+    let mut received = (0..63)
+        .map(|_| survivor.try_recv().unwrap())
+        .collect::<Vec<_>>();
+    received.sort_unstable();
+    assert_eq!(received, (1..64).collect::<Vec<_>>());
+}
+
+#[test]
 fn last_receiver_drop_disconnects_senders() {
     let (mut tx, rx0) = channel(1);
     let rx1 = rx0.clone();

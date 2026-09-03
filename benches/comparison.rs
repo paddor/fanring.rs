@@ -13,13 +13,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use support::{Sampling, append_jsonl, median_and_relative_mad};
+use support::{Affinity, Sampling, Saturation, append_jsonl, median_and_relative_mad};
 
 #[derive(Debug, Clone, Copy)]
 struct Config {
     producers: usize,
     capacity_per_sender: usize,
     duration: Duration,
+    profile: Profile,
     sample: usize,
     samples: usize,
     expected_rows: usize,
@@ -31,10 +32,17 @@ enum Mode {
     Blocking,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Profile {
+    Uncontrolled,
+    Saturated,
+}
+
 #[derive(Debug)]
 struct RunContext {
     run_id: String,
     cpu: String,
+    affinity: Affinity,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -52,6 +60,7 @@ struct Filter {
 struct Row {
     run_id: String,
     cpu: String,
+    affinity: String,
     mode: &'static str,
     implementation: &'static str,
     payload: &'static str,
@@ -60,6 +69,9 @@ struct Row {
     capacity_per_sender: usize,
     nominal_capacity: usize,
     capacity_model: &'static str,
+    throughput_profile: &'static str,
+    low_watermark: u64,
+    high_watermark: u64,
     seconds: f64,
     items: u64,
     items_per_sec: f64,
@@ -69,6 +81,36 @@ struct Row {
 }
 
 const TIME_CHECK_INTERVAL: u64 = 1024;
+enum SendAttempt {
+    Sent,
+    Full,
+    Disconnected,
+}
+
+enum RecvAttempt<T> {
+    Item(T),
+    Empty,
+    Disconnected,
+}
+
+trait BenchSender<T>: Send + 'static {
+    fn try_send(&mut self, value: T) -> SendAttempt;
+    fn send(&mut self, value: T) -> bool;
+}
+
+trait BenchReceiver<T> {
+    fn try_recv(&mut self) -> RecvAttempt<T>;
+    fn recv(&mut self) -> Option<T>;
+    fn close_for_drain(&mut self) {}
+}
+
+struct ConcurrentSender<T>(Arc<concurrent_queue::ConcurrentQueue<T>>);
+struct ConcurrentReceiver<T>(Arc<concurrent_queue::ConcurrentQueue<T>>);
+
+struct Outcome {
+    elapsed: Duration,
+    items: u64,
+}
 
 // Cargo sets `cfg(test)` for bench targets. Keep `cargo test --all-targets`
 // from running the full benchmark, while normal optimized `cargo bench` runs.
@@ -90,6 +132,11 @@ fn main() {
     let payload_filter = Filter::from_env("FANRING_BENCH_PAYLOADS");
     let impl_filter = Filter::from_env("FANRING_BENCH_IMPLS");
     let mode = Mode::from_env();
+    let profile = Profile::from_env();
+    assert!(
+        mode == Mode::Try || profile == Profile::Uncontrolled,
+        "saturated profile requires nonblocking mode"
+    );
     let context = RunContext {
         run_id: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -97,6 +144,7 @@ fn main() {
             .as_nanos()
             .to_string(),
         cpu: cpu_name(),
+        affinity: Affinity::from_env(),
     };
 
     if let Some(parent) = out_path.parent() {
@@ -105,12 +153,14 @@ fn main() {
     let mut out = append_jsonl(&out_path);
 
     println!(
-        "MPSC comparison ({}, {} x {:.2}s, {:.2}s warmup, capacity {} items, output {})\n",
+        "MPSC {} comparison ({}, {} x {:.2}s, {:.2}s warmup, capacity {} items, affinity {}, output {})\n",
+        profile.label(),
         mode.label(),
         sampling.samples,
         duration.as_secs_f64(),
         sampling.warmup.as_secs_f64(),
         total_capacity(),
+        context.affinity.description(),
         out_path.display()
     );
 
@@ -126,6 +176,7 @@ fn main() {
             producers,
             capacity_per_sender: capacity_per_sender(total_capacity, producers),
             duration,
+            profile,
             sample: 0,
             samples: sampling.samples,
             expected_rows,
@@ -272,82 +323,13 @@ fn bench_fanring<T>(context: &RunContext, config: Config, mode: Mode, payload: P
 where
     T: Copy + Send + 'static,
 {
-    let stop = Arc::new(AtomicBool::new(false));
-    let (tx0, mut rx) = fanring::mpsc::channel::<T>(config.capacity_per_sender);
+    let (tx0, rx) = fanring::mpsc::channel::<T>(config.capacity_per_sender);
     let mut senders = vec![tx0];
     for _ in 1..config.producers {
         let tx = senders[0].try_clone().expect("fanring sender slot");
         senders.push(tx);
     }
-
-    let barrier = Arc::new(Barrier::new(config.producers + 1));
-    let mut handles = Vec::with_capacity(config.producers);
-    for mut tx in senders {
-        let stop = stop.clone();
-        let barrier = barrier.clone();
-        let value = payload.value;
-        handles.push(thread::spawn(move || {
-            barrier.wait();
-            let mut sent = 0u64;
-            while !stop.load(Ordering::Relaxed) {
-                match mode {
-                    Mode::Try => match tx.try_send(value) {
-                        Ok(()) => sent += 1,
-                        Err(fanring::mpsc::TrySendError::Full(_)) => thread::yield_now(),
-                        Err(fanring::mpsc::TrySendError::Disconnected(_)) => break,
-                    },
-                    Mode::Blocking => {
-                        if tx.send(value).is_err() {
-                            break;
-                        }
-                        sent += 1;
-                    }
-                }
-            }
-            sent
-        }));
-    }
-
-    barrier.wait();
-    let start = Instant::now();
-    let deadline = start + config.duration;
-    let mut messages = 0u64;
-    let mut polls = 0u64;
-    while !reached_deadline(polls, deadline) {
-        polls = polls.wrapping_add(1);
-        match mode {
-            Mode::Try => match rx.try_recv() {
-                Ok(value) => {
-                    black_box(value);
-                    messages += 1;
-                }
-                Err(
-                    fanring::mpsc::TryRecvError::Empty | fanring::mpsc::TryRecvError::Disconnected,
-                ) => {
-                    thread::yield_now();
-                }
-            },
-            Mode::Blocking => match rx.recv() {
-                Ok(value) => {
-                    black_box(value);
-                    messages += 1;
-                }
-                Err(_) => break,
-            },
-        }
-    }
-    stop.store(true, Ordering::Relaxed);
-    while let Ok(value) = rx.recv() {
-        black_box(value);
-        messages += 1;
-    }
-    let sent = handles
-        .into_iter()
-        .map(|handle| handle.join().expect("fanring producer thread"))
-        .sum::<u64>();
-    let elapsed = start.elapsed();
-    assert_eq!(sent, messages, "fanring lost messages");
-    row(context, "fanring", mode, payload, config, elapsed, messages)
+    run_channel(context, "fanring", config, mode, payload, senders, rx)
 }
 
 fn bench_crossbeam_channel<T>(
@@ -359,78 +341,17 @@ fn bench_crossbeam_channel<T>(
 where
     T: Copy + Send + 'static,
 {
-    let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = crossbeam_channel::bounded::<T>(config.total_capacity());
-
-    let barrier = Arc::new(Barrier::new(config.producers + 1));
-    let mut handles = Vec::with_capacity(config.producers);
-    for _ in 0..config.producers {
-        let tx = tx.clone();
-        let stop = stop.clone();
-        let barrier = barrier.clone();
-        let value = payload.value;
-        handles.push(thread::spawn(move || {
-            barrier.wait();
-            let mut sent = 0u64;
-            while !stop.load(Ordering::Relaxed) {
-                match mode {
-                    Mode::Try => match tx.try_send(value) {
-                        Ok(()) => sent += 1,
-                        Err(crossbeam_channel::TrySendError::Full(_)) => thread::yield_now(),
-                        Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,
-                    },
-                    Mode::Blocking => {
-                        if tx.send(value).is_err() {
-                            break;
-                        }
-                        sent += 1;
-                    }
-                }
-            }
-            sent
-        }));
-    }
+    let senders = clones(&tx, config.producers);
     drop(tx);
-
-    barrier.wait();
-    let start = Instant::now();
-    let deadline = start + config.duration;
-    let mut messages = 0u64;
-    let mut polls = 0u64;
-    while !reached_deadline(polls, deadline) {
-        polls = polls.wrapping_add(1);
-        let result = match mode {
-            Mode::Try => rx.try_recv().ok(),
-            Mode::Blocking => rx.recv().ok(),
-        };
-        if let Some(value) = result {
-            black_box(value);
-            messages += 1;
-        } else if mode == Mode::Try {
-            thread::yield_now();
-        } else {
-            break;
-        }
-    }
-    stop.store(true, Ordering::Relaxed);
-    while let Ok(value) = rx.recv() {
-        black_box(value);
-        messages += 1;
-    }
-    let sent = handles
-        .into_iter()
-        .map(|handle| handle.join().expect("crossbeam producer thread"))
-        .sum::<u64>();
-    let elapsed = start.elapsed();
-    assert_eq!(sent, messages, "crossbeam-channel lost messages");
-    row(
+    run_channel(
         context,
         "crossbeam-channel",
+        config,
         mode,
         payload,
-        config,
-        elapsed,
-        messages,
+        senders,
+        rx,
     )
 }
 
@@ -438,141 +359,20 @@ fn bench_flume<T>(context: &RunContext, config: Config, mode: Mode, payload: Pay
 where
     T: Copy + Send + 'static,
 {
-    let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = flume::bounded::<T>(config.total_capacity());
-
-    let barrier = Arc::new(Barrier::new(config.producers + 1));
-    let mut handles = Vec::with_capacity(config.producers);
-    for _ in 0..config.producers {
-        let tx = tx.clone();
-        let stop = stop.clone();
-        let barrier = barrier.clone();
-        let value = payload.value;
-        handles.push(thread::spawn(move || {
-            barrier.wait();
-            let mut sent = 0u64;
-            while !stop.load(Ordering::Relaxed) {
-                match mode {
-                    Mode::Try => match tx.try_send(value) {
-                        Ok(()) => sent += 1,
-                        Err(flume::TrySendError::Full(_)) => thread::yield_now(),
-                        Err(flume::TrySendError::Disconnected(_)) => break,
-                    },
-                    Mode::Blocking => {
-                        if tx.send(value).is_err() {
-                            break;
-                        }
-                        sent += 1;
-                    }
-                }
-            }
-            sent
-        }));
-    }
+    let senders = clones(&tx, config.producers);
     drop(tx);
-
-    barrier.wait();
-    let start = Instant::now();
-    let deadline = start + config.duration;
-    let mut messages = 0u64;
-    let mut polls = 0u64;
-    while !reached_deadline(polls, deadline) {
-        polls = polls.wrapping_add(1);
-        let result = match mode {
-            Mode::Try => rx.try_recv().ok(),
-            Mode::Blocking => rx.recv().ok(),
-        };
-        if let Some(value) = result {
-            black_box(value);
-            messages += 1;
-        } else if mode == Mode::Try {
-            thread::yield_now();
-        } else {
-            break;
-        }
-    }
-    stop.store(true, Ordering::Relaxed);
-    while let Ok(value) = rx.recv() {
-        black_box(value);
-        messages += 1;
-    }
-    let sent = handles
-        .into_iter()
-        .map(|handle| handle.join().expect("flume producer thread"))
-        .sum::<u64>();
-    let elapsed = start.elapsed();
-    assert_eq!(sent, messages, "flume lost messages");
-    row(context, "flume", mode, payload, config, elapsed, messages)
+    run_channel(context, "flume", config, mode, payload, senders, rx)
 }
 
 fn bench_kanal<T>(context: &RunContext, config: Config, mode: Mode, payload: Payload<T>) -> Row
 where
     T: Copy + Send + 'static,
 {
-    let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = kanal::bounded::<T>(config.total_capacity());
-
-    let barrier = Arc::new(Barrier::new(config.producers + 1));
-    let mut handles = Vec::with_capacity(config.producers);
-    for _ in 0..config.producers {
-        let tx = tx.clone();
-        let stop = stop.clone();
-        let barrier = barrier.clone();
-        let value = payload.value;
-        handles.push(thread::spawn(move || {
-            barrier.wait();
-            let mut sent = 0u64;
-            while !stop.load(Ordering::Relaxed) {
-                match mode {
-                    Mode::Try => match tx.try_send(value) {
-                        Ok(true) => sent += 1,
-                        Ok(false) | Err(_) => thread::yield_now(),
-                    },
-                    Mode::Blocking => {
-                        if tx.send(value).is_err() {
-                            break;
-                        }
-                        sent += 1;
-                    }
-                }
-            }
-            sent
-        }));
-    }
+    let senders = clones(&tx, config.producers);
     drop(tx);
-
-    barrier.wait();
-    let start = Instant::now();
-    let deadline = start + config.duration;
-    let mut messages = 0u64;
-    let mut polls = 0u64;
-    while !reached_deadline(polls, deadline) {
-        polls = polls.wrapping_add(1);
-        let result = match mode {
-            Mode::Try => rx.try_recv().ok().flatten(),
-            Mode::Blocking => rx.recv().ok(),
-        };
-        if let Some(value) = result {
-            black_box(value);
-            messages += 1;
-        } else if mode == Mode::Try {
-            thread::yield_now();
-        } else {
-            break;
-        }
-    }
-    stop.store(true, Ordering::Relaxed);
-    while let Ok(value) = rx.recv() {
-        black_box(value);
-        messages += 1;
-    }
-    let sent = handles
-        .into_iter()
-        .map(|handle| handle.join().expect("kanal producer thread"))
-        .sum::<u64>();
-    let elapsed = start.elapsed();
-    assert_eq!(sent, messages, "kanal lost messages");
-    row(context, "kanal", mode, payload, config, elapsed, messages)
+    run_channel(context, "kanal", config, mode, payload, senders, rx)
 }
 
 fn bench_concurrent_queue<T>(
@@ -584,65 +384,20 @@ fn bench_concurrent_queue<T>(
 where
     T: Copy + Send + 'static,
 {
-    let stop = Arc::new(AtomicBool::new(false));
     let queue = Arc::new(concurrent_queue::ConcurrentQueue::bounded(
         config.total_capacity(),
     ));
-
-    let barrier = Arc::new(Barrier::new(config.producers + 1));
-    let mut handles = Vec::with_capacity(config.producers);
-    for _ in 0..config.producers {
-        let queue = queue.clone();
-        let stop = stop.clone();
-        let barrier = barrier.clone();
-        let value = payload.value;
-        handles.push(thread::spawn(move || {
-            barrier.wait();
-            let mut sent = 0u64;
-            while !stop.load(Ordering::Relaxed) {
-                match queue.push(value) {
-                    Ok(()) => sent += 1,
-                    Err(_) => thread::yield_now(),
-                }
-            }
-            sent
-        }));
-    }
-
-    barrier.wait();
-    let start = Instant::now();
-    let deadline = start + config.duration;
-    let mut messages = 0u64;
-    let mut polls = 0u64;
-    while !reached_deadline(polls, deadline) {
-        polls = polls.wrapping_add(1);
-        match queue.pop() {
-            Ok(value) => {
-                black_box(value);
-                messages += 1;
-            }
-            Err(_) => thread::yield_now(),
-        }
-    }
-    stop.store(true, Ordering::Relaxed);
-    let sent = handles
-        .into_iter()
-        .map(|handle| handle.join().expect("concurrent-queue producer thread"))
-        .sum::<u64>();
-    while let Ok(value) = queue.pop() {
-        black_box(value);
-        messages += 1;
-    }
-    let elapsed = start.elapsed();
-    assert_eq!(sent, messages, "concurrent-queue lost messages");
-    row(
+    let senders = (0..config.producers)
+        .map(|_| ConcurrentSender(queue.clone()))
+        .collect();
+    run_channel(
         context,
         "concurrent-queue",
+        config,
         mode,
         payload,
-        config,
-        elapsed,
-        messages,
+        senders,
+        ConcurrentReceiver(queue),
     )
 }
 
@@ -650,39 +405,191 @@ fn bench_thingbuf<T>(context: &RunContext, config: Config, mode: Mode, payload: 
 where
     T: Copy + Default + Send + Sync + 'static,
 {
-    let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = thingbuf::mpsc::blocking::channel::<T>(config.total_capacity());
+    let senders = clones(&tx, config.producers);
+    drop(tx);
+    run_channel(context, "thingbuf", config, mode, payload, senders, rx)
+}
 
+fn run_channel<T, S, R>(
+    context: &RunContext,
+    implementation: &'static str,
+    config: Config,
+    mode: Mode,
+    payload: Payload<T>,
+    senders: Vec<S>,
+    receiver: R,
+) -> Row
+where
+    T: Copy + Send + 'static,
+    S: BenchSender<T>,
+    R: BenchReceiver<T>,
+{
+    match config.profile {
+        Profile::Saturated => {
+            run_saturated_channel(context, implementation, config, payload, senders, receiver)
+        }
+        Profile::Uncontrolled => run_uncontrolled_channel(
+            context,
+            implementation,
+            config,
+            mode,
+            payload,
+            senders,
+            receiver,
+        ),
+    }
+}
+
+fn run_saturated_channel<T, S, R>(
+    context: &RunContext,
+    implementation: &'static str,
+    config: Config,
+    payload: Payload<T>,
+    senders: Vec<S>,
+    mut receiver: R,
+) -> Row
+where
+    T: Copy + Send + 'static,
+    S: BenchSender<T>,
+    R: BenchReceiver<T>,
+{
+    let stop = Arc::new(AtomicBool::new(false));
+    let saturation = Saturation::new(config.producers, config.total_capacity());
     let barrier = Arc::new(Barrier::new(config.producers + 1));
     let mut handles = Vec::with_capacity(config.producers);
-    for _ in 0..config.producers {
-        let tx = tx.clone();
+
+    for (index, mut sender) in senders.into_iter().enumerate() {
         let stop = stop.clone();
         let barrier = barrier.clone();
+        let affinity = context.affinity.clone();
         let value = payload.value;
+        let mut full = saturation.producer(index);
         handles.push(thread::spawn(move || {
+            affinity.pin(index + 1);
             barrier.wait();
             let mut sent = 0u64;
             while !stop.load(Ordering::Relaxed) {
-                match mode {
-                    Mode::Try => match tx.try_send(value) {
-                        Ok(()) => sent += 1,
-                        Err(thingbuf::mpsc::errors::TrySendError::Full(_)) => thread::yield_now(),
-                        Err(_) => break,
-                    },
-                    Mode::Blocking => {
-                        if tx.send(value).is_err() {
-                            break;
-                        }
-                        sent += 1;
+                match sender.try_send(value) {
+                    SendAttempt::Sent => sent += 1,
+                    SendAttempt::Full => {
+                        full.mark_full();
+                        thread::yield_now();
                     }
+                    SendAttempt::Disconnected => break,
                 }
             }
             sent
         }));
     }
-    drop(tx);
 
+    context.affinity.pin(0);
+    barrier.wait();
+    assert!(saturation.wait_until_full(None));
+    let start = Instant::now();
+    let deadline = start + config.duration;
+    let mut messages = 0u64;
+    let burst_size = usize::try_from(saturation.high_watermark() - saturation.low_watermark())
+        .expect("benchmark capacity fits usize");
+    let mut remaining = burst_size;
+    loop {
+        match receiver.try_recv() {
+            RecvAttempt::Item(value) => {
+                black_box(value);
+                messages += 1;
+                remaining -= 1;
+                if remaining == 0 {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    saturation.advance();
+                    assert!(saturation.wait_until_full(None));
+                    remaining = burst_size;
+                }
+            }
+            RecvAttempt::Empty => thread::yield_now(),
+            RecvAttempt::Disconnected => break,
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+
+    let sent = join_counts(handles, implementation);
+    receiver.close_for_drain();
+    loop {
+        match receiver.try_recv() {
+            RecvAttempt::Item(value) => {
+                black_box(value);
+                messages += 1;
+            }
+            RecvAttempt::Empty => thread::yield_now(),
+            RecvAttempt::Disconnected => break,
+        }
+    }
+
+    let elapsed = start.elapsed();
+    assert_eq!(sent, messages, "{implementation} lost messages");
+    row(
+        context,
+        implementation,
+        Mode::Try,
+        payload,
+        config,
+        Outcome {
+            elapsed,
+            items: messages,
+        },
+        Some(&saturation),
+    )
+}
+
+fn run_uncontrolled_channel<T, S, R>(
+    context: &RunContext,
+    implementation: &'static str,
+    config: Config,
+    mode: Mode,
+    payload: Payload<T>,
+    senders: Vec<S>,
+    mut receiver: R,
+) -> Row
+where
+    T: Copy + Send + 'static,
+    S: BenchSender<T>,
+    R: BenchReceiver<T>,
+{
+    let stop = Arc::new(AtomicBool::new(false));
+    let barrier = Arc::new(Barrier::new(config.producers + 1));
+    let mut handles = Vec::with_capacity(config.producers);
+    for (index, mut sender) in senders.into_iter().enumerate() {
+        let stop = stop.clone();
+        let barrier = barrier.clone();
+        let affinity = context.affinity.clone();
+        let value = payload.value;
+        handles.push(thread::spawn(move || {
+            affinity.pin(index + 1);
+            barrier.wait();
+            let mut sent = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                let attempt = match mode {
+                    Mode::Try => sender.try_send(value),
+                    Mode::Blocking => {
+                        if sender.send(value) {
+                            SendAttempt::Sent
+                        } else {
+                            SendAttempt::Disconnected
+                        }
+                    }
+                };
+                match attempt {
+                    SendAttempt::Sent => sent += 1,
+                    SendAttempt::Full => thread::yield_now(),
+                    SendAttempt::Disconnected => break,
+                }
+            }
+            sent
+        }));
+    }
+
+    context.affinity.pin(0);
     barrier.wait();
     let start = Instant::now();
     let deadline = start + config.duration;
@@ -690,33 +597,268 @@ where
     let mut polls = 0u64;
     while !reached_deadline(polls, deadline) {
         polls = polls.wrapping_add(1);
-        let result = match mode {
-            Mode::Try => rx.try_recv().ok(),
-            Mode::Blocking => rx.recv(),
+        let attempt = match mode {
+            Mode::Try => receiver.try_recv(),
+            Mode::Blocking => receiver
+                .recv()
+                .map_or(RecvAttempt::Disconnected, RecvAttempt::Item),
         };
-        if let Some(value) = result {
-            black_box(value);
-            messages += 1;
-        } else if mode == Mode::Try {
-            thread::yield_now();
-        } else {
-            break;
+        match attempt {
+            RecvAttempt::Item(value) => {
+                black_box(value);
+                messages += 1;
+            }
+            RecvAttempt::Empty => thread::yield_now(),
+            RecvAttempt::Disconnected => break,
         }
     }
     stop.store(true, Ordering::Relaxed);
-    while let Some(value) = rx.recv() {
-        black_box(value);
-        messages += 1;
-    }
-    let sent = handles
-        .into_iter()
-        .map(|handle| handle.join().expect("thingbuf producer thread"))
-        .sum::<u64>();
+    let sent = if mode == Mode::Blocking {
+        while let Some(value) = receiver.recv() {
+            black_box(value);
+            messages += 1;
+        }
+        join_counts(handles, implementation)
+    } else {
+        let sent = join_counts(handles, implementation);
+        receiver.close_for_drain();
+        loop {
+            match receiver.try_recv() {
+                RecvAttempt::Item(value) => {
+                    black_box(value);
+                    messages += 1;
+                }
+                RecvAttempt::Empty => thread::yield_now(),
+                RecvAttempt::Disconnected => break,
+            }
+        }
+        sent
+    };
     let elapsed = start.elapsed();
-    assert_eq!(sent, messages, "thingbuf lost messages");
+    assert_eq!(sent, messages, "{implementation} lost messages");
     row(
-        context, "thingbuf", mode, payload, config, elapsed, messages,
+        context,
+        implementation,
+        mode,
+        payload,
+        config,
+        Outcome {
+            elapsed,
+            items: messages,
+        },
+        None,
     )
+}
+
+fn join_counts(handles: Vec<thread::JoinHandle<u64>>, implementation: &str) -> u64 {
+    handles
+        .into_iter()
+        .map(|handle| {
+            handle
+                .join()
+                .unwrap_or_else(|_| panic!("{implementation} producer thread panicked"))
+        })
+        .sum()
+}
+
+impl<T: Send + 'static> BenchSender<T> for fanring::mpsc::Sender<T> {
+    #[inline(always)]
+    fn try_send(&mut self, value: T) -> SendAttempt {
+        match self.try_send(value) {
+            Ok(()) => SendAttempt::Sent,
+            Err(fanring::mpsc::TrySendError::Full(_)) => SendAttempt::Full,
+            Err(fanring::mpsc::TrySendError::Disconnected(_)) => SendAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn send(&mut self, value: T) -> bool {
+        self.send(value).is_ok()
+    }
+}
+
+impl<T> BenchReceiver<T> for fanring::mpsc::Receiver<T> {
+    #[inline(always)]
+    fn try_recv(&mut self) -> RecvAttempt<T> {
+        match self.try_recv() {
+            Ok(value) => RecvAttempt::Item(value),
+            Err(fanring::mpsc::TryRecvError::Empty) => RecvAttempt::Empty,
+            Err(fanring::mpsc::TryRecvError::Disconnected) => RecvAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn recv(&mut self) -> Option<T> {
+        self.recv().ok()
+    }
+}
+
+impl<T: Send + 'static> BenchSender<T> for crossbeam_channel::Sender<T> {
+    #[inline(always)]
+    fn try_send(&mut self, value: T) -> SendAttempt {
+        match crossbeam_channel::Sender::try_send(self, value) {
+            Ok(()) => SendAttempt::Sent,
+            Err(crossbeam_channel::TrySendError::Full(_)) => SendAttempt::Full,
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => SendAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn send(&mut self, value: T) -> bool {
+        crossbeam_channel::Sender::send(self, value).is_ok()
+    }
+}
+
+impl<T> BenchReceiver<T> for crossbeam_channel::Receiver<T> {
+    #[inline(always)]
+    fn try_recv(&mut self) -> RecvAttempt<T> {
+        match crossbeam_channel::Receiver::try_recv(self) {
+            Ok(value) => RecvAttempt::Item(value),
+            Err(crossbeam_channel::TryRecvError::Empty) => RecvAttempt::Empty,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => RecvAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn recv(&mut self) -> Option<T> {
+        crossbeam_channel::Receiver::recv(self).ok()
+    }
+}
+
+impl<T: Send + 'static> BenchSender<T> for flume::Sender<T> {
+    #[inline(always)]
+    fn try_send(&mut self, value: T) -> SendAttempt {
+        match flume::Sender::try_send(self, value) {
+            Ok(()) => SendAttempt::Sent,
+            Err(flume::TrySendError::Full(_)) => SendAttempt::Full,
+            Err(flume::TrySendError::Disconnected(_)) => SendAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn send(&mut self, value: T) -> bool {
+        flume::Sender::send(self, value).is_ok()
+    }
+}
+
+impl<T> BenchReceiver<T> for flume::Receiver<T> {
+    #[inline(always)]
+    fn try_recv(&mut self) -> RecvAttempt<T> {
+        match flume::Receiver::try_recv(self) {
+            Ok(value) => RecvAttempt::Item(value),
+            Err(flume::TryRecvError::Empty) => RecvAttempt::Empty,
+            Err(flume::TryRecvError::Disconnected) => RecvAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn recv(&mut self) -> Option<T> {
+        flume::Receiver::recv(self).ok()
+    }
+}
+
+impl<T: Send + 'static> BenchSender<T> for kanal::Sender<T> {
+    #[inline(always)]
+    fn try_send(&mut self, value: T) -> SendAttempt {
+        match kanal::Sender::try_send(self, value) {
+            Ok(true) => SendAttempt::Sent,
+            Ok(false) => SendAttempt::Full,
+            Err(_) => SendAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn send(&mut self, value: T) -> bool {
+        kanal::Sender::send(self, value).is_ok()
+    }
+}
+
+impl<T> BenchReceiver<T> for kanal::Receiver<T> {
+    #[inline(always)]
+    fn try_recv(&mut self) -> RecvAttempt<T> {
+        match kanal::Receiver::try_recv(self) {
+            Ok(Some(value)) => RecvAttempt::Item(value),
+            Ok(None) => RecvAttempt::Empty,
+            Err(_) => RecvAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn recv(&mut self) -> Option<T> {
+        kanal::Receiver::recv(self).ok()
+    }
+}
+
+impl<T: Send + 'static> BenchSender<T> for ConcurrentSender<T> {
+    #[inline(always)]
+    fn try_send(&mut self, value: T) -> SendAttempt {
+        match self.0.push(value) {
+            Ok(()) => SendAttempt::Sent,
+            Err(concurrent_queue::PushError::Full(_)) => SendAttempt::Full,
+            Err(concurrent_queue::PushError::Closed(_)) => SendAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn send(&mut self, _value: T) -> bool {
+        unreachable!("concurrent-queue has no blocking benchmark")
+    }
+}
+
+impl<T> BenchReceiver<T> for ConcurrentReceiver<T> {
+    #[inline(always)]
+    fn try_recv(&mut self) -> RecvAttempt<T> {
+        match self.0.pop() {
+            Ok(value) => RecvAttempt::Item(value),
+            Err(concurrent_queue::PopError::Empty) => RecvAttempt::Empty,
+            Err(concurrent_queue::PopError::Closed) => RecvAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn recv(&mut self) -> Option<T> {
+        unreachable!("concurrent-queue has no blocking benchmark")
+    }
+
+    fn close_for_drain(&mut self) {
+        self.0.close();
+    }
+}
+
+impl<T: Copy + Default + Send + Sync + 'static> BenchSender<T>
+    for thingbuf::mpsc::blocking::Sender<T>
+{
+    #[inline(always)]
+    fn try_send(&mut self, value: T) -> SendAttempt {
+        match thingbuf::mpsc::blocking::Sender::try_send(self, value) {
+            Ok(()) => SendAttempt::Sent,
+            Err(thingbuf::mpsc::errors::TrySendError::Full(_)) => SendAttempt::Full,
+            Err(thingbuf::mpsc::errors::TrySendError::Closed(_)) => SendAttempt::Disconnected,
+            Err(_) => SendAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn send(&mut self, value: T) -> bool {
+        thingbuf::mpsc::blocking::Sender::send(self, value).is_ok()
+    }
+}
+
+impl<T: Clone + Default> BenchReceiver<T> for thingbuf::mpsc::blocking::Receiver<T> {
+    #[inline(always)]
+    fn try_recv(&mut self) -> RecvAttempt<T> {
+        match thingbuf::mpsc::blocking::Receiver::try_recv(self) {
+            Ok(value) => RecvAttempt::Item(value),
+            Err(thingbuf::mpsc::errors::TryRecvError::Empty) => RecvAttempt::Empty,
+            Err(thingbuf::mpsc::errors::TryRecvError::Closed) => RecvAttempt::Disconnected,
+            Err(_) => RecvAttempt::Disconnected,
+        }
+    }
+
+    #[inline(always)]
+    fn recv(&mut self) -> Option<T> {
+        thingbuf::mpsc::blocking::Receiver::recv(self)
+    }
 }
 
 fn row<T>(
@@ -725,12 +867,21 @@ fn row<T>(
     mode: Mode,
     payload: Payload<T>,
     config: Config,
-    elapsed: Duration,
-    items: u64,
+    outcome: Outcome,
+    saturation: Option<&Saturation>,
 ) -> Row {
+    let (throughput_profile, low_watermark, high_watermark) =
+        saturation.map_or(("uncontrolled", 0, 0), |saturation| {
+            (
+                "saturated",
+                saturation.low_watermark(),
+                saturation.high_watermark(),
+            )
+        });
     Row {
         run_id: context.run_id.clone(),
         cpu: context.cpu.clone(),
+        affinity: context.affinity.description().to_string(),
         mode: mode.label(),
         implementation,
         payload: payload.label,
@@ -743,13 +894,20 @@ fn row<T>(
         } else {
             "shared-bound"
         },
-        seconds: elapsed.as_secs_f64(),
-        items,
-        items_per_sec: items as f64 / elapsed.as_secs_f64(),
+        throughput_profile,
+        low_watermark,
+        high_watermark,
+        seconds: outcome.elapsed.as_secs_f64(),
+        items: outcome.items,
+        items_per_sec: outcome.items as f64 / outcome.elapsed.as_secs_f64(),
         sample: config.sample,
         samples: config.samples,
         expected_rows: config.expected_rows,
     }
+}
+
+fn clones<T: Clone>(value: &T, count: usize) -> Vec<T> {
+    (0..count).map(|_| value.clone()).collect()
 }
 
 impl Config {
@@ -771,6 +929,25 @@ impl Mode {
         match self {
             Self::Try => "try",
             Self::Blocking => "blocking",
+        }
+    }
+}
+
+impl Profile {
+    fn from_env() -> Self {
+        match std::env::var("FANRING_BENCH_PROFILE").as_deref() {
+            Ok("saturated") => Self::Saturated,
+            Ok("uncontrolled") | Err(_) => Self::Uncontrolled,
+            Ok(value) => {
+                panic!("invalid benchmark profile {value:?}; expected uncontrolled or saturated")
+            }
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Uncontrolled => "uncontrolled",
+            Self::Saturated => "saturated, 50-100% occupancy",
         }
     }
 }

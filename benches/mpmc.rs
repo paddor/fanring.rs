@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use support::{Sampling, append_jsonl, median_and_relative_mad};
+use support::{Affinity, Sampling, Saturation, append_jsonl, median_and_relative_mad};
 
 #[derive(Debug, Clone, Copy)]
 struct Config {
@@ -21,6 +21,7 @@ struct Config {
     consumers: usize,
     capacity_per_sender: usize,
     duration: Duration,
+    profile: Profile,
     sample: usize,
     samples: usize,
     expected_rows: usize,
@@ -30,6 +31,12 @@ struct Config {
 enum Mode {
     Try,
     Blocking,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Profile {
+    Uncontrolled,
+    Saturated,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -47,12 +54,14 @@ struct Filter {
 struct RunContext {
     run_id: String,
     cpu: String,
+    affinity: Affinity,
 }
 
 #[derive(Debug, Serialize)]
 struct Row {
     run_id: String,
     cpu: String,
+    affinity: String,
     mode: &'static str,
     implementation: &'static str,
     payload: &'static str,
@@ -62,6 +71,9 @@ struct Row {
     capacity_per_sender: usize,
     nominal_capacity: usize,
     capacity_model: &'static str,
+    throughput_profile: &'static str,
+    low_watermark: u64,
+    high_watermark: u64,
     seconds: f64,
     items: u64,
     items_per_sec: f64,
@@ -92,6 +104,11 @@ trait BenchReceiver<T>: Send + 'static {
     fn recv(&mut self) -> Option<T>;
 }
 
+struct Outcome {
+    elapsed: Duration,
+    items: u64,
+}
+
 #[cfg(all(test, debug_assertions))]
 fn main() {}
 
@@ -111,6 +128,11 @@ fn main() {
     let payload_filter = Filter::from_env("FANRING_BENCH_PAYLOADS");
     let impl_filter = Filter::from_env("FANRING_BENCH_IMPLS");
     let mode = Mode::from_env();
+    let profile = Profile::from_env();
+    assert!(
+        mode == Mode::Try || profile == Profile::Uncontrolled,
+        "saturated profile requires nonblocking mode"
+    );
     let context = RunContext {
         run_id: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -118,6 +140,7 @@ fn main() {
             .as_nanos()
             .to_string(),
         cpu: cpu_name(),
+        affinity: Affinity::from_env(),
     };
 
     if let Some(parent) = out_path.parent() {
@@ -126,12 +149,14 @@ fn main() {
     let mut out = append_jsonl(&out_path);
 
     println!(
-        "MPMC comparison ({}, {} x {:.2}s, {:.2}s warmup, capacity {}, output {})\n",
+        "MPMC {} comparison ({}, {} x {:.2}s, {:.2}s warmup, capacity {}, affinity {}, output {})\n",
+        profile.label(),
         mode.label(),
         sampling.samples,
         duration.as_secs_f64(),
         sampling.warmup.as_secs_f64(),
         total_capacity,
+        context.affinity.description(),
         out_path.display()
     );
 
@@ -153,6 +178,7 @@ fn main() {
                     consumers,
                     capacity_per_sender: capacity_per_sender(total_capacity, producers),
                     duration,
+                    profile,
                     sample: 0,
                     samples: sampling.samples,
                     expected_rows,
@@ -370,69 +396,131 @@ where
     S: BenchSender<T>,
     R: BenchReceiver<T>,
 {
+    match config.profile {
+        Profile::Saturated => {
+            run_saturated_channel(context, implementation, config, payload, senders, receivers)
+        }
+        Profile::Uncontrolled => run_uncontrolled_channel(
+            context,
+            implementation,
+            config,
+            mode,
+            payload,
+            senders,
+            receivers,
+        ),
+    }
+}
+
+fn run_saturated_channel<T, S, R>(
+    context: &RunContext,
+    implementation: &'static str,
+    config: Config,
+    payload: Payload<T>,
+    senders: Vec<S>,
+    receivers: Vec<R>,
+) -> Row
+where
+    T: Copy + Send + 'static,
+    S: BenchSender<T>,
+    R: BenchReceiver<T>,
+{
     let stop = Arc::new(AtomicBool::new(false));
+    let saturation = Saturation::new(config.producers, config.total_capacity());
     let barrier = Arc::new(Barrier::new(config.producers + config.consumers + 1));
+    let start_consuming = Arc::new(Barrier::new(config.consumers + 1));
+    let phase_barrier = Arc::new(Barrier::new(config.consumers));
     let mut sender_handles = Vec::with_capacity(config.producers);
     let mut receiver_handles = Vec::with_capacity(config.consumers);
 
-    for mut sender in senders {
+    for (index, mut sender) in senders.into_iter().enumerate() {
         let stop = stop.clone();
         let barrier = barrier.clone();
+        let affinity = context.affinity.clone();
         let value = payload.value;
+        let mut full = saturation.producer(index);
         sender_handles.push(thread::spawn(move || {
+            affinity.pin(config.consumers + index);
             barrier.wait();
             let mut sent = 0u64;
             while !stop.load(Ordering::Relaxed) {
-                match mode {
-                    Mode::Try => match sender.try_send(value) {
-                        SendAttempt::Sent => sent += 1,
-                        SendAttempt::Full => thread::yield_now(),
-                        SendAttempt::Disconnected => break,
-                    },
-                    Mode::Blocking => {
-                        if !sender.send(value) {
-                            break;
-                        }
-                        sent += 1;
+                match sender.try_send(value) {
+                    SendAttempt::Sent => sent += 1,
+                    SendAttempt::Full => {
+                        full.mark_full();
+                        thread::yield_now();
                     }
+                    SendAttempt::Disconnected => break,
                 }
             }
             sent
         }));
     }
 
-    for mut receiver in receivers {
+    let burst_size = usize::try_from(saturation.high_watermark() - saturation.low_watermark())
+        .expect("benchmark capacity fits usize");
+    assert!(
+        burst_size >= config.consumers,
+        "saturated burst must cover every consumer"
+    );
+    for (index, mut receiver) in receivers.into_iter().enumerate() {
+        let stop = stop.clone();
         let barrier = barrier.clone();
+        let start_consuming = start_consuming.clone();
+        let phase_barrier = phase_barrier.clone();
+        let saturation = saturation.clone();
+        let affinity = context.affinity.clone();
         receiver_handles.push(thread::spawn(move || {
+            affinity.pin(index);
             barrier.wait();
+            start_consuming.wait();
+            let deadline = Instant::now() + config.duration;
             let mut received = 0u64;
+            let mut remaining =
+                burst_size / config.consumers + usize::from(index < burst_size % config.consumers);
+            let mut measuring = true;
             loop {
-                match mode {
-                    Mode::Try => match receiver.try_recv() {
-                        RecvAttempt::Item(value) => {
-                            black_box(value);
-                            received += 1;
+                match receiver.try_recv() {
+                    RecvAttempt::Item(value) => {
+                        black_box(value);
+                        received += 1;
+                        if measuring {
+                            remaining -= 1;
                         }
-                        RecvAttempt::Empty => thread::yield_now(),
-                        RecvAttempt::Disconnected => break,
-                    },
-                    Mode::Blocking => match receiver.recv() {
-                        Some(value) => {
-                            black_box(value);
-                            received += 1;
-                        }
-                        None => break,
-                    },
+                    }
+                    RecvAttempt::Empty => thread::yield_now(),
+                    RecvAttempt::Disconnected => break,
                 }
+                if !measuring || remaining != 0 {
+                    continue;
+                }
+
+                let leader = phase_barrier.wait().is_leader();
+                if leader {
+                    if Instant::now() >= deadline {
+                        stop.store(true, Ordering::Relaxed);
+                    } else {
+                        saturation.advance();
+                    }
+                }
+                phase_barrier.wait();
+                if stop.load(Ordering::Relaxed) {
+                    measuring = false;
+                    continue;
+                }
+                assert!(saturation.wait_until_full(Some(&stop)));
+                phase_barrier.wait();
+                remaining = burst_size / config.consumers
+                    + usize::from(index < burst_size % config.consumers);
             }
             received
         }));
     }
 
     barrier.wait();
+    assert!(saturation.wait_until_full(None));
     let start = Instant::now();
-    thread::sleep(config.duration);
-    stop.store(true, Ordering::Relaxed);
+    start_consuming.wait();
 
     let sent = sender_handles
         .into_iter()
@@ -445,9 +533,145 @@ where
     let elapsed = start.elapsed();
     assert_eq!(sent, received, "{implementation} lost messages");
 
+    row(
+        context,
+        implementation,
+        Mode::Try,
+        payload,
+        config,
+        Outcome {
+            elapsed,
+            items: received,
+        },
+        Some(&saturation),
+    )
+}
+
+fn run_uncontrolled_channel<T, S, R>(
+    context: &RunContext,
+    implementation: &'static str,
+    config: Config,
+    mode: Mode,
+    payload: Payload<T>,
+    senders: Vec<S>,
+    receivers: Vec<R>,
+) -> Row
+where
+    T: Copy + Send + 'static,
+    S: BenchSender<T>,
+    R: BenchReceiver<T>,
+{
+    let stop = Arc::new(AtomicBool::new(false));
+    let barrier = Arc::new(Barrier::new(config.producers + config.consumers + 1));
+    let mut sender_handles = Vec::with_capacity(config.producers);
+    let mut receiver_handles = Vec::with_capacity(config.consumers);
+    for (index, mut sender) in senders.into_iter().enumerate() {
+        let stop = stop.clone();
+        let barrier = barrier.clone();
+        let affinity = context.affinity.clone();
+        let value = payload.value;
+        sender_handles.push(thread::spawn(move || {
+            affinity.pin(config.consumers + index);
+            barrier.wait();
+            let mut sent = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                let attempt = match mode {
+                    Mode::Try => sender.try_send(value),
+                    Mode::Blocking => {
+                        if sender.send(value) {
+                            SendAttempt::Sent
+                        } else {
+                            SendAttempt::Disconnected
+                        }
+                    }
+                };
+                match attempt {
+                    SendAttempt::Sent => sent += 1,
+                    SendAttempt::Full => thread::yield_now(),
+                    SendAttempt::Disconnected => break,
+                }
+            }
+            sent
+        }));
+    }
+    for (index, mut receiver) in receivers.into_iter().enumerate() {
+        let barrier = barrier.clone();
+        let affinity = context.affinity.clone();
+        receiver_handles.push(thread::spawn(move || {
+            affinity.pin(index);
+            barrier.wait();
+            let mut received = 0u64;
+            loop {
+                let attempt = match mode {
+                    Mode::Try => receiver.try_recv(),
+                    Mode::Blocking => receiver
+                        .recv()
+                        .map_or(RecvAttempt::Disconnected, RecvAttempt::Item),
+                };
+                match attempt {
+                    RecvAttempt::Item(value) => {
+                        black_box(value);
+                        received += 1;
+                    }
+                    RecvAttempt::Empty => thread::yield_now(),
+                    RecvAttempt::Disconnected => break,
+                }
+            }
+            received
+        }));
+    }
+
+    barrier.wait();
+    let start = Instant::now();
+    thread::sleep(config.duration);
+    stop.store(true, Ordering::Relaxed);
+    let sent = sender_handles
+        .into_iter()
+        .map(|handle| handle.join().expect("producer thread"))
+        .sum::<u64>();
+    let received = receiver_handles
+        .into_iter()
+        .map(|handle| handle.join().expect("consumer thread"))
+        .sum::<u64>();
+    let elapsed = start.elapsed();
+    assert_eq!(sent, received, "{implementation} lost messages");
+
+    row(
+        context,
+        implementation,
+        mode,
+        payload,
+        config,
+        Outcome {
+            elapsed,
+            items: received,
+        },
+        None,
+    )
+}
+
+fn row<T>(
+    context: &RunContext,
+    implementation: &'static str,
+    mode: Mode,
+    payload: Payload<T>,
+    config: Config,
+    outcome: Outcome,
+    saturation: Option<&Saturation>,
+) -> Row {
+    let (throughput_profile, low_watermark, high_watermark) =
+        saturation.map_or(("uncontrolled", 0, 0), |saturation| {
+            (
+                "saturated",
+                saturation.low_watermark(),
+                saturation.high_watermark(),
+            )
+        });
+
     Row {
         run_id: context.run_id.clone(),
         cpu: context.cpu.clone(),
+        affinity: context.affinity.description().to_string(),
         mode: mode.label(),
         implementation,
         payload: payload.label,
@@ -461,9 +685,12 @@ where
         } else {
             "shared-bound"
         },
-        seconds: elapsed.as_secs_f64(),
-        items: received,
-        items_per_sec: received as f64 / elapsed.as_secs_f64(),
+        throughput_profile,
+        low_watermark,
+        high_watermark,
+        seconds: outcome.elapsed.as_secs_f64(),
+        items: outcome.items,
+        items_per_sec: outcome.items as f64 / outcome.elapsed.as_secs_f64(),
         sample: config.sample,
         samples: config.samples,
         expected_rows: config.expected_rows,
@@ -474,6 +701,7 @@ impl<T> BenchSender<T> for fanring::mpmc::Sender<T>
 where
     T: Send + 'static,
 {
+    #[inline(always)]
     fn try_send(&mut self, value: T) -> SendAttempt {
         match self.try_send(value) {
             Ok(()) => SendAttempt::Sent,
@@ -482,6 +710,7 @@ where
         }
     }
 
+    #[inline(always)]
     fn send(&mut self, value: T) -> bool {
         self.send(value).is_ok()
     }
@@ -491,6 +720,7 @@ impl<T> BenchReceiver<T> for fanring::mpmc::Receiver<T>
 where
     T: Send + 'static,
 {
+    #[inline(always)]
     fn try_recv(&mut self) -> RecvAttempt<T> {
         match self.try_recv() {
             Ok(value) => RecvAttempt::Item(value),
@@ -499,6 +729,7 @@ where
         }
     }
 
+    #[inline(always)]
     fn recv(&mut self) -> Option<T> {
         self.recv().ok()
     }
@@ -508,6 +739,7 @@ impl<T> BenchSender<T> for crossbeam_channel::Sender<T>
 where
     T: Send + 'static,
 {
+    #[inline(always)]
     fn try_send(&mut self, value: T) -> SendAttempt {
         match crossbeam_channel::Sender::try_send(self, value) {
             Ok(()) => SendAttempt::Sent,
@@ -516,6 +748,7 @@ where
         }
     }
 
+    #[inline(always)]
     fn send(&mut self, value: T) -> bool {
         crossbeam_channel::Sender::send(self, value).is_ok()
     }
@@ -525,6 +758,7 @@ impl<T> BenchReceiver<T> for crossbeam_channel::Receiver<T>
 where
     T: Send + 'static,
 {
+    #[inline(always)]
     fn try_recv(&mut self) -> RecvAttempt<T> {
         match crossbeam_channel::Receiver::try_recv(self) {
             Ok(value) => RecvAttempt::Item(value),
@@ -533,6 +767,7 @@ where
         }
     }
 
+    #[inline(always)]
     fn recv(&mut self) -> Option<T> {
         crossbeam_channel::Receiver::recv(self).ok()
     }
@@ -542,6 +777,7 @@ impl<T> BenchSender<T> for flume::Sender<T>
 where
     T: Send + 'static,
 {
+    #[inline(always)]
     fn try_send(&mut self, value: T) -> SendAttempt {
         match flume::Sender::try_send(self, value) {
             Ok(()) => SendAttempt::Sent,
@@ -550,6 +786,7 @@ where
         }
     }
 
+    #[inline(always)]
     fn send(&mut self, value: T) -> bool {
         flume::Sender::send(self, value).is_ok()
     }
@@ -559,6 +796,7 @@ impl<T> BenchReceiver<T> for flume::Receiver<T>
 where
     T: Send + 'static,
 {
+    #[inline(always)]
     fn try_recv(&mut self) -> RecvAttempt<T> {
         match flume::Receiver::try_recv(self) {
             Ok(value) => RecvAttempt::Item(value),
@@ -567,6 +805,7 @@ where
         }
     }
 
+    #[inline(always)]
     fn recv(&mut self) -> Option<T> {
         flume::Receiver::recv(self).ok()
     }
@@ -576,6 +815,7 @@ impl<T> BenchSender<T> for kanal::Sender<T>
 where
     T: Send + 'static,
 {
+    #[inline(always)]
     fn try_send(&mut self, value: T) -> SendAttempt {
         match kanal::Sender::try_send(self, value) {
             Ok(true) => SendAttempt::Sent,
@@ -584,6 +824,7 @@ where
         }
     }
 
+    #[inline(always)]
     fn send(&mut self, value: T) -> bool {
         kanal::Sender::send(self, value).is_ok()
     }
@@ -593,6 +834,7 @@ impl<T> BenchReceiver<T> for kanal::Receiver<T>
 where
     T: Send + 'static,
 {
+    #[inline(always)]
     fn try_recv(&mut self) -> RecvAttempt<T> {
         match kanal::Receiver::try_recv(self) {
             Ok(Some(value)) => RecvAttempt::Item(value),
@@ -601,6 +843,7 @@ where
         }
     }
 
+    #[inline(always)]
     fn recv(&mut self) -> Option<T> {
         kanal::Receiver::recv(self).ok()
     }
@@ -625,6 +868,25 @@ impl Mode {
         match self {
             Self::Try => "try",
             Self::Blocking => "blocking",
+        }
+    }
+}
+
+impl Profile {
+    fn from_env() -> Self {
+        match std::env::var("FANRING_BENCH_PROFILE").as_deref() {
+            Ok("saturated") => Self::Saturated,
+            Ok("uncontrolled") | Err(_) => Self::Uncontrolled,
+            Ok(value) => {
+                panic!("invalid benchmark profile {value:?}; expected uncontrolled or saturated")
+            }
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Uncontrolled => "uncontrolled",
+            Self::Saturated => "saturated, 50-100% occupancy",
         }
     }
 }

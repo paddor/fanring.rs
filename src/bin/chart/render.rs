@@ -52,12 +52,19 @@ pub(super) fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
         .color(&MUTED_TEXT_COLOR)
         .pos(Pos::new(HPos::Center, VPos::Center));
 
+    let profile = if rows
+        .first()
+        .is_some_and(|row| row.throughput_profile == "saturated")
+    {
+        "saturated throughput"
+    } else {
+        "throughput"
+    };
     root.draw(&Text::new(
-        if is_mpmc {
-            "fanring MPMC comparison"
-        } else {
-            "fanring MPSC comparison"
-        },
+        format!(
+            "fanring {} {profile} comparison",
+            if is_mpmc { "MPMC" } else { "MPSC" }
+        ),
         (width_i32 / 2, 17),
         title_style,
     ))
@@ -505,11 +512,13 @@ fn chart_subtitle(rows: &[Row]) -> String {
     };
 
     format!(
-        "{}; {} operations; {} samples; nominal capacity {} items",
+        "{}; {}; {} operations; {} samples; nominal capacity {} items; {}",
         chart_hardware(&row.cpu),
+        row.affinity_label(),
         row.mode,
         row.samples,
-        row.nominal_capacity
+        row.nominal_capacity,
+        row.throughput_profile_label()
     )
 }
 
