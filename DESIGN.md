@@ -58,8 +58,8 @@ signal, ready page, and page bit:
 After flushing the yring, every publication atomically swaps the signal to
 `PENDING`. Only an `IDLE`-to-`PENDING` transition sets the lane bit in its ready
 page. A page transition from empty to nonempty sets its bit in a ready group.
-Later publications coalesce into the existing pending lane. The two-level
-bitmaps cover up to 4,096 sender lanes.
+Later publications coalesce into the existing pending lane. Each ready-group
+bitmap summarizes 4,096 sender lanes; the registry adds groups as needed.
 
 At visible empty, the receiver swaps the signal to `IDLE` and then prefetches
 the yring again. A producer that published before the swap synchronizes through
