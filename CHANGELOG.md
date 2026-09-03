@@ -4,13 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-03
+
 ### Changed
 
-- Add an opt-in nonblocking throughput profile that cycles queue occupancy
-  between half and full capacity.
-- Add MPSC and MPMC blocking wake-latency charts.
-- Pin throughput benchmark threads in physical-core-first order and force
-  benchmark channel adapters inline.
+- Limit published packages to crate sources and user-facing documentation.
 
 ## [0.2.1] - 2026-09-02
 
@@ -80,7 +78,8 @@ All notable changes to this project are documented here.
 
 - Initial bounded, nonblocking MPSC implementation with a fixed sender limit.
 
-[Unreleased]: https://github.com/paddor/fanring.rs/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/paddor/fanring.rs/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/paddor/fanring.rs/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/paddor/fanring.rs/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/paddor/fanring.rs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/paddor/fanring.rs/tree/v0.1.0
