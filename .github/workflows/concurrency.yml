@@ -1,0 +1,41 @@
+name: Concurrency checks
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  loom:
+    name: Loom
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Run Loom models
+        env:
+          RUSTFLAGS: --cfg loom
+        run: cargo +stable test --lib --test loom --locked -- --test-threads=1
+
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install nightly Rust and Miri
+        run: rustup toolchain install nightly --profile minimal --component miri
+      - name: Run Miri
+        run: cargo +nightly miri test --all-features --locked -- --test-threads=1
+      - name: Run Miri with Tree Borrows
+        env:
+          MIRIFLAGS: -Zmiri-tree-borrows
+        run: cargo +nightly miri test --all-features --locked -- --test-threads=1

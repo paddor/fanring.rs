@@ -12,6 +12,8 @@ MIRIFLAGS="-Zmiri-tree-borrows" \
   cargo +nightly miri test --all-features -- --test-threads=1
 ```
 
+`.github/workflows/concurrency.yml` runs Loom and both Miri modes every Monday.
+
 The test suite covers per-sender FIFO, per-sender backpressure, disconnect and
 timeout races, drop cleanup, dynamic lane registration and reuse, ready
 page/group boundaries, starvation bounds, MPMC batch stealing and receiver
