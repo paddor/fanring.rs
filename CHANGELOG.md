@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Require yring 0.3.15 to eliminate intermediate ring-pop payload copies.
+
 ## [0.3.0] - 2026-09-03
 
 ### Breaking

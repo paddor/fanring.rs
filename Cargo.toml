@@ -33,7 +33,7 @@ check-cfg = ["cfg(loom)"]
 [dependencies]
 arc-swap = "1.7"
 concurrent-queue = { version = "2.5", features = ["loom"] }
-yring = "0.3.14"
+yring = "0.3.15"
 
 [target.'cfg(all(loom, target_pointer_width = "64"))'.dependencies]
 loom = "0.7"

@@ -764,9 +764,9 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.14"
+version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5955ee60ab48843f30e961ec82771716a733c8ecb6387f2d6fe9de9545ec9cb8"
+checksum = "27ba8401a75c66ab677bab9172bb8f7baa1e96cae3f0c25d7d5658930caffb89"
 dependencies = [
  "loom",
 ]
