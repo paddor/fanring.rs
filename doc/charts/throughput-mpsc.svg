@@ -7,7 +7,7 @@ fanring MPSC throughput comparison
 Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off; all workers pinned, physical cores first; try operations; 5 samples; nominal capacity 8192 items; natural queue occupancy
 </text>
 <text x="512" y="73" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-u64 (8 B); median M items/s (+/- MAD); color scale 0-80; white outline = winner
+u64 (8 B); median M items/s (+/- MAD); color scale 0-100; white outline = winner
 </text>
 <text x="28" y="104" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 implementation
@@ -30,61 +30,63 @@ producer threads
 <text x="28" y="138" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#FACC15">
 fanring
 </text>
-<rect x="186" y="128" width="200" height="21" opacity="1" fill="#5591DB" stroke="none"/>
+<rect x="186" y="128" width="200" height="21" opacity="1" fill="#4E83C6" stroke="none"/>
 <rect x="186" y="128" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
 <text x="286" y="134" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
-67.8
+74.3
 </text>
 <text x="286" y="145" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
-+/-0.5%
++/-2.2%
 </text>
-<rect x="390" y="128" width="200" height="21" opacity="1" fill="#548FD8" stroke="none"/>
+<rect x="390" y="128" width="200" height="21" opacity="1" fill="#5B9DED" stroke="none"/>
+<rect x="390" y="128" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
 <text x="490" y="134" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
-66.6
+93.7
 </text>
 <text x="490" y="145" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
-+/-0.2%
++/-2.3%
 </text>
-<rect x="594" y="128" width="200" height="21" opacity="1" fill="#548FD9" stroke="none"/>
+<rect x="594" y="128" width="200" height="21" opacity="1" fill="#5FA3F7" stroke="none"/>
 <rect x="594" y="128" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
 <text x="694" y="134" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
-66.8
+98.4
 </text>
 <text x="694" y="145" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
-+/-1.5%
++/-0.5%
 </text>
-<rect x="798" y="128" width="200" height="21" opacity="1" fill="#345480" stroke="none"/>
+<rect x="798" y="128" width="200" height="21" opacity="1" fill="#385B89" stroke="none"/>
+<rect x="798" y="128" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
 <text x="898" y="134" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
-31.5
+44.1
 </text>
 <text x="898" y="145" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
-+/-0.0%
++/-0.3%
 </text>
 <text x="28" y="163" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 crossbeam-channel 0.5.16
 </text>
-<rect x="186" y="153" width="200" height="21" opacity="1" fill="#253855" stroke="none"/>
+<rect x="186" y="153" width="200" height="21" opacity="1" fill="#22334D" stroke="none"/>
 <text x="286" y="159" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 14.5
 </text>
 <text x="286" y="170" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.2%
 </text>
-<rect x="390" y="153" width="200" height="21" opacity="1" fill="#355681" stroke="none"/>
+<rect x="390" y="153" width="200" height="21" opacity="1" fill="#2F4B71" stroke="none"/>
 <text x="490" y="159" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 32.2
 </text>
 <text x="490" y="170" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-2.9%
 </text>
-<rect x="594" y="153" width="200" height="21" opacity="1" fill="#273B59" stroke="none"/>
+<rect x="594" y="153" width="200" height="21" opacity="1" fill="#243651" stroke="none"/>
 <text x="694" y="159" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 16.4
 </text>
 <text x="694" y="170" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.3%
 </text>
-<rect x="798" y="153" width="200" height="21" opacity="1" fill="#22334D" stroke="none"/>
+<rect x="798" y="153" width="200" height="21" opacity="1" fill="#202F47" stroke="none"/>
 <text x="898" y="159" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 11.5
 </text>
@@ -94,30 +96,28 @@ crossbeam-channel 0.5.16
 <text x="28" y="188" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 crossfire 3.1.19
 </text>
-<rect x="186" y="178" width="200" height="21" opacity="1" fill="#538DD5" stroke="none"/>
-<text x="286" y="184" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
+<rect x="186" y="178" width="200" height="21" opacity="1" fill="#4777B4" stroke="none"/>
+<text x="286" y="184" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 65.4
 </text>
-<text x="286" y="195" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
+<text x="286" y="195" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.2%
 </text>
-<rect x="390" y="178" width="200" height="21" opacity="1" fill="#548FD9" stroke="none"/>
-<rect x="390" y="178" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
-<text x="490" y="184" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
+<rect x="390" y="178" width="200" height="21" opacity="1" fill="#4879B7" stroke="none"/>
+<text x="490" y="184" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 66.8
 </text>
-<text x="490" y="195" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
+<text x="490" y="195" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.7%
 </text>
-<rect x="594" y="178" width="200" height="21" opacity="1" fill="#314E76" stroke="none"/>
+<rect x="594" y="178" width="200" height="21" opacity="1" fill="#2C4568" stroke="none"/>
 <text x="694" y="184" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 27.6
 </text>
 <text x="694" y="195" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.9%
 </text>
-<rect x="798" y="178" width="200" height="21" opacity="1" fill="#3C6294" stroke="none"/>
-<rect x="798" y="178" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
+<rect x="798" y="178" width="200" height="21" opacity="1" fill="#355580" stroke="none"/>
 <text x="898" y="184" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 39.8
 </text>
@@ -127,28 +127,28 @@ crossfire 3.1.19
 <text x="28" y="213" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 concurrent-queue 2.5.0
 </text>
-<rect x="186" y="203" width="200" height="21" opacity="1" fill="#2C4669" stroke="none"/>
+<rect x="186" y="203" width="200" height="21" opacity="1" fill="#283E5E" stroke="none"/>
 <text x="286" y="209" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 22.7
 </text>
 <text x="286" y="220" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-6.5%
 </text>
-<rect x="390" y="203" width="200" height="21" opacity="1" fill="#23344F" stroke="none"/>
+<rect x="390" y="203" width="200" height="21" opacity="1" fill="#213049" stroke="none"/>
 <text x="490" y="209" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 12.3
 </text>
 <text x="490" y="220" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.4%
 </text>
-<rect x="594" y="203" width="200" height="21" opacity="1" fill="#202E46" stroke="none"/>
+<rect x="594" y="203" width="200" height="21" opacity="1" fill="#1E2C42" stroke="none"/>
 <text x="694" y="209" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 8.7
 </text>
 <text x="694" y="220" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.1%
 </text>
-<rect x="798" y="203" width="200" height="21" opacity="1" fill="#1F2C43" stroke="none"/>
+<rect x="798" y="203" width="200" height="21" opacity="1" fill="#1D2A3F" stroke="none"/>
 <text x="898" y="209" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 7.5
 </text>
@@ -158,28 +158,28 @@ concurrent-queue 2.5.0
 <text x="28" y="238" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 thingbuf 0.1.6
 </text>
-<rect x="186" y="228" width="200" height="21" opacity="1" fill="#2E486D" stroke="none"/>
+<rect x="186" y="228" width="200" height="21" opacity="1" fill="#294061" stroke="none"/>
 <text x="286" y="234" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 24.2
 </text>
 <text x="286" y="245" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.2%
 </text>
-<rect x="390" y="228" width="200" height="21" opacity="1" fill="#202E46" stroke="none"/>
+<rect x="390" y="228" width="200" height="21" opacity="1" fill="#1E2B41" stroke="none"/>
 <text x="490" y="234" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 8.6
 </text>
 <text x="490" y="245" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-1.4%
 </text>
-<rect x="594" y="228" width="200" height="21" opacity="1" fill="#1F2D43" stroke="none"/>
+<rect x="594" y="228" width="200" height="21" opacity="1" fill="#1D2A3F" stroke="none"/>
 <text x="694" y="234" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 7.6
 </text>
 <text x="694" y="245" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.4%
 </text>
-<rect x="798" y="228" width="200" height="21" opacity="1" fill="#1E2B41" stroke="none"/>
+<rect x="798" y="228" width="200" height="21" opacity="1" fill="#1D293E" stroke="none"/>
 <text x="898" y="234" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 6.9
 </text>
@@ -189,28 +189,28 @@ thingbuf 0.1.6
 <text x="28" y="263" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 flume 0.12.0
 </text>
-<rect x="186" y="253" width="200" height="21" opacity="1" fill="#1F2D44" stroke="none"/>
+<rect x="186" y="253" width="200" height="21" opacity="1" fill="#1E2B40" stroke="none"/>
 <text x="286" y="259" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 8.0
 </text>
 <text x="286" y="270" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.0%
 </text>
-<rect x="390" y="253" width="200" height="21" opacity="1" fill="#1E2A40" stroke="none"/>
+<rect x="390" y="253" width="200" height="21" opacity="1" fill="#1D283D" stroke="none"/>
 <text x="490" y="259" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 6.3
 </text>
 <text x="490" y="270" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.7%
 </text>
-<rect x="594" y="253" width="200" height="21" opacity="1" fill="#1C273B" stroke="none"/>
+<rect x="594" y="253" width="200" height="21" opacity="1" fill="#1B2639" stroke="none"/>
 <text x="694" y="259" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 4.3
 </text>
 <text x="694" y="270" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.0%
 </text>
-<rect x="798" y="253" width="200" height="21" opacity="1" fill="#1A2334" stroke="none"/>
+<rect x="798" y="253" width="200" height="21" opacity="1" fill="#192233" stroke="none"/>
 <text x="898" y="259" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 1.7
 </text>
@@ -220,28 +220,28 @@ flume 0.12.0
 <text x="28" y="288" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 kanal 0.1.1
 </text>
-<rect x="186" y="278" width="200" height="21" opacity="1" fill="#416BA2" stroke="none"/>
+<rect x="186" y="278" width="200" height="21" opacity="1" fill="#385C8B" stroke="none"/>
 <text x="286" y="284" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 45.1
 </text>
 <text x="286" y="295" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.5%
 </text>
-<rect x="390" y="278" width="200" height="21" opacity="1" fill="#375A88" stroke="none"/>
+<rect x="390" y="278" width="200" height="21" opacity="1" fill="#314E76" stroke="none"/>
 <text x="490" y="284" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 34.8
 </text>
 <text x="490" y="295" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.7%
 </text>
-<rect x="594" y="278" width="200" height="21" opacity="1" fill="#2B4365" stroke="none"/>
+<rect x="594" y="278" width="200" height="21" opacity="1" fill="#273C5B" stroke="none"/>
 <text x="694" y="284" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 21.1
 </text>
 <text x="694" y="295" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-10.6%
 </text>
-<rect x="798" y="278" width="200" height="21" opacity="1" fill="#202F47" stroke="none"/>
+<rect x="798" y="278" width="200" height="21" opacity="1" fill="#1E2C42" stroke="none"/>
 <text x="898" y="284" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 9.0
 </text>
@@ -250,7 +250,7 @@ kanal 0.1.1
 </text>
 <polyline fill="none" opacity="1" stroke="#374151" stroke-width="1" points="24,318 1000,318 "/>
 <text x="512" y="334" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-bytes64 (64 B); median M items/s (+/- MAD); color scale 0-60; white outline = winner
+bytes64 (64 B); median M items/s (+/- MAD); color scale 0-80; white outline = winner
 </text>
 <text x="28" y="365" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 implementation
@@ -273,59 +273,62 @@ producer threads
 <text x="28" y="399" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#FACC15">
 fanring
 </text>
-<rect x="186" y="389" width="200" height="21" opacity="1" fill="#426EA7" stroke="none"/>
+<rect x="186" y="389" width="200" height="21" opacity="1" fill="#365885" stroke="none"/>
 <text x="286" y="395" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
-35.3
+33.7
 </text>
 <text x="286" y="406" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
-+/-0.0%
++/-0.8%
 </text>
-<rect x="390" y="389" width="200" height="21" opacity="1" fill="#416CA4" stroke="none"/>
-<text x="490" y="395" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
-34.4
+<rect x="390" y="389" width="200" height="21" opacity="1" fill="#548FD9" stroke="none"/>
+<rect x="390" y="389" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
+<text x="490" y="395" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
+66.8
 </text>
-<text x="490" y="406" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
+<text x="490" y="406" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
 +/-0.1%
 </text>
-<rect x="594" y="389" width="200" height="21" opacity="1" fill="#416CA3" stroke="none"/>
-<text x="694" y="395" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
-34.2
+<rect x="594" y="389" width="200" height="21" opacity="1" fill="#538ED7" stroke="none"/>
+<rect x="594" y="389" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
+<text x="694" y="395" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
+66.0
 </text>
-<text x="694" y="406" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
-+/-0.0%
+<text x="694" y="406" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
++/-0.1%
 </text>
-<rect x="798" y="389" width="200" height="21" opacity="1" fill="#304C72" stroke="none"/>
+<rect x="798" y="389" width="200" height="21" opacity="1" fill="#365784" stroke="none"/>
+<rect x="798" y="389" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
 <text x="898" y="395" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
-19.7
+33.1
 </text>
 <text x="898" y="406" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
-+/-0.4%
++/-0.3%
 </text>
 <text x="28" y="424" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 crossbeam-channel 0.5.16
 </text>
-<rect x="186" y="414" width="200" height="21" opacity="1" fill="#4C7FC1" stroke="none"/>
-<text x="286" y="420" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
+<rect x="186" y="414" width="200" height="21" opacity="1" fill="#3F679D" stroke="none"/>
+<text x="286" y="420" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 43.0
 </text>
-<text x="286" y="431" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
+<text x="286" y="431" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.2%
 </text>
-<rect x="390" y="414" width="200" height="21" opacity="1" fill="#395D8C" stroke="none"/>
+<rect x="390" y="414" width="200" height="21" opacity="1" fill="#314E75" stroke="none"/>
 <text x="490" y="420" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 27.4
 </text>
 <text x="490" y="431" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-3.9%
 </text>
-<rect x="594" y="414" width="200" height="21" opacity="1" fill="#243651" stroke="none"/>
+<rect x="594" y="414" width="200" height="21" opacity="1" fill="#213048" stroke="none"/>
 <text x="694" y="420" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 9.7
 </text>
 <text x="694" y="431" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.1%
 </text>
-<rect x="798" y="414" width="200" height="21" opacity="1" fill="#23344E" stroke="none"/>
+<rect x="798" y="414" width="200" height="21" opacity="1" fill="#202F46" stroke="none"/>
 <text x="898" y="420" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 8.9
 </text>
@@ -335,31 +338,28 @@ crossbeam-channel 0.5.16
 <text x="28" y="449" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 crossfire 3.1.19
 </text>
-<rect x="186" y="439" width="200" height="21" opacity="1" fill="#5896E4" stroke="none"/>
-<text x="286" y="445" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
+<rect x="186" y="439" width="200" height="21" opacity="1" fill="#4879B7" stroke="none"/>
+<text x="286" y="445" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 53.5
 </text>
-<text x="286" y="456" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
+<text x="286" y="456" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-2.1%
 </text>
-<rect x="390" y="439" width="200" height="21" opacity="1" fill="#5B9CEC" stroke="none"/>
-<rect x="390" y="439" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
+<rect x="390" y="439" width="200" height="21" opacity="1" fill="#4A7DBD" stroke="none"/>
 <text x="490" y="445" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
 55.8
 </text>
 <text x="490" y="456" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
 +/-1.6%
 </text>
-<rect x="594" y="439" width="200" height="21" opacity="1" fill="#4A7CBB" stroke="none"/>
-<rect x="594" y="439" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
-<text x="694" y="445" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
+<rect x="594" y="439" width="200" height="21" opacity="1" fill="#3D6598" stroke="none"/>
+<text x="694" y="445" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 41.3
 </text>
-<text x="694" y="456" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
+<text x="694" y="456" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-1.9%
 </text>
-<rect x="798" y="439" width="200" height="21" opacity="1" fill="#3D6396" stroke="none"/>
-<rect x="798" y="439" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
+<rect x="798" y="439" width="200" height="21" opacity="1" fill="#33537D" stroke="none"/>
 <text x="898" y="445" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 30.4
 </text>
@@ -369,7 +369,7 @@ crossfire 3.1.19
 <text x="28" y="474" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 concurrent-queue 2.5.0
 </text>
-<rect x="186" y="464" width="200" height="21" opacity="1" fill="#5EA2F6" stroke="none"/>
+<rect x="186" y="464" width="200" height="21" opacity="1" fill="#4D82C4" stroke="none"/>
 <rect x="186" y="464" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
 <text x="286" y="470" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
 58.7
@@ -377,21 +377,21 @@ concurrent-queue 2.5.0
 <text x="286" y="481" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
 +/-0.4%
 </text>
-<rect x="390" y="464" width="200" height="21" opacity="1" fill="#263A58" stroke="none"/>
+<rect x="390" y="464" width="200" height="21" opacity="1" fill="#23344E" stroke="none"/>
 <text x="490" y="470" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 11.8
 </text>
 <text x="490" y="481" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.0%
 </text>
-<rect x="594" y="464" width="200" height="21" opacity="1" fill="#22334C" stroke="none"/>
+<rect x="594" y="464" width="200" height="21" opacity="1" fill="#202E45" stroke="none"/>
 <text x="694" y="470" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 8.4
 </text>
 <text x="694" y="481" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.0%
 </text>
-<rect x="798" y="464" width="200" height="21" opacity="1" fill="#213048" stroke="none"/>
+<rect x="798" y="464" width="200" height="21" opacity="1" fill="#1E2C42" stroke="none"/>
 <text x="898" y="470" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 7.2
 </text>
@@ -401,28 +401,28 @@ concurrent-queue 2.5.0
 <text x="28" y="499" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 thingbuf 0.1.6
 </text>
-<rect x="186" y="489" width="200" height="21" opacity="1" fill="#3D6497" stroke="none"/>
+<rect x="186" y="489" width="200" height="21" opacity="1" fill="#33537D" stroke="none"/>
 <text x="286" y="495" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 30.5
 </text>
 <text x="286" y="506" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.4%
 </text>
-<rect x="390" y="489" width="200" height="21" opacity="1" fill="#213149" stroke="none"/>
+<rect x="390" y="489" width="200" height="21" opacity="1" fill="#1F2C43" stroke="none"/>
 <text x="490" y="495" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 7.5
 </text>
 <text x="490" y="506" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.4%
 </text>
-<rect x="594" y="489" width="200" height="21" opacity="1" fill="#21314A" stroke="none"/>
+<rect x="594" y="489" width="200" height="21" opacity="1" fill="#1F2D44" stroke="none"/>
 <text x="694" y="495" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 7.8
 </text>
 <text x="694" y="506" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-4.2%
 </text>
-<rect x="798" y="489" width="200" height="21" opacity="1" fill="#202F47" stroke="none"/>
+<rect x="798" y="489" width="200" height="21" opacity="1" fill="#1E2B41" stroke="none"/>
 <text x="898" y="495" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 6.9
 </text>
@@ -432,28 +432,28 @@ thingbuf 0.1.6
 <text x="28" y="524" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 flume 0.12.0
 </text>
-<rect x="186" y="514" width="200" height="21" opacity="1" fill="#1E2C42" stroke="none"/>
+<rect x="186" y="514" width="200" height="21" opacity="1" fill="#1D293E" stroke="none"/>
 <text x="286" y="520" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 5.4
 </text>
 <text x="286" y="531" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-1.0%
 </text>
-<rect x="390" y="514" width="200" height="21" opacity="1" fill="#1D293E" stroke="none"/>
+<rect x="390" y="514" width="200" height="21" opacity="1" fill="#1C273A" stroke="none"/>
 <text x="490" y="520" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 4.1
 </text>
 <text x="490" y="531" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-1.8%
 </text>
-<rect x="594" y="514" width="200" height="21" opacity="1" fill="#1B2639" stroke="none"/>
+<rect x="594" y="514" width="200" height="21" opacity="1" fill="#1B2537" stroke="none"/>
 <text x="694" y="520" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 2.8
 </text>
 <text x="694" y="531" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.1%
 </text>
-<rect x="798" y="514" width="200" height="21" opacity="1" fill="#192334" stroke="none"/>
+<rect x="798" y="514" width="200" height="21" opacity="1" fill="#192233" stroke="none"/>
 <text x="898" y="520" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 1.2
 </text>
@@ -463,28 +463,28 @@ flume 0.12.0
 <text x="28" y="549" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 kanal 0.1.1
 </text>
-<rect x="186" y="539" width="200" height="21" opacity="1" fill="#2D476C" stroke="none"/>
+<rect x="186" y="539" width="200" height="21" opacity="1" fill="#283E5D" stroke="none"/>
 <text x="286" y="545" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 17.8
 </text>
 <text x="286" y="556" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-1.0%
 </text>
-<rect x="390" y="539" width="200" height="21" opacity="1" fill="#243753" stroke="none"/>
+<rect x="390" y="539" width="200" height="21" opacity="1" fill="#21314A" stroke="none"/>
 <text x="490" y="545" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 10.3
 </text>
 <text x="490" y="556" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-1.0%
 </text>
-<rect x="594" y="539" width="200" height="21" opacity="1" fill="#1D2A3F" stroke="none"/>
+<rect x="594" y="539" width="200" height="21" opacity="1" fill="#1C273B" stroke="none"/>
 <text x="694" y="545" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 4.5
 </text>
 <text x="694" y="556" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
 +/-0.4%
 </text>
-<rect x="798" y="539" width="200" height="21" opacity="1" fill="#1B2537" stroke="none"/>
+<rect x="798" y="539" width="200" height="21" opacity="1" fill="#1A2436" stroke="none"/>
 <text x="898" y="545" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 2.2
 </text>
@@ -516,33 +516,36 @@ producer threads
 <text x="28" y="660" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#FACC15">
 fanring
 </text>
-<rect x="186" y="650" width="200" height="21" opacity="1" fill="#3F679C" stroke="none"/>
-<text x="286" y="656" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
-21.4
+<rect x="186" y="650" width="200" height="21" opacity="1" fill="#4F85CA" stroke="none"/>
+<text x="286" y="656" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
+30.5
 </text>
-<text x="286" y="667" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
-+/-1.0%
+<text x="286" y="667" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
++/-1.2%
 </text>
-<rect x="390" y="650" width="200" height="21" opacity="1" fill="#3E679C" stroke="none"/>
-<text x="490" y="656" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
-21.3
+<rect x="390" y="650" width="200" height="21" opacity="1" fill="#5C9EF0" stroke="none"/>
+<rect x="390" y="650" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
+<text x="490" y="656" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
+38.0
 </text>
-<text x="490" y="667" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
-+/-0.6%
+<text x="490" y="667" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
++/-0.1%
 </text>
-<rect x="594" y="650" width="200" height="21" opacity="1" fill="#3E669B" stroke="none"/>
-<text x="694" y="656" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
-21.1
+<rect x="594" y="650" width="200" height="21" opacity="1" fill="#5B9CED" stroke="none"/>
+<rect x="594" y="650" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
+<text x="694" y="656" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
+37.4
 </text>
-<text x="694" y="667" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
-+/-1.1%
+<text x="694" y="667" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
++/-0.2%
 </text>
-<rect x="798" y="650" width="200" height="21" opacity="1" fill="#243753" stroke="none"/>
+<rect x="798" y="650" width="200" height="21" opacity="1" fill="#304D74" stroke="none"/>
+<rect x="798" y="650" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
 <text x="898" y="656" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
-6.9
+13.5
 </text>
 <text x="898" y="667" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
-+/-0.3%
++/-0.2%
 </text>
 <text x="28" y="685" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 crossbeam-channel 0.5.16
@@ -586,7 +589,6 @@ crossfire 3.1.19
 +/-0.6%
 </text>
 <rect x="390" y="700" width="200" height="21" opacity="1" fill="#4C80C1" stroke="none"/>
-<rect x="390" y="700" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
 <text x="490" y="706" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
 28.8
 </text>
@@ -594,7 +596,6 @@ crossfire 3.1.19
 +/-0.6%
 </text>
 <rect x="594" y="700" width="200" height="21" opacity="1" fill="#4C7FC0" stroke="none"/>
-<rect x="594" y="700" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
 <text x="694" y="706" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
 28.6
 </text>
@@ -602,7 +603,6 @@ crossfire 3.1.19
 +/-0.8%
 </text>
 <rect x="798" y="700" width="200" height="21" opacity="1" fill="#2B4264" stroke="none"/>
-<rect x="798" y="700" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
 <text x="898" y="706" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
 10.3
 </text>
