@@ -42,6 +42,10 @@ that PR merges, it creates an annotated `v<version>` tag, publishes to
 crates.io, and creates a GitHub release. Configuration lives in
 `release-plz.toml`; changelogs remain hand-curated.
 
+Release notes describe changes to the published crate only. Benchmark tooling
+and charts are repository-only and are not part of a release. Exclude them from
+release notes and release PR descriptions.
+
 Publishing uses crates.io trusted publishing through GitHub Actions OIDC.
 Configure the trusted publisher with:
 
