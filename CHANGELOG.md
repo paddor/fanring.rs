@@ -6,6 +6,8 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- Reduce MPSC receive bookkeeping and intermediate payload moves between lane
+  maintenance boundaries.
 - Require yring 0.3.15 to eliminate intermediate ring-pop payload copies.
 
 ## [0.3.0] - 2026-09-03

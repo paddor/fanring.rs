@@ -273,6 +273,29 @@ fn reused_mpsc_lane_ignores_stale_generation_state() {
 }
 
 #[test]
+fn cached_mpsc_lane_refill_racing_sender_drop_preserves_values() {
+    model(|| {
+        let (mut tx, mut rx) = channel(4);
+        tx.try_send(0).unwrap();
+        tx.try_send(1).unwrap();
+        assert_eq!(rx.try_recv(), Ok(0));
+
+        let sender = thread::spawn(move || {
+            tx.try_send(2).unwrap();
+        });
+
+        assert_eq!(rx.try_recv(), Ok(1));
+        let result = rx.try_recv();
+        assert!(matches!(result, Ok(2) | Err(TryRecvError::Empty)));
+        sender.join().unwrap();
+        if result == Err(TryRecvError::Empty) {
+            assert_eq!(rx.try_recv(), Ok(2));
+        }
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
+    });
+}
+
+#[test]
 fn empty_short_lived_mpsc_lane_cannot_delay_disconnect() {
     model(|| {
         let (root, mut rx) = channel::<usize>(1);

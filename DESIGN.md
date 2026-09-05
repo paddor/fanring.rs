@@ -80,6 +80,20 @@ looking up that page. After claiming lane bits, it refreshes again before
 looking up those lanes. A registration that races either snapshot is therefore
 imported before its claimed readiness bit is interpreted.
 
+Between release, rotation, and readiness-poll boundaries, `try_recv` leaves
+the front lane in its active deque and pops directly from that lane. Short
+prefetch windows are refreshed on this path too. Empty-lane handling and
+wakeups remain in the maintenance path, keeping its intermediate results out
+of ordinary payload reads. Blocking receives convert maintenance results
+directly to their own return type to avoid another payload-sized return through
+`try_recv`.
+
+The fast path updates the same burst, release, and readiness-poll counters as
+the maintenance path. It stops before a pop reaches either per-lane limit and
+is disabled when the readiness-poll budget is zero. Maintenance still performs
+every rotation, capacity release, and readiness poll, including when callers
+alternate blocking and nonblocking receives.
+
 `yring::prefetch` caches all flushed items with one Acquire load. Pops are
 non-atomic. Consumed capacity is released after `min(64, lane capacity)` items
 or when the lane reaches visible empty. A full release batch can span several
