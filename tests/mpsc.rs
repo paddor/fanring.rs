@@ -436,6 +436,71 @@ fn empty_lane_releases_partial_credit_batch() {
 }
 
 #[test]
+fn release_batch_spans_short_prefetch_windows() {
+    let (mut tx, mut rx) = channel::<[u64; 8]>(128);
+
+    for value in 0..64 {
+        tx.try_send([value; 8]).unwrap();
+        assert_eq!(rx.try_recv(), Ok([value; 8]));
+    }
+
+    for value in 64..192 {
+        tx.try_send([value; 8]).unwrap();
+    }
+    assert_eq!(tx.try_send([192; 8]), Err(TrySendError::Full([192; 8])));
+    for value in 64..192 {
+        assert_eq!(rx.try_recv(), Ok([value; 8]));
+    }
+}
+
+#[test]
+fn cached_lane_rotation_survives_mixed_receive_calls() {
+    for mixed in [false, true] {
+        let (mut busy, mut rx) = channel(128);
+        let mut sparse = busy.try_clone().unwrap();
+        for sequence in 0..128 {
+            busy.try_send((0, sequence)).unwrap();
+        }
+        sparse.try_send((1, 0)).unwrap();
+
+        // Both lanes are ready before the first receive. The busy lane must
+        // yield after 64 items even when callers alternate receive methods.
+        for sequence in 0..64 {
+            let value = if mixed && sequence % 2 != 0 {
+                rx.recv().unwrap()
+            } else {
+                rx.try_recv().unwrap()
+            };
+            assert_eq!(value, (0, sequence));
+        }
+        assert_eq!(rx.try_recv(), Ok((1, 0)));
+        assert_eq!(rx.try_recv(), Ok((0, 64)));
+    }
+}
+
+#[test]
+fn short_prefetch_windows_do_not_hide_new_sender() {
+    let (mut busy, mut rx) = channel(256);
+    busy.try_send((0, 0)).unwrap();
+    assert_eq!(rx.try_recv(), Ok((0, 0)));
+
+    let mut sparse = busy.try_clone().unwrap();
+    sparse.try_send((1, 0)).unwrap();
+    let mut expected = 1;
+    for value in 1..=129 {
+        busy.try_send((0, value)).unwrap();
+        match rx.try_recv().unwrap() {
+            (1, 0) => return,
+            value => {
+                assert_eq!(value, (0, expected));
+                expected += 1;
+            }
+        }
+    }
+    panic!("busy lane must not hide a newly registered sender");
+}
+
+#[test]
 fn disconnects_after_draining() {
     let (mut tx, mut rx) = channel(4);
     tx.try_send(7).unwrap();

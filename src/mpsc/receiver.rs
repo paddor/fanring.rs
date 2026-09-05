@@ -37,6 +37,33 @@ impl<T> Receiver<T> {
     /// gone.
     #[inline]
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        // Keep the front lane in place between release, rotation, and readiness
+        // boundaries. Refresh short prefetch windows here as well: they do not
+        // require lane scheduling or a wakeup.
+        if self.items_until_ready_poll != 0
+            && let Some(&key) = self.active.front()
+            && let Some(lane) = self.lanes.get_mut(key.slot).and_then(Option::as_mut)
+            && lane.key == key
+        {
+            if lane.cached_available == 0 {
+                lane.cached_available = lane.consumer.prefetch();
+            }
+            if lane.cached_available != 0
+                && lane.unreleased + 1 < lane.release_batch
+                && lane.burst + 1 < PREFETCH_LIMIT
+            {
+                // Finish bookkeeping before loading T, so the payload does not
+                // pass through the maintenance path's intermediate results.
+                lane.cached_available -= 1;
+                lane.unreleased += 1;
+                lane.burst += 1;
+                self.items_until_ready_poll -= 1;
+                return Ok(lane
+                    .consumer
+                    .pop()
+                    .expect("cached_available guarantees prefetched data"));
+            }
+        }
         loop {
             let (result, released) = self.try_recv_inner();
             let retry = released.is_some() && matches!(result, Err(TryRecvError::Empty));
@@ -47,7 +74,8 @@ impl<T> Receiver<T> {
         }
     }
 
-    #[inline]
+    // Fold the intermediate result into each caller's return buffer.
+    #[inline(always)]
     fn try_recv_inner(&mut self) -> (Result<T, TryRecvError>, Option<LaneKey>) {
         loop {
             if self.active.is_empty() {
@@ -110,10 +138,18 @@ impl<T> Receiver<T> {
     /// Returns [`RecvError`] after all senders and buffered values are gone.
     #[inline]
     pub fn recv(&mut self) -> Result<T, RecvError> {
-        match self.try_recv() {
-            Ok(value) => Ok(value),
-            Err(TryRecvError::Disconnected) => Err(RecvError),
-            Err(TryRecvError::Empty) => self.recv_slow(),
+        // Convert directly to the blocking result type. Going through try_recv
+        // adds another payload-sized return on this path.
+        loop {
+            let (result, released) = self.try_recv_inner();
+            let retry = released.is_some() && matches!(result, Err(TryRecvError::Empty));
+            self.notify_released(released);
+            match result {
+                Ok(value) => return Ok(value),
+                Err(TryRecvError::Disconnected) => return Err(RecvError),
+                Err(TryRecvError::Empty) if retry => {}
+                Err(TryRecvError::Empty) => return self.recv_slow(),
+            }
         }
     }
 

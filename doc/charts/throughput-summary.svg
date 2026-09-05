@@ -9,40 +9,40 @@ Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off, all worke
 <text x="22" y="190" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E6EDF3" font-weight="bold" transform="rotate(270, 22, 190)">
 million items/s
 </text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,272 830,272 "/>
-<text x="62" y="272" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,273 830,273 "/>
+<text x="62" y="273" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
 20
 </text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,226 830,226 "/>
-<text x="62" y="226" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,228 830,228 "/>
+<text x="62" y="228" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
 40
 </text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,180 830,180 "/>
-<text x="62" y="180" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,182 830,182 "/>
+<text x="62" y="182" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
 60
 </text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,134 830,134 "/>
-<text x="62" y="134" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,137 830,137 "/>
+<text x="62" y="137" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
 80
 </text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,88 830,88 "/>
-<text x="62" y="88" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,92 830,92 "/>
+<text x="62" y="92" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
 100
 </text>
 <polyline fill="none" opacity="1" stroke="#30363D" stroke-width="2" points="70,318 830,318 "/>
-<rect x="100" y="164" width="44" height="154" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="146" y="280" width="44" height="38" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="192" y="254" width="44" height="64" opacity="1" fill="#22D3EE" stroke="none"/>
+<rect x="100" y="95" width="44" height="223" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="146" y="281" width="44" height="37" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="192" y="256" width="44" height="62" opacity="1" fill="#22D3EE" stroke="none"/>
 <rect x="238" y="298" width="44" height="20" opacity="1" fill="#4ADE80" stroke="none"/>
 <rect x="284" y="301" width="44" height="17" opacity="1" fill="#A78BFA" stroke="none"/>
 <rect x="330" y="308" width="44" height="10" opacity="1" fill="#F472B6" stroke="none"/>
-<rect x="376" y="269" width="44" height="49" opacity="1" fill="#F59E0B" stroke="none"/>
+<rect x="376" y="270" width="44" height="48" opacity="1" fill="#F59E0B" stroke="none"/>
 <text x="260" y="338" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E6EDF3" font-weight="bold">
 MPSC: 4 producers
 </text>
-<rect x="526" y="95" width="44" height="223" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="572" y="271" width="44" height="47" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="618" y="233" width="44" height="85" opacity="1" fill="#22D3EE" stroke="none"/>
+<rect x="526" y="99" width="44" height="219" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="572" y="272" width="44" height="46" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="618" y="234" width="44" height="84" opacity="1" fill="#22D3EE" stroke="none"/>
 <rect x="664" y="306" width="44" height="12" opacity="1" fill="#F472B6" stroke="none"/>
 <rect x="710" y="268" width="44" height="50" opacity="1" fill="#F59E0B" stroke="none"/>
 <text x="640" y="338" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E6EDF3" font-weight="bold">
