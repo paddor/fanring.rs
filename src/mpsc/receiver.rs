@@ -1,3 +1,5 @@
+use crate::teardown::{Deferred, Teardown};
+
 use std::collections::VecDeque;
 use std::fmt;
 use std::mem;
@@ -15,9 +17,14 @@ use super::{
 ///
 /// The receiver owns every SPSC consumer and drains active lanes in bounded
 /// round-robin bursts. It is `Send` when `T` is `Send`, but it is not `Sync`.
-pub struct Receiver<T> {
-    pub(super) shared: Arc<Shared<T>>,
-    pub(super) lanes: Vec<Option<Lane<T>>>,
+///
+/// Dropping the last receiver disconnects senders. Unread payload destruction
+/// follows `P`: [`Deferred`] may retain ring values until their sender drops;
+/// [`Coordinated`](crate::teardown::Coordinated) reclaims them during teardown
+/// or when an overlapping send resumes.
+pub struct Receiver<T, P: Teardown = Deferred> {
+    pub(super) shared: Arc<Shared<T, P>>,
+    pub(super) lanes: Vec<Option<Lane<T, P>>>,
     pub(super) groups: Vec<Arc<ReadyGroup>>,
     pub(super) pages: Vec<Arc<ReadyPage>>,
     pub(super) active: VecDeque<LaneKey>,
@@ -27,7 +34,7 @@ pub struct Receiver<T> {
     pub(super) capacity_per_sender: usize,
 }
 
-impl<T> Receiver<T> {
+impl<T, P: Teardown> Receiver<T, P> {
     /// Try to receive one value.
     ///
     /// # Errors
@@ -458,30 +465,34 @@ impl<T> Receiver<T> {
     /// Iterate until every sender disconnects and buffered values are drained.
     #[inline]
     #[must_use]
-    pub const fn iter(&mut self) -> Iter<'_, T> {
+    pub const fn iter(&mut self) -> Iter<'_, T, P> {
         Iter { receiver: self }
     }
 
     /// Iterate over values immediately available without blocking.
     #[inline]
     #[must_use]
-    pub const fn try_iter(&mut self) -> TryIter<'_, T> {
+    pub const fn try_iter(&mut self) -> TryIter<'_, T, P> {
         TryIter { receiver: self }
     }
 }
 
-pub(super) struct Lane<T> {
+pub(super) struct Lane<T, P: Teardown> {
     key: LaneKey,
     signal: Arc<LaneSignal>,
-    consumer: yring::Consumer<T>,
+    consumer: crate::ring::Consumer<T, P>,
     cached_available: usize,
     unreleased: usize,
     release_batch: usize,
     burst: usize,
 }
 
-impl<T> Lane<T> {
-    pub(super) fn new(key: LaneKey, signal: Arc<LaneSignal>, consumer: yring::Consumer<T>) -> Self {
+impl<T, P: Teardown> Lane<T, P> {
+    pub(super) fn new(
+        key: LaneKey,
+        signal: Arc<LaneSignal>,
+        consumer: crate::ring::Consumer<T, P>,
+    ) -> Self {
         let release_batch = consumer.capacity().min(PREFETCH_LIMIT);
         Self {
             key,
@@ -521,7 +532,7 @@ enum LanePoll<T> {
     Stale,
 }
 
-impl<T> Drop for Receiver<T> {
+impl<T, P: Teardown> Drop for Receiver<T, P> {
     fn drop(&mut self) {
         self.shared.receiver_alive.store(false, Ordering::Release);
         for lane in self.lanes.iter_mut().flatten() {
@@ -539,7 +550,7 @@ impl<T> Drop for Receiver<T> {
     }
 }
 
-impl<T> fmt::Debug for Receiver<T> {
+impl<T, P: Teardown> fmt::Debug for Receiver<T, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Receiver")
             .field("active_lanes", &self.active.len())
@@ -554,11 +565,11 @@ impl<T> fmt::Debug for Receiver<T> {
 
 /// Blocking iterator over a borrowed receiver.
 #[derive(Debug)]
-pub struct Iter<'a, T> {
-    receiver: &'a mut Receiver<T>,
+pub struct Iter<'a, T, P: Teardown = Deferred> {
+    receiver: &'a mut Receiver<T, P>,
 }
 
-impl<T> Iterator for Iter<'_, T> {
+impl<T, P: Teardown> Iterator for Iter<'_, T, P> {
     type Item = T;
 
     #[inline]
@@ -567,15 +578,15 @@ impl<T> Iterator for Iter<'_, T> {
     }
 }
 
-impl<T> std::iter::FusedIterator for Iter<'_, T> {}
+impl<T, P: Teardown> std::iter::FusedIterator for Iter<'_, T, P> {}
 
 /// Nonblocking iterator over a borrowed receiver.
 #[derive(Debug)]
-pub struct TryIter<'a, T> {
-    receiver: &'a mut Receiver<T>,
+pub struct TryIter<'a, T, P: Teardown = Deferred> {
+    receiver: &'a mut Receiver<T, P>,
 }
 
-impl<T> Iterator for TryIter<'_, T> {
+impl<T, P: Teardown> Iterator for TryIter<'_, T, P> {
     type Item = T;
 
     #[inline]
@@ -586,11 +597,11 @@ impl<T> Iterator for TryIter<'_, T> {
 
 /// Blocking iterator that owns its receiver.
 #[derive(Debug)]
-pub struct IntoIter<T> {
-    receiver: Receiver<T>,
+pub struct IntoIter<T, P: Teardown = Deferred> {
+    receiver: Receiver<T, P>,
 }
 
-impl<T> Iterator for IntoIter<T> {
+impl<T, P: Teardown> Iterator for IntoIter<T, P> {
     type Item = T;
 
     #[inline]
@@ -599,15 +610,15 @@ impl<T> Iterator for IntoIter<T> {
     }
 }
 
-impl<T> std::iter::FusedIterator for IntoIter<T> {}
+impl<T, P: Teardown> std::iter::FusedIterator for IntoIter<T, P> {}
 
 #[allow(
     clippy::into_iter_without_iter,
     reason = "channel convention names the blocking iterator iter"
 )]
-impl<'a, T> IntoIterator for &'a mut Receiver<T> {
+impl<'a, T, P: Teardown> IntoIterator for &'a mut Receiver<T, P> {
     type Item = T;
-    type IntoIter = Iter<'a, T>;
+    type IntoIter = Iter<'a, T, P>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
@@ -615,9 +626,9 @@ impl<'a, T> IntoIterator for &'a mut Receiver<T> {
     }
 }
 
-impl<T> IntoIterator for Receiver<T> {
+impl<T, P: Teardown> IntoIterator for Receiver<T, P> {
     type Item = T;
-    type IntoIter = IntoIter<T>;
+    type IntoIter = IntoIter<T, P>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {

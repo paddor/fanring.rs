@@ -6,6 +6,10 @@ Sender registration is dynamic. Each sender writes to its own ring, so
 producers do not contend on a shared queue tail. MPSC drains those rings
 directly; MPMC stages prefetched batches in stealable receiver-local queues.
 
+`Deferred` teardown is the default and avoids cleanup coordination on sends.
+Choose `Coordinated` to reclaim unread payloads independently of idle sender
+lifetimes.
+
 Requires Rust 1.93 or newer.
 
 | | Nonblocking | Blocking | Timeout | Deadline |
@@ -36,6 +40,34 @@ Detailed throughput heatmaps cover thread counts and payload sizes.
 #### MPMC wake latency
 
 ![MPMC wake-latency chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/latency-mpmc.svg)
+
+## Teardown policies
+
+`Deferred` is the default teardown policy: unread ring payloads may remain
+alive until their sender drops. Choose `Coordinated` when queued replies,
+permits, or buffers must be released independently of idle sender lifetimes:
+
+```rust
+use fanring::{mpsc, teardown::Coordinated};
+let (tx, rx) = mpsc::channel_with_policy::<String, Coordinated>(256);
+```
+
+The policy is part of the endpoint types and inherited by cloned handles.
+`Coordinated` teardown drains unread values; overlapping sends clean up late
+publications when they resume. Receiver drop does not wait for paused producers.
+The additional send coordination has a measurable cost:
+
+![MPSC teardown policy throughput](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/teardown-mpsc.svg)
+
+![MPMC teardown policy throughput](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/teardown-mpmc.svg)
+
+The general comparison and wake-latency charts above use `Deferred` for fanring.
+These policy charts compare `u64` traffic under both policies on the same system.
+See [teardown contracts, reproduction, and observed behavior in other channels](doc/teardown.md).
+The pinned bounded Crossbeam, Crossfire, Flume, Kanal, and Thingbuf versions all
+retain unread payloads in our receiver-drop probe while senders remain alive.
+This is a payload-lifetime distinction; successful send still does not guarantee
+that application code processes the message.
 
 ## MPSC
 
@@ -97,8 +129,9 @@ flight.
   receiver staging can temporarily exceed sender-ring capacity.
 - Nonblocking, blocking, timeout, and deadline operations are available.
   Blocking operations spin briefly before parking.
-- Disconnection never discards buffered values. MPMC `Empty` may be transient
-  while receivers move internal work; `Disconnected` is final.
+- Dropping the last sender preserves buffered values for receivers to drain.
+  Last-receiver drop follows the chosen teardown policy. MPMC `Empty` may be
+  transient while receivers move internal work; `Disconnected` is final.
 - Sender hot paths and MPSC batching avoid a shared queue lock. MPMC work
   distribution and topology maintenance use mutexes; blocking operations may
   park.

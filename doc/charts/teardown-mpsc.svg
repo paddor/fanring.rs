@@ -1,0 +1,100 @@
+<svg width="1024" height="210" viewBox="0 0 1024 210" xmlns="http://www.w3.org/2000/svg">
+<rect x="0" y="0" width="1024" height="210" opacity="1" fill="#000000" stroke="none"/>
+<text x="512" y="17" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="12.096774193548388" opacity="1" fill="#E5E7EB">
+fanring MPSC throughput comparison
+</text>
+<text x="512" y="35" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#9CA3AF">
+Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off; all workers pinned, physical cores first; try operations; 5 samples; nominal capacity 8192 items; natural queue occupancy
+</text>
+<text x="512" y="73" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+u64 (8 B); median M items/s (+/- MAD); color scale 0-100; white outline = winner
+</text>
+<text x="28" y="104" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+implementation
+</text>
+<text x="592" y="96" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+producer threads
+</text>
+<text x="286" y="114" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+1
+</text>
+<text x="490" y="114" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+2
+</text>
+<text x="694" y="114" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+4
+</text>
+<text x="898" y="114" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+8
+</text>
+<text x="28" y="138" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#FACC15">
+fanring Deferred
+</text>
+<rect x="186" y="128" width="200" height="21" opacity="1" fill="#5189CF" stroke="none"/>
+<rect x="186" y="128" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
+<text x="286" y="134" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
+78.9
+</text>
+<text x="286" y="145" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
++/-6.6%
+</text>
+<rect x="390" y="128" width="200" height="21" opacity="1" fill="#5B9CED" stroke="none"/>
+<rect x="390" y="128" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
+<text x="490" y="134" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
+93.3
+</text>
+<text x="490" y="145" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
++/-1.5%
+</text>
+<rect x="594" y="128" width="200" height="21" opacity="1" fill="#5D9FF0" stroke="none"/>
+<text x="694" y="134" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
+95.2
+</text>
+<text x="694" y="145" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
++/-0.5%
+</text>
+<rect x="798" y="128" width="200" height="21" opacity="1" fill="#355580" stroke="none"/>
+<text x="898" y="134" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
+39.8
+</text>
+<text x="898" y="145" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
++/-0.4%
+</text>
+<text x="28" y="163" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#FACC15">
+fanring Coordinated
+</text>
+<rect x="186" y="153" width="200" height="21" opacity="1" fill="#294060" stroke="none"/>
+<text x="286" y="159" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
+23.9
+</text>
+<text x="286" y="170" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
++/-0.3%
+</text>
+<rect x="390" y="153" width="200" height="21" opacity="1" fill="#355682" stroke="none"/>
+<text x="490" y="159" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
+40.7
+</text>
+<text x="490" y="170" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
++/-0.9%
+</text>
+<rect x="594" y="153" width="200" height="21" opacity="1" fill="#5D9FF0" stroke="none"/>
+<rect x="594" y="153" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
+<text x="694" y="159" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
+95.3
+</text>
+<text x="694" y="170" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
++/-2.0%
+</text>
+<rect x="798" y="153" width="200" height="21" opacity="1" fill="#385C8A" stroke="none"/>
+<rect x="798" y="153" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
+<text x="898" y="159" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
+44.8
+</text>
+<text x="898" y="170" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
++/-0.3%
+</text>
+<polyline fill="none" opacity="1" stroke="#374151" stroke-width="1" points="24,210 1000,210 "/>
+<text x="512" y="201" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="7.258064516129032" opacity="1" fill="#9CA3AF">
+Deferred retains unread ring payloads; Coordinated reclaims them during close or an overlapping send. Capacity: per-ring HWM
+</text>
+</svg>

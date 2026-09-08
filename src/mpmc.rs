@@ -4,6 +4,8 @@
 //! into bounded local queues whose work can be stolen in batches by competing
 //! receivers. Ordering is relaxed.
 
+use crate::teardown::{Deferred, Teardown};
+
 use std::fmt;
 
 use arc_swap::ArcSwap;
@@ -44,6 +46,9 @@ const PARK_SPINS: usize = 0;
 
 /// Create an MPMC channel with one bounded ring per sender.
 ///
+/// Uses [`Deferred`] teardown. See [`channel_with_policy`] to opt into
+/// cleanup independent of idle sender lifetimes.
+///
 /// `capacity_per_sender` must be between 1 and [`MAX_CAPACITY_PER_SENDER`] and is
 /// rounded up by `yring` to the next power of two.
 ///
@@ -65,12 +70,57 @@ pub fn channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
 pub fn try_channel<T>(
     capacity_per_sender: usize,
 ) -> Result<(Sender<T>, Receiver<T>), ChannelError> {
+    try_channel_with_policy::<T, Deferred>(capacity_per_sender)
+}
+
+/// Create a channel with an explicit teardown policy.
+///
+/// [`Deferred`] is the default used by [`channel`].
+/// [`Coordinated`](crate::teardown::Coordinated) destroys unread payloads while
+/// sender handles remain alive; an overlapping send may finish cleanup later.
+/// The policy is inherited by all cloned handles.
+///
+/// # Panics
+///
+/// Panics when capacity is zero or exceeds [`MAX_CAPACITY_PER_SENDER`].
+///
+/// # Example
+///
+/// ```
+/// use fanring::{mpmc, teardown::Coordinated};
+/// let (mut tx, rx) = mpmc::channel_with_policy::<_, Coordinated>(4);
+/// let (reply, response) = std::sync::mpsc::channel::<()>();
+/// tx.try_send(reply).unwrap();
+/// drop(rx);
+/// assert_eq!(response.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected));
+/// drop(tx);
+/// ```
+#[must_use]
+pub fn channel_with_policy<T, P: Teardown>(
+    capacity_per_sender: usize,
+) -> (Sender<T, P>, Receiver<T, P>) {
+    try_channel_with_policy(capacity_per_sender).unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Fallible version of [`channel_with_policy`].
+///
+/// # Errors
+///
+/// Returns [`ChannelError`] when capacity is zero or exceeds
+/// [`MAX_CAPACITY_PER_SENDER`].
+#[allow(
+    clippy::type_complexity,
+    reason = "channel constructor returns its two endpoints"
+)]
+pub fn try_channel_with_policy<T, P: Teardown>(
+    capacity_per_sender: usize,
+) -> Result<(Sender<T, P>, Receiver<T, P>), ChannelError> {
     validate_capacity(capacity_per_sender, MAX_CAPACITY_PER_SENDER)?;
     Ok(build_channel(capacity_per_sender))
 }
 
-fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
-    let (producer, consumer) = yring::spsc(capacity_per_sender);
+fn build_channel<T, P: Teardown>(capacity_per_sender: usize) -> (Sender<T, P>, Receiver<T, P>) {
+    let (producer, consumer) = crate::ring::spsc(capacity_per_sender);
     let group = Arc::new(ReadyGroup::new(0));
     let work_group = Arc::new(ReadyGroup::new(0));
     let page = Arc::new(ReadyPage::new(0, group.clone()));
@@ -128,13 +178,13 @@ fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
     )
 }
 
-struct Shared<T> {
-    registry: Mutex<Registry<T>>,
+struct Shared<T, P: Teardown> {
+    registry: Mutex<Registry<T, P>>,
     #[cfg(not(loom))]
     work_queues: ArcSwap<Vec<(usize, WorkQueue<T>)>>,
     #[cfg(loom)]
     work_queues: Mutex<Vec<(usize, WorkQueue<T>)>>,
-    ready: ArcSwap<ReadyTopology<T>>,
+    ready: ArcSwap<ReadyTopology<T, P>>,
     ready_generation: AtomicUsize,
     orphaned_work: WorkQueue<T>,
     publications: PublicationTracker,
@@ -146,11 +196,15 @@ struct Shared<T> {
     capacity_per_sender: usize,
 }
 
-impl<T> Shared<T> {
+impl<T, P: Teardown> Shared<T, P> {
     #[allow(clippy::significant_drop_tightening)]
+    #[allow(
+        clippy::type_complexity,
+        reason = "registration returns the lane key, readiness signal, and producer"
+    )]
     fn register_sender(
         &self,
-    ) -> Result<(LaneKey, Arc<LaneSignal>, yring::Producer<T>), TryRegisterError> {
+    ) -> Result<(LaneKey, Arc<LaneSignal>, crate::ring::Producer<T, P>), TryRegisterError> {
         if !self.receiver_alive.load(Ordering::Acquire) {
             return Err(TryRegisterError::Disconnected);
         }
@@ -162,7 +216,7 @@ impl<T> Shared<T> {
 
         let (key, page, topology_changed) = registry.allocate_lane();
         let signal = Arc::new(LaneSignal::new(page, key.slot));
-        let (producer, consumer) = yring::spsc(self.capacity_per_sender);
+        let (producer, consumer) = crate::ring::spsc(self.capacity_per_sender);
         registry.install_lane(LaneToken::new(Lane::new(key, signal.clone(), consumer)));
         if topology_changed {
             self.ready
@@ -206,7 +260,7 @@ impl<T> Shared<T> {
         self.publications.notify_change();
     }
 
-    fn ready_snapshot(&self) -> (std::sync::Arc<ReadyTopology<T>>, usize) {
+    fn ready_snapshot(&self) -> (std::sync::Arc<ReadyTopology<T, P>>, usize) {
         loop {
             let generation = self.ready_generation.load(Ordering::Acquire);
             let ready = self.ready.load_full();
@@ -221,11 +275,11 @@ impl<T> Shared<T> {
         signal.mark()
     }
 
-    fn activate_page(&self, page_id: usize) -> Option<LaneToken<T>> {
+    fn activate_page(&self, page_id: usize) -> Option<LaneToken<T, P>> {
         lock(&self.registry).take_ready_lane(page_id)
     }
 
-    fn finish_empty_lane(&self, mut lane: LaneToken<T>) -> FinishLane<T> {
+    fn finish_empty_lane(&self, mut lane: LaneToken<T, P>) -> FinishLane<T, P> {
         let mut registry = lock(&self.registry);
         lane.signal.finish_drain();
         lane.cached_available = lane.consumer.prefetch();
@@ -270,7 +324,7 @@ impl<T> Shared<T> {
     }
 }
 
-impl<T> fmt::Debug for Shared<T> {
+impl<T, P: Teardown> fmt::Debug for Shared<T, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Shared")
             .field(
@@ -297,19 +351,19 @@ struct LaneKey {
     generation: usize,
 }
 
-struct Slot<T> {
+struct Slot<T, P: Teardown> {
     generation: usize,
-    lane: Option<LaneToken<T>>,
+    lane: Option<LaneToken<T, P>>,
 }
 
-struct LanePage<T> {
+struct LanePage<T, P: Teardown> {
     ready: Arc<ReadyPage>,
     work_group: Arc<ReadyGroup>,
     work_bit: u64,
-    lanes: ConcurrentQueue<LaneToken<T>>,
+    lanes: ConcurrentQueue<LaneToken<T, P>>,
 }
 
-impl<T> LanePage<T> {
+impl<T, P: Teardown> LanePage<T, P> {
     fn new(ready: Arc<ReadyPage>, work_group: Arc<ReadyGroup>) -> Self {
         let work_bit = 1u64 << (ready.id() % PAGES_PER_GROUP);
         Self {
@@ -321,7 +375,7 @@ impl<T> LanePage<T> {
     }
 
     #[inline]
-    fn push(&self, lane: LaneToken<T>) {
+    fn push(&self, lane: LaneToken<T, P>) {
         self.lanes
             .push(lane)
             .unwrap_or_else(|_| unreachable!("one ready token exists per lane"));
@@ -333,7 +387,7 @@ impl<T> LanePage<T> {
     /// Re-publish before the pop so another receiver can claim a different
     /// queued lane without waiting for this receiver to finish its pop.
     #[inline]
-    fn pop_after_claim(&self) -> Option<LaneToken<T>> {
+    fn pop_after_claim(&self) -> Option<LaneToken<T, P>> {
         if !self.lanes.is_empty() {
             self.work_group.mark(self.work_bit);
         }
@@ -341,7 +395,7 @@ impl<T> LanePage<T> {
     }
 
     #[inline]
-    fn pop_direct(&self) -> Option<LaneToken<T>> {
+    fn pop_direct(&self) -> Option<LaneToken<T, P>> {
         self.lanes.pop().ok()
     }
 
@@ -351,27 +405,27 @@ impl<T> LanePage<T> {
     }
 }
 
-struct ReadyTopology<T> {
+struct ReadyTopology<T, P: Teardown> {
     ready_groups: Vec<Arc<ReadyGroup>>,
     work_groups: Vec<Arc<ReadyGroup>>,
-    pages: Vec<Arc<LanePage<T>>>,
+    pages: Vec<Arc<LanePage<T, P>>>,
 }
 
-struct Registry<T> {
-    slots: Vec<Slot<T>>,
+struct Registry<T, P: Teardown> {
+    slots: Vec<Slot<T, P>>,
     free: Vec<LaneKey>,
     groups: Vec<Arc<ReadyGroup>>,
     work_groups: Vec<Arc<ReadyGroup>>,
-    pages: Vec<Arc<LanePage<T>>>,
+    pages: Vec<Arc<LanePage<T, P>>>,
     work_queues: Vec<Option<WorkQueue<T>>>,
     free_receivers: Vec<usize>,
 }
 
-impl<T> Registry<T> {
+impl<T, P: Teardown> Registry<T, P> {
     fn new(
         group: Arc<ReadyGroup>,
         work_group: Arc<ReadyGroup>,
-        page: Arc<LanePage<T>>,
+        page: Arc<LanePage<T, P>>,
         work_queue: WorkQueue<T>,
     ) -> Self {
         Self {
@@ -450,14 +504,14 @@ impl<T> Registry<T> {
         )
     }
 
-    fn install_lane(&mut self, lane: LaneToken<T>) {
+    fn install_lane(&mut self, lane: LaneToken<T, P>) {
         let slot = &mut self.slots[lane.key.slot];
         debug_assert_eq!(slot.generation, lane.key.generation);
         debug_assert!(slot.lane.is_none());
         slot.lane = Some(lane);
     }
 
-    fn take_ready_lane(&mut self, page_id: usize) -> Option<LaneToken<T>> {
+    fn take_ready_lane(&mut self, page_id: usize) -> Option<LaneToken<T, P>> {
         let page = self.pages.get(page_id)?;
         let mut selected = None;
         let mut bits = page.ready.take();
@@ -484,7 +538,7 @@ impl<T> Registry<T> {
         selected
     }
 
-    fn clone_ready_topology(&self) -> ReadyTopology<T> {
+    fn clone_ready_topology(&self) -> ReadyTopology<T, P> {
         ReadyTopology {
             ready_groups: self.groups.clone(),
             work_groups: self.work_groups.clone(),
@@ -503,7 +557,7 @@ impl<T> Registry<T> {
         });
     }
 
-    fn take_all_lanes(&mut self) -> Vec<LaneToken<T>> {
+    fn take_all_lanes(&mut self) -> Vec<LaneToken<T, P>> {
         self.slots
             .iter_mut()
             .filter_map(|slot| slot.lane.take())

@@ -1,3 +1,5 @@
+use crate::teardown::{Deferred, Teardown};
+
 use std::time::{Duration, Instant};
 
 use crate::compat::{Arc, Ordering};
@@ -12,14 +14,14 @@ use super::{
 /// Each sender owns one SPSC ring producer. Registering senders has no fixed
 /// limit.
 #[derive(Debug)]
-pub struct Sender<T> {
-    pub(super) shared: Arc<Shared<T>>,
-    pub(super) producer: yring::Producer<T>,
+pub struct Sender<T, P: Teardown = Deferred> {
+    pub(super) shared: Arc<Shared<T, P>>,
+    pub(super) producer: crate::ring::Producer<T, P>,
     pub(super) key: LaneKey,
     pub(super) signal: Arc<LaneSignal>,
 }
 
-impl<T> Sender<T> {
+impl<T, P: Teardown> Sender<T, P> {
     /// Try to register another sender.
     #[must_use]
     pub fn try_clone(&self) -> Option<Self> {
@@ -62,9 +64,8 @@ impl<T> Sender<T> {
             return (Err(TrySendError::Disconnected(value)), false);
         }
 
-        match self.producer.push(value) {
+        match self.producer.push_and_flush(value) {
             Ok(()) => {
-                self.producer.flush();
                 let wake_receiver = self.shared.mark_ready(&self.signal);
                 (Ok(()), wake_receiver)
             }
@@ -254,7 +255,7 @@ impl<T> Sender<T> {
     }
 }
 
-impl<T> Drop for Sender<T> {
+impl<T, P: Teardown> Drop for Sender<T, P> {
     fn drop(&mut self) {
         self.producer.close();
         let _ = self.shared.mark_ready(&self.signal);

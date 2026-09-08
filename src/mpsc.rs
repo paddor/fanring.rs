@@ -3,6 +3,8 @@
 //! Each sender owns its ring producer and the receiver owns every ring
 //! consumer. Ordering is FIFO per sender and relaxed across senders.
 
+use crate::teardown::{Deferred, Teardown};
+
 use std::fmt;
 
 use crate::compat::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock};
@@ -37,6 +39,9 @@ const PARK_SPINS: usize = 0;
 
 /// Create an MPSC channel with one bounded ring per sender.
 ///
+/// Uses [`Deferred`] teardown. See [`channel_with_policy`] to opt into
+/// cleanup independent of idle sender lifetimes.
+///
 /// `capacity_per_sender` must be between 1 and [`MAX_CAPACITY_PER_SENDER`] and is
 /// rounded up by `yring` to the next power of two.
 ///
@@ -61,12 +66,57 @@ pub fn channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
 pub fn try_channel<T>(
     capacity_per_sender: usize,
 ) -> Result<(Sender<T>, Receiver<T>), ChannelError> {
+    try_channel_with_policy::<T, Deferred>(capacity_per_sender)
+}
+
+/// Create a channel with an explicit teardown policy.
+///
+/// [`Deferred`] is the default used by [`channel`].
+/// [`Coordinated`](crate::teardown::Coordinated) destroys unread payloads while
+/// sender handles remain alive; an overlapping send may finish cleanup later.
+/// The policy is inherited by all cloned handles.
+///
+/// # Panics
+///
+/// Panics when capacity is zero or exceeds [`MAX_CAPACITY_PER_SENDER`].
+///
+/// # Example
+///
+/// ```
+/// use fanring::{mpsc, teardown::Coordinated};
+/// let (mut tx, rx) = mpsc::channel_with_policy::<_, Coordinated>(4);
+/// let (reply, response) = std::sync::mpsc::channel::<()>();
+/// tx.try_send(reply).unwrap();
+/// drop(rx);
+/// assert_eq!(response.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected));
+/// drop(tx);
+/// ```
+#[must_use]
+pub fn channel_with_policy<T, P: Teardown>(
+    capacity_per_sender: usize,
+) -> (Sender<T, P>, Receiver<T, P>) {
+    try_channel_with_policy(capacity_per_sender).unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Fallible version of [`channel_with_policy`].
+///
+/// # Errors
+///
+/// Returns [`ChannelError`] when capacity is zero or exceeds
+/// [`MAX_CAPACITY_PER_SENDER`].
+#[allow(
+    clippy::type_complexity,
+    reason = "channel constructor returns its two endpoints"
+)]
+pub fn try_channel_with_policy<T, P: Teardown>(
+    capacity_per_sender: usize,
+) -> Result<(Sender<T, P>, Receiver<T, P>), ChannelError> {
     validate_capacity(capacity_per_sender, MAX_CAPACITY_PER_SENDER)?;
     Ok(build_channel(capacity_per_sender))
 }
 
-fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
-    let (producer, consumer) = yring::spsc(capacity_per_sender);
+fn build_channel<T, P: Teardown>(capacity_per_sender: usize) -> (Sender<T, P>, Receiver<T, P>) {
+    let (producer, consumer) = crate::ring::spsc(capacity_per_sender);
     let group = Arc::new(ReadyGroup::new(0));
     let page = Arc::new(ReadyPage::new(0, group.clone()));
     let signal = Arc::new(LaneSignal::new(page.clone(), 0));
@@ -111,8 +161,8 @@ fn build_channel<T>(capacity_per_sender: usize) -> (Sender<T>, Receiver<T>) {
     )
 }
 
-struct Shared<T> {
-    registry: Mutex<Registry<T>>,
+struct Shared<T, P: Teardown> {
+    registry: Mutex<Registry<T, P>>,
     registry_generation: AtomicUsize,
     registered_lanes: AtomicUsize,
     live_senders: AtomicUsize,
@@ -121,11 +171,15 @@ struct Shared<T> {
     capacity_per_sender: usize,
 }
 
-impl<T> Shared<T> {
+impl<T, P: Teardown> Shared<T, P> {
     #[allow(clippy::significant_drop_tightening)]
+    #[allow(
+        clippy::type_complexity,
+        reason = "registration returns the lane key, readiness signal, and producer"
+    )]
     fn register_sender(
         &self,
-    ) -> Result<(LaneKey, Arc<LaneSignal>, yring::Producer<T>), TryRegisterError> {
+    ) -> Result<(LaneKey, Arc<LaneSignal>, crate::ring::Producer<T, P>), TryRegisterError> {
         if !self.receiver_alive.load(Ordering::Acquire) {
             return Err(TryRegisterError::Disconnected);
         }
@@ -137,7 +191,7 @@ impl<T> Shared<T> {
 
         let (key, page) = registry.allocate_lane();
         let signal = Arc::new(LaneSignal::new(page, key.slot));
-        let (producer, consumer) = yring::spsc(self.capacity_per_sender);
+        let (producer, consumer) = crate::ring::spsc(self.capacity_per_sender);
         registry.pending.push(PendingLane {
             key,
             signal: signal.clone(),
@@ -156,7 +210,7 @@ impl<T> Shared<T> {
     }
 }
 
-impl<T> fmt::Debug for Shared<T> {
+impl<T, P: Teardown> fmt::Debug for Shared<T, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Shared")
             .field(
@@ -179,21 +233,21 @@ struct LaneKey {
     generation: usize,
 }
 
-struct PendingLane<T> {
+struct PendingLane<T, P: Teardown> {
     key: LaneKey,
     signal: Arc<LaneSignal>,
-    consumer: yring::Consumer<T>,
+    consumer: crate::ring::Consumer<T, P>,
 }
 
-struct Registry<T> {
-    pending: Vec<PendingLane<T>>,
+struct Registry<T, P: Teardown> {
+    pending: Vec<PendingLane<T, P>>,
     free: Vec<LaneKey>,
     groups: Vec<Arc<ReadyGroup>>,
     pages: Vec<Arc<ReadyPage>>,
     next_slot: usize,
 }
 
-impl<T> Registry<T> {
+impl<T, P: Teardown> Registry<T, P> {
     fn allocate_lane(&mut self) -> (LaneKey, Arc<ReadyPage>) {
         let key = self.free.pop().unwrap_or_else(|| {
             let key = LaneKey {

@@ -27,7 +27,10 @@ pub(super) fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
     let payloads: Vec<String> = payloads.into_iter().map(|(payload, _)| payload).collect();
     let is_mpmc = rows.iter().any(|row| row.consumers.is_some());
     let width: u32 = if is_mpmc { 1440 } else { 1024 };
-    let section_h: u32 = if is_mpmc { 236 } else { 261 };
+    let series_count = present_series(&rows.iter().collect::<Vec<_>>()).len();
+    let (section_header, row_height) = if is_mpmc { (100, 29) } else { (78, 25) };
+    let section_h: u32 =
+        section_header + row_height * u32::try_from(series_count).expect("series count fits u32");
     let header_h: u32 = 58;
     let footer_h: u32 = 24;
     let payload_count = u32::try_from(payloads.len()).expect("payload count fits u32");
@@ -155,7 +158,7 @@ fn draw_mpsc_heatmap(
 
     for (row_index, (key, label)) in series.iter().enumerate() {
         let row_y = rows_top + usize_to_i32(row_index) * row_height;
-        let color = if label == &"fanring" {
+        let color = if key.starts_with("fanring") {
             RGBColor(250, 204, 21)
         } else {
             TEXT_COLOR
@@ -270,7 +273,7 @@ fn draw_mpmc_heatmap(
 
     for (row_index, (key, label)) in series.iter().enumerate() {
         let row_y = rows_top + usize_to_i32(row_index) * row_height;
-        let color = if label == &"fanring" {
+        let color = if key.starts_with("fanring") {
             RGBColor(250, 204, 21)
         } else {
             TEXT_COLOR
@@ -529,6 +532,19 @@ fn capacity_footnote(rows: &[Row], is_mpmc: bool) -> String {
         .collect::<BTreeSet<_>>();
     if models.is_empty() {
         return "Legacy results: capacity model was not recorded".to_string();
+    }
+    if rows
+        .iter()
+        .all(|row| row.implementation.starts_with("fanring"))
+    {
+        return format!(
+            "Deferred retains unread ring payloads; Coordinated reclaims them during close or an overlapping send. Capacity: per-ring HWM{}",
+            if is_mpmc {
+                " plus receiver staging"
+            } else {
+                ""
+            }
+        );
     }
     if is_mpmc {
         "Capacity: fanring uses per-ring HWM plus receiver staging; others use one shared bound"
