@@ -368,11 +368,14 @@ impl<T, P: Teardown> Receiver<T, P> {
             let page_id = group.id() * PAGES_PER_GROUP + page_bit;
             self.direct_page_cursor
                 .set((page_id + 1) % ready.pages.len());
-            if let Some(lane) = ready
-                .pages
-                .get(page_id)
-                .and_then(|page| page.pop_after_claim())
-            {
+            // The shared group can expose work on a page registered after
+            // this snapshot. Resolve that page through the published topology.
+            let lane = if let Some(page) = ready.pages.get(page_id) {
+                page.pop_after_claim()
+            } else {
+                self.shared.ready.load().pages[page_id].pop_after_claim()
+            };
+            if let Some(lane) = lane {
                 return Some((lane, publication));
             }
             drop(publication);
@@ -845,11 +848,60 @@ mod tests {
         assert_eq!(rx.recv(), Err(RecvError));
     }
 
+    fn check_new_page_work_claim<P: Teardown>() {
+        let (tx, mut rx) = channel_with_policy::<_, P>(PREFETCH_LIMIT + 1);
+        let ready = rx.ready.borrow().clone();
+        let mut senders = vec![tx];
+        for _ in 0..LANES_PER_PAGE {
+            senders.push(senders[0].try_clone().unwrap());
+        }
+        for value in 0..=PREFETCH_LIMIT {
+            senders.last_mut().unwrap().try_send(value).unwrap();
+        }
+        // A receiver with the new topology drains one batch and requeues
+        // the remaining value before the stale receiver claims the work bit.
+        let mut fresh = rx.clone();
+        for expected in 0..PREFETCH_LIMIT {
+            assert_eq!(fresh.try_recv(), Ok(expected));
+        }
+        let claimed = rx.acquire_work_lane(&ready).map(|(lane, publication)| {
+            let drained = rx.drain_lane(lane);
+            drop(publication);
+            let LaneDrain::Item { value, effects } = drained else {
+                panic!("requeued lane has a remaining value");
+            };
+            rx.apply_effects(effects);
+            value
+        });
+        // Claiming a bit through an older topology must not lose access to
+        // the lane. A deferred claim must leave it reachable on the next scan.
+        assert_eq!(
+            claimed.map_or_else(|| rx.try_recv(), Ok),
+            Ok(PREFETCH_LIMIT)
+        );
+        drop(senders);
+        assert_eq!(rx.recv(), Err(RecvError));
+    }
+
     #[test]
     fn requeue_new_page_after_acquiring_through_stale_topology() {
         let checks: [fn(); 2] = [
             check_new_page_requeue::<Deferred>,
             check_new_page_requeue::<Coordinated>,
+        ];
+        for check in checks {
+            #[cfg(loom)]
+            loom::model(check);
+            #[cfg(not(loom))]
+            check();
+        }
+    }
+
+    #[test]
+    fn claim_new_page_work_through_stale_topology() {
+        let checks: [fn(); 2] = [
+            check_new_page_work_claim::<Deferred>,
+            check_new_page_work_claim::<Coordinated>,
         ];
         for check in checks {
             #[cfg(loom)]
