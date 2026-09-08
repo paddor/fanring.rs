@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Require yring 0.3.16 with corrected data/space wakeup handshakes.
+- Keep MPSC lane polling inlined when underlying ring operations grow, avoiding
+  extra receive calls and intermediate payload moves.
+
 ## [0.3.1] - 2026-09-05
 
 ### Changed

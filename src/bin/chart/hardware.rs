@@ -22,7 +22,17 @@ fn configured_hardware() -> Option<String> {
 }
 
 fn read_chart_hardware() -> BTreeMap<String, String> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".chart_hw");
+    let working_dir = std::env::current_dir().unwrap_or_default();
+    read_chart_hardware_from(&working_dir, Path::new(env!("CARGO_MANIFEST_DIR")))
+}
+
+fn read_chart_hardware_from(working_dir: &Path, manifest_dir: &Path) -> BTreeMap<String, String> {
+    // A copied or installed binary must use the checkout it is running in.
+    let path = working_dir
+        .ancestors()
+        .map(|dir| dir.join(".chart_hw"))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| manifest_dir.join(".chart_hw"));
     let Ok(content) = std::fs::read_to_string(path) else {
         return BTreeMap::new();
     };
@@ -62,7 +72,43 @@ fn simplify_cpu_name(cpu: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{join_hardware_parts, simplify_cpu_name};
+    use super::{join_hardware_parts, read_chart_hardware_from, simplify_cpu_name};
+
+    #[test]
+    fn reads_runtime_repo_hardware_after_relocated_build() {
+        let root =
+            std::env::temp_dir().join(format!("fanring-chart-hardware-{}", std::process::id()));
+        let repo = root.join("runtime-repo");
+        let nested = repo.join("doc/charts");
+        let build = root.join("isolated-build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(
+            repo.join(".chart_hw"),
+            "prefix=runtime host\npostfix=turbo off\n",
+        )
+        .unwrap();
+        std::fs::write(build.join(".chart_hw"), "label=stale build host\n").unwrap();
+
+        let from_root = read_chart_hardware_from(&repo, &build);
+        let from_nested = read_chart_hardware_from(&nested, &build);
+        std::fs::remove_file(repo.join(".chart_hw")).unwrap();
+        let fallback = read_chart_hardware_from(&repo, &build);
+        std::fs::remove_file(build.join(".chart_hw")).unwrap();
+        let missing = read_chart_hardware_from(&repo, &build);
+        std::fs::remove_dir_all(root).unwrap();
+
+        assert_eq!(
+            from_root.get("prefix").map(String::as_str),
+            Some("runtime host")
+        );
+        assert_eq!(from_nested, from_root);
+        assert_eq!(
+            fallback.get("label").map(String::as_str),
+            Some("stale build host")
+        );
+        assert!(missing.is_empty());
+    }
 
     #[test]
     fn joins_configured_hardware_parts() {

@@ -88,6 +88,9 @@ of ordinary payload reads. Blocking receives convert maintenance results
 directly to their own return type to avoid another payload-sized return through
 `try_recv`.
 
+Lane polling is always inlined so changes inside yring do not turn the
+maintenance path into a separate per-message call with an intermediate result.
+
 The fast path updates the same burst, release, and readiness-poll counters as
 the maintenance path. It stops before a pop reaches either per-lane limit and
 is disabled when the readiness-poll budget is zero. Maintenance still performs
