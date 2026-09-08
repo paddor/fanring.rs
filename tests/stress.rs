@@ -126,7 +126,7 @@ fn drops_remaining_items_once() {
     DROPS.store(0, Ordering::Relaxed);
 
     let token = Arc::new(());
-    let (mut tx0, rx) = channel(8);
+    let (mut tx0, rx) = fanring::mpsc::channel_with_policy::<_, fanring::teardown::Coordinated>(8);
     let mut tx1 = tx0.try_clone().unwrap();
 
     for _ in 0..8 {
@@ -135,6 +135,7 @@ fn drops_remaining_items_once() {
     }
 
     drop(rx);
+    assert_eq!(DROPS.load(Ordering::Relaxed), 16);
     drop(tx0);
     drop(tx1);
 

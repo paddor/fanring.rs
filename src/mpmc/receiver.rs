@@ -1,3 +1,5 @@
+use crate::teardown::{Deferred, Teardown};
+
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::fmt;
@@ -16,14 +18,20 @@ use super::{
 /// Receiving half.
 ///
 /// Clones compete for messages through bounded stealable work queues.
-pub struct Receiver<T> {
-    pub(super) shared: Arc<Shared<T>>,
+///
+/// Dropping the last receiver disconnects senders. Unread payload destruction
+/// follows `P`: [`Deferred`] may retain ring values until their sender drops;
+/// [`Coordinated`](crate::teardown::Coordinated) reclaims them during teardown
+/// or when an overlapping send resumes. Other MPMC receivers preserve access
+/// to queued work until the last receiver drops.
+pub struct Receiver<T, P: Teardown = Deferred> {
+    pub(super) shared: Arc<Shared<T, P>>,
     pub(super) id: usize,
     pub(super) local: super::WorkQueue<T>,
     /// Unsynchronized staging used only while this is the sole receiver.
     pub(super) private: RefCell<VecDeque<T>>,
     pub(super) steal_cursor: usize,
-    pub(super) ready: RefCell<std::sync::Arc<ReadyTopology<T>>>,
+    pub(super) ready: RefCell<std::sync::Arc<ReadyTopology<T, P>>>,
     pub(super) seen_ready_generation: Cell<usize>,
     pub(super) ready_group_cursor: Cell<usize>,
     pub(super) ready_page_cursor: Cell<usize>,
@@ -32,7 +40,7 @@ pub struct Receiver<T> {
     pub(super) capacity_per_sender: usize,
 }
 
-impl<T> Clone for Receiver<T> {
+impl<T, P: Teardown> Clone for Receiver<T, P> {
     fn clone(&self) -> Self {
         // Make sole-receiver staging stealable before publishing another clone.
         let publication = self.shared.publications.begin();
@@ -57,7 +65,7 @@ impl<T> Clone for Receiver<T> {
     }
 }
 
-impl<T> Receiver<T> {
+impl<T, P: Teardown> Receiver<T, P> {
     /// Try to receive one value.
     ///
     /// # Errors
@@ -308,7 +316,7 @@ impl<T> Receiver<T> {
         }
     }
 
-    fn acquire_lane(&self) -> Option<(LaneToken<T>, Publication<'_>)> {
+    fn acquire_lane(&self) -> Option<(LaneToken<T, P>, Publication<'_>)> {
         self.refresh_ready_topology();
         let ready = self.ready.borrow();
         let prefer_work = self.prefer_work.replace(!self.prefer_work.get());
@@ -338,8 +346,8 @@ impl<T> Receiver<T> {
 
     fn acquire_work_lane<'a>(
         &'a self,
-        ready: &ReadyTopology<T>,
-    ) -> Option<(LaneToken<T>, Publication<'a>)> {
+        ready: &ReadyTopology<T, P>,
+    ) -> Option<(LaneToken<T, P>, Publication<'a>)> {
         let group_count = ready.work_groups.len();
         let start = self.ready_group_cursor.get() % group_count;
         let page_start = self.ready_page_cursor.get();
@@ -374,8 +382,8 @@ impl<T> Receiver<T> {
 
     fn acquire_ready_lane<'a>(
         &'a self,
-        ready: &ReadyTopology<T>,
-    ) -> Option<(LaneToken<T>, Publication<'a>)> {
+        ready: &ReadyTopology<T, P>,
+    ) -> Option<(LaneToken<T, P>, Publication<'a>)> {
         let group_count = ready.ready_groups.len();
         let start = self.ready_group_cursor.get() % group_count;
         let page_start = self.ready_page_cursor.get();
@@ -403,7 +411,7 @@ impl<T> Receiver<T> {
         None
     }
 
-    fn drain_lane(&self, mut lane: LaneToken<T>) -> LaneDrain<T> {
+    fn drain_lane(&self, mut lane: LaneToken<T, P>) -> LaneDrain<T> {
         if lane.cached_available == 0 {
             lane.cached_available = lane.consumer.prefetch();
             if lane.cached_available == 0 {
@@ -477,7 +485,7 @@ impl<T> Receiver<T> {
         }
     }
 
-    fn requeue_lane(&self, lane: LaneToken<T>) {
+    fn requeue_lane(&self, lane: LaneToken<T, P>) {
         let page_id = lane.key.slot / super::LANES_PER_PAGE;
         self.ready.borrow().pages[page_id].push(lane);
     }
@@ -546,19 +554,19 @@ impl<T> Receiver<T> {
     /// Iterate until every sender disconnects and buffered values are drained.
     #[inline]
     #[must_use]
-    pub const fn iter(&mut self) -> Iter<'_, T> {
+    pub const fn iter(&mut self) -> Iter<'_, T, P> {
         Iter { receiver: self }
     }
 
     /// Iterate over values immediately available without blocking.
     #[inline]
     #[must_use]
-    pub const fn try_iter(&mut self) -> TryIter<'_, T> {
+    pub const fn try_iter(&mut self) -> TryIter<'_, T, P> {
         TryIter { receiver: self }
     }
 }
 
-impl<T> Drop for Receiver<T> {
+impl<T, P: Teardown> Drop for Receiver<T, P> {
     fn drop(&mut self) {
         let publication = self.shared.publications.begin();
         let private = self.private.get_mut();
@@ -577,7 +585,7 @@ impl<T> Drop for Receiver<T> {
     }
 }
 
-impl<T> fmt::Debug for Receiver<T> {
+impl<T, P: Teardown> fmt::Debug for Receiver<T, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Receiver")
             .field("id", &self.id)
@@ -604,11 +612,11 @@ impl<T> fmt::Debug for Receiver<T> {
 
 /// Blocking iterator over a borrowed receiver.
 #[derive(Debug)]
-pub struct Iter<'a, T> {
-    receiver: &'a mut Receiver<T>,
+pub struct Iter<'a, T, P: Teardown = Deferred> {
+    receiver: &'a mut Receiver<T, P>,
 }
 
-impl<T> Iterator for Iter<'_, T> {
+impl<T, P: Teardown> Iterator for Iter<'_, T, P> {
     type Item = T;
 
     #[inline]
@@ -617,15 +625,15 @@ impl<T> Iterator for Iter<'_, T> {
     }
 }
 
-impl<T> std::iter::FusedIterator for Iter<'_, T> {}
+impl<T, P: Teardown> std::iter::FusedIterator for Iter<'_, T, P> {}
 
 /// Nonblocking iterator over a borrowed receiver.
 #[derive(Debug)]
-pub struct TryIter<'a, T> {
-    receiver: &'a mut Receiver<T>,
+pub struct TryIter<'a, T, P: Teardown = Deferred> {
+    receiver: &'a mut Receiver<T, P>,
 }
 
-impl<T> Iterator for TryIter<'_, T> {
+impl<T, P: Teardown> Iterator for TryIter<'_, T, P> {
     type Item = T;
 
     #[inline]
@@ -636,11 +644,11 @@ impl<T> Iterator for TryIter<'_, T> {
 
 /// Blocking iterator that owns its receiver.
 #[derive(Debug)]
-pub struct IntoIter<T> {
-    receiver: Receiver<T>,
+pub struct IntoIter<T, P: Teardown = Deferred> {
+    receiver: Receiver<T, P>,
 }
 
-impl<T> Iterator for IntoIter<T> {
+impl<T, P: Teardown> Iterator for IntoIter<T, P> {
     type Item = T;
 
     #[inline]
@@ -649,15 +657,15 @@ impl<T> Iterator for IntoIter<T> {
     }
 }
 
-impl<T> std::iter::FusedIterator for IntoIter<T> {}
+impl<T, P: Teardown> std::iter::FusedIterator for IntoIter<T, P> {}
 
 #[allow(
     clippy::into_iter_without_iter,
     reason = "channel convention names the blocking iterator iter"
 )]
-impl<'a, T> IntoIterator for &'a mut Receiver<T> {
+impl<'a, T, P: Teardown> IntoIterator for &'a mut Receiver<T, P> {
     type Item = T;
-    type IntoIter = Iter<'a, T>;
+    type IntoIter = Iter<'a, T, P>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
@@ -665,9 +673,9 @@ impl<'a, T> IntoIterator for &'a mut Receiver<T> {
     }
 }
 
-impl<T> IntoIterator for Receiver<T> {
+impl<T, P: Teardown> IntoIterator for Receiver<T, P> {
     type Item = T;
-    type IntoIter = IntoIter<T>;
+    type IntoIter = IntoIter<T, P>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
@@ -675,42 +683,42 @@ impl<T> IntoIterator for Receiver<T> {
     }
 }
 
-pub(super) struct Lane<T> {
+pub(super) struct Lane<T, P: Teardown> {
     pub(super) key: super::LaneKey,
     pub(super) signal: Arc<LaneSignal>,
-    pub(super) consumer: yring::Consumer<T>,
+    pub(super) consumer: crate::ring::Consumer<T, P>,
     pub(super) cached_available: usize,
     pub(super) unreleased: usize,
     pub(super) release_batch: usize,
 }
 
-pub(super) struct LaneToken<T>(Box<Lane<T>>);
+pub(super) struct LaneToken<T, P: Teardown>(Box<Lane<T, P>>);
 
-impl<T> LaneToken<T> {
-    pub(super) fn new(lane: Lane<T>) -> Self {
+impl<T, P: Teardown> LaneToken<T, P> {
+    pub(super) fn new(lane: Lane<T, P>) -> Self {
         Self(Box::new(lane))
     }
 }
 
-impl<T> Deref for LaneToken<T> {
-    type Target = Lane<T>;
+impl<T, P: Teardown> Deref for LaneToken<T, P> {
+    type Target = Lane<T, P>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<T> DerefMut for LaneToken<T> {
+impl<T, P: Teardown> DerefMut for LaneToken<T, P> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl<T> Lane<T> {
+impl<T, P: Teardown> Lane<T, P> {
     pub(super) fn new(
         key: super::LaneKey,
         signal: Arc<LaneSignal>,
-        consumer: yring::Consumer<T>,
+        consumer: crate::ring::Consumer<T, P>,
     ) -> Self {
         let release_batch = consumer.capacity().min(PREFETCH_LIMIT);
         Self {
@@ -733,8 +741,8 @@ impl<T> Lane<T> {
     }
 }
 
-pub(super) enum FinishLane<T> {
-    Ready(LaneToken<T>),
+pub(super) enum FinishLane<T, P: Teardown> {
+    Ready(LaneToken<T, P>),
     Parked,
     Retired { wake_all: bool },
 }
@@ -786,7 +794,7 @@ impl Effects {
     }
 }
 
-pub(super) fn close_lane<T>(mut lane: LaneToken<T>) {
+pub(super) fn close_lane<T, P: Teardown>(mut lane: LaneToken<T, P>) {
     lane.consumer.close();
     lane.signal.notify_space();
 }

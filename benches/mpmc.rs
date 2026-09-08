@@ -238,7 +238,16 @@ fn run_payload<T>(
 
     let mut implementations: Vec<(&str, BenchFn<T>)> = Vec::new();
     if impl_filter.matches("fanring-mpmc") {
-        implementations.push(("fanring-mpmc", bench_fanring::<T>));
+        implementations.push((
+            "fanring-mpmc",
+            bench_fanring::<T, fanring::teardown::Deferred>,
+        ));
+    }
+    if impl_filter.matches("fanring-coordinated-mpmc") {
+        implementations.push((
+            "fanring-coordinated-mpmc",
+            bench_fanring::<T, fanring::teardown::Coordinated>,
+        ));
     }
     if impl_filter.matches("crossbeam-channel") {
         implementations.push(("crossbeam-channel", bench_crossbeam::<T>));
@@ -307,11 +316,16 @@ fn run_payload<T>(
     }
 }
 
-fn bench_fanring<T>(context: &RunContext, config: Config, mode: Mode, payload: Payload<T>) -> Row
+fn bench_fanring<T, P: fanring::teardown::Teardown>(
+    context: &RunContext,
+    config: Config,
+    mode: Mode,
+    payload: Payload<T>,
+) -> Row
 where
     T: Copy + Send + 'static,
 {
-    let (tx0, rx0) = fanring::mpmc::channel(config.capacity_per_sender);
+    let (tx0, rx0) = fanring::mpmc::channel_with_policy::<T, P>(config.capacity_per_sender);
     let mut senders = vec![tx0];
     for _ in 1..config.producers {
         senders.push(senders[0].try_clone().expect("fanring sender lane"));
@@ -322,7 +336,11 @@ where
     }
     run_channel(
         context,
-        "fanring-mpmc",
+        if P::COORDINATED {
+            "fanring-coordinated-mpmc"
+        } else {
+            "fanring-mpmc"
+        },
         config,
         mode,
         payload,
@@ -693,7 +711,7 @@ fn row<T>(
         consumers: config.consumers,
         capacity_per_sender: config.capacity_per_sender,
         nominal_capacity: config.total_capacity(),
-        capacity_model: if implementation == "fanring-mpmc" {
+        capacity_model: if implementation.starts_with("fanring") {
             "per-ring-hwm-with-staging"
         } else {
             "shared-bound"
@@ -710,7 +728,7 @@ fn row<T>(
     }
 }
 
-impl<T> BenchSender<T> for fanring::mpmc::Sender<T>
+impl<T, P: fanring::teardown::Teardown> BenchSender<T> for fanring::mpmc::Sender<T, P>
 where
     T: Send + 'static,
 {
@@ -729,7 +747,7 @@ where
     }
 }
 
-impl<T> BenchReceiver<T> for fanring::mpmc::Receiver<T>
+impl<T, P: fanring::teardown::Teardown> BenchReceiver<T> for fanring::mpmc::Receiver<T, P>
 where
     T: Send + 'static,
 {
@@ -984,6 +1002,7 @@ fn selected_payload_count(filter: &Filter) -> usize {
 fn selected_implementation_count(filter: &Filter) -> usize {
     [
         "fanring-mpmc",
+        "fanring-coordinated-mpmc",
         "crossbeam-channel",
         "crossfire-mpmc",
         "flume",

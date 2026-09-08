@@ -20,8 +20,14 @@ const SERIES: &[Series] = &[
     Series {
         mpsc_key: "fanring",
         mpmc_key: Some("fanring-mpmc"),
-        label: "fanring",
+        label: "fanring Deferred",
         color: RGBColor(0xf8, 0x71, 0x71),
+    },
+    Series {
+        mpsc_key: "fanring-coordinated",
+        mpmc_key: Some("fanring-coordinated-mpmc"),
+        label: "fanring Coordinated",
+        color: RGBColor(0xfb, 0xbf, 0x24),
     },
     Series {
         mpsc_key: "crossbeam-channel",
@@ -84,11 +90,17 @@ pub(super) fn draw_summary_chart(
             summary_values(mpmc_rows, true),
         ),
     ];
+    let coordinated = groups[0].1.contains_key("fanring Coordinated");
+    let expected_mpsc_series = SERIES.len() - usize::from(!coordinated);
     let expected_mpmc_series = SERIES
         .iter()
         .filter(|series| series.mpmc_key.is_some())
-        .count();
-    if groups[0].1.len() != SERIES.len() || groups[1].1.len() != expected_mpmc_series {
+        .count()
+        - usize::from(!coordinated);
+    if coordinated != groups[1].1.contains_key("fanring Coordinated")
+        || groups[0].1.len() != expected_mpsc_series
+        || groups[1].1.len() != expected_mpmc_series
+    {
         return Err(ChartError::NoRenderableRows);
     }
 
@@ -166,7 +178,13 @@ pub(super) fn draw_summary_chart(
         )?;
     }
 
-    draw_legend(&area, 65.0, plot_bottom + 52.0, nominal_capacity)?;
+    draw_legend(
+        &area,
+        65.0,
+        plot_bottom + 52.0,
+        nominal_capacity,
+        coordinated,
+    )?;
 
     area.present().chart()?;
     drop(area);
@@ -388,8 +406,18 @@ fn chart_header(
     Ok(())
 }
 
-fn draw_legend(area: &Area<'_>, x: f64, y: f64, nominal_capacity: usize) -> ChartResult<()> {
-    for (index, series) in SERIES.iter().enumerate() {
+fn draw_legend(
+    area: &Area<'_>,
+    x: f64,
+    y: f64,
+    nominal_capacity: usize,
+    coordinated: bool,
+) -> ChartResult<()> {
+    for (index, series) in SERIES
+        .iter()
+        .filter(|series| coordinated || series.mpsc_key != "fanring-coordinated")
+        .enumerate()
+    {
         let column = index % 3;
         let row = index / 3;
         let legend_x = x + column as f64 * 230.0;
@@ -404,8 +432,8 @@ fn draw_legend(area: &Area<'_>, x: f64, y: f64, nominal_capacity: usize) -> Char
         )?;
         text(
             area,
-            if series.mpsc_key == "fanring" {
-                format!("fanring (4 x {}-item rings)", nominal_capacity / 4)
+            if series.mpsc_key.starts_with("fanring") {
+                format!("{} (4 x {})", series.label, nominal_capacity / 4)
             } else {
                 series.label.to_string()
             },

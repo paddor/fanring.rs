@@ -43,9 +43,14 @@ to a later sender.
 ## Send Path
 
 1. Check that the receiver is alive.
-2. Push into the sender-owned yring.
-3. Flush the producer.
-4. Mark the lane ready.
+2. With `Coordinated`, acquire the lane's active bit unless it is closed.
+3. Push into the sender-owned yring and flush the producer.
+4. With `Coordinated`, clear the active bit and perform deferred close cleanup.
+5. Mark the lane ready.
+
+`Deferred` is the default and omits steps 2 and 4. Policy dispatch is resolved
+through a sealed type parameter, not a runtime setting. Deferred lanes do not
+allocate the cleanup state or handoff mutex.
 
 ## Lane Readiness
 
@@ -187,6 +192,27 @@ MPSC receiver drop marks the channel closed and closes installed and pending
 consumers. MPMC closes the channel when its last receiver drops. Earlier MPMC
 receiver drops republish local work. Closing wakes blocked lane senders; later
 sends return `Disconnected`.
+
+With `Deferred`, closing a yring consumer leaves unread ring values owned by
+the surviving sender. Receiver-local staged values can drop earlier. Each
+lane releases retained values when its sender releases the ring.
+
+With `Coordinated`, each lane wraps its yring with an atomic active/closed state and a consumer
+handoff slot. Sends acquire the active bit before pushing and clear it after
+flushing. Closing first drains the consumer's current window, including any
+prefetched but unread values. It then installs the consumer in the handoff
+slot and sets the closed bit. If no send is active, the receiver takes the
+consumer back for a final drain. Otherwise, the active send takes the consumer
+and drains late publications when it finishes. New sends cannot acquire a
+closed lane. The initial drain retains slot credit so that closing a full lane
+cannot make an in-flight send succeed by freeing capacity.
+
+The handoff mutex is acquired before setting the closed bit. Senders only
+access it after observing that bit, so the handoff never waits for a paused
+sender. Payload destructors run outside the mutex. Unread values are
+destroyed while sender handles remain alive; an unfinished concurrent send
+may defer cleanup of its late publication until that send resumes. Ring
+allocations remain owned by their sender handles.
 
 ## Ordering And Capacity
 

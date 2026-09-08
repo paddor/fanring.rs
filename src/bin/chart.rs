@@ -34,8 +34,10 @@ const DEFAULT_CHART_MODE: &str = "try";
 type ChartResult<T> = Result<T, ChartError>;
 
 const SERIES: &[(&str, &str)] = &[
-    ("fanring", "fanring"),
-    ("fanring-mpmc", "fanring"),
+    ("fanring", "fanring Deferred"),
+    ("fanring-coordinated", "fanring Coordinated"),
+    ("fanring-mpmc", "fanring Deferred"),
+    ("fanring-coordinated-mpmc", "fanring Coordinated"),
     ("crossbeam-channel", "crossbeam-channel 0.5.16"),
     ("crossfire", "crossfire 3.1.19"),
     ("crossfire-mpmc", "crossfire 3.1.19"),

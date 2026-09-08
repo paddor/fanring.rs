@@ -72,7 +72,10 @@ mod tests {
         let unknown = row("new-channel", 0, 1);
         assert_eq!(
             present_series(&[&known, &unknown]),
-            vec![("fanring", "fanring"), ("new-channel", "new-channel")]
+            vec![
+                ("fanring", "fanring Deferred"),
+                ("new-channel", "new-channel")
+            ]
         );
     }
 

@@ -19,6 +19,7 @@ include = [
     "LICENSE",
     "CHANGELOG.md",
     "DESIGN.md",
+    "doc/teardown.md",
 ]
 
 [lints.rust]

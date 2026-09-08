@@ -230,3 +230,60 @@ cargo run --example fanring-chart -- \
   --run RUN_ID \
   --output /path/to/latency-mpsc.svg
 ```
+
+## Teardown policy comparisons
+
+`channel` uses Deferred. The comparison benches include a second monomorphized
+fanring implementation using Coordinated, identified as `fanring-coordinated`
+(MPSC) and `fanring-coordinated-mpmc` (MPMC). Both use the same harness and rotate
+measurement order with the other implementations. Their result files live in
+separate `fanring` and `fanring-coordinated` directories, so policies cannot be
+combined as samples of the same implementation. General chart generation labels
+both policies and can include both in detail and summary charts. Legacy summary
+runs containing only Deferred remain supported.
+
+The focused policy charts use `u64`, five samples per case, and all combinations
+of 1, 2, 4, and 8 workers. Run each command sequentially on an idle system. Build,
+format, and run Clippy before benchmarking; stop on any warning or timeout.
+
+```sh
+cargo fmt --all --check
+cargo build --locked
+cargo clippy --all-targets --all-features -- -D warnings
+cargo bench --locked --no-run --bench comparison --bench mpmc
+
+FANRING_BENCH_CACHE_DIR=target/teardown-policy-results \
+FANRING_BENCH_PAYLOADS=u64 \
+FANRING_BENCH_IMPLS=fanring,fanring-coordinated \
+FANRING_BENCH_PRODUCERS=1,2,4,8 \
+FANRING_BENCH_SAMPLES=5 FANRING_BENCH_SECS=1 \
+FANRING_BENCH_WARMUP_SECS=0.25 FANRING_BENCH_CAPACITY=8192 \
+FANRING_BENCH_MODE=try FANRING_BENCH_PROFILE=uncontrolled \
+FANRING_BENCH_AFFINITY=auto \
+cargo bench --locked --bench comparison
+
+FANRING_BENCH_CACHE_DIR=target/teardown-policy-results \
+FANRING_BENCH_PAYLOADS=u64 \
+FANRING_BENCH_IMPLS=fanring-mpmc,fanring-coordinated-mpmc \
+FANRING_BENCH_PRODUCERS=1,2,4,8 FANRING_BENCH_CONSUMERS=1,2,4,8 \
+FANRING_BENCH_SAMPLES=5 FANRING_BENCH_SECS=1 \
+FANRING_BENCH_WARMUP_SECS=0.25 FANRING_BENCH_CAPACITY=8192 \
+FANRING_BENCH_MODE=try FANRING_BENCH_PROFILE=uncontrolled \
+FANRING_BENCH_AFFINITY=auto \
+cargo bench --locked --bench mpmc
+
+cargo run --example fanring-chart -- \
+  --results-dir target/teardown-policy-results \
+  --output doc/charts/teardown-mpsc.svg
+cargo run --example fanring-chart -- --mpmc \
+  --results-dir target/teardown-policy-results \
+  --output doc/charts/teardown-mpmc.svg
+
+cargo run --locked --example teardown
+```
+
+The last command checks owned-payload destruction separately from throughput.
+It prints destructor counts before and after dropping senders for the dependency
+versions in `Cargo.lock`. These sequential observations do not establish a
+competitor's behavior during concurrent publication. See [the teardown comparison](doc/teardown.md)
+for the policy contract and upstream issue references.

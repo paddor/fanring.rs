@@ -16,6 +16,15 @@
 //! Both variants provide nonblocking, blocking, timeout, and deadline APIs.
 //! Capacity is a high-water mark per sender, not one shared channel bound.
 //!
+//! # Teardown
+//!
+//! Constructors default to [`teardown::Deferred`]: unread ring payloads may
+//! remain alive until their sender drops. Choose [`teardown::Coordinated`] with
+//! [`mpsc::channel_with_policy`] or [`mpmc::channel_with_policy`] to reclaim
+//! payloads independently of idle sender lifetimes. An overlapping send can
+//! finish cleanup after receiver drop returns, without blocking that drop on a
+//! paused producer. The choice is per channel and inherited by cloned handles.
+//!
 //! # Example
 //!
 //! ```
@@ -42,4 +51,6 @@ pub mod mpmc;
 pub mod mpsc;
 mod publication;
 mod ready;
+mod ring;
+pub mod teardown;
 mod wait;

@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Per-channel `Deferred` and `Coordinated` teardown policies, selected with
+  `channel_with_policy` or `try_channel_with_policy`. Existing constructors use
+  Deferred and preserve their send path without cleanup coordination.
+- Coordinated teardown destroys unread payloads while sender handles remain
+  alive. Overlapping sends reclaim late publications when they resume, without
+  making receiver teardown wait for a paused producer.
+
 ## [0.3.2] - 2026-09-08
 
 ### Changed

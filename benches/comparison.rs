@@ -235,7 +235,13 @@ fn run_payload<T>(
 
     let mut implementations: Vec<(&str, BenchFn<T>)> = Vec::new();
     if impl_filter.matches("fanring") {
-        implementations.push(("fanring", bench_fanring::<T>));
+        implementations.push(("fanring", bench_fanring::<T, fanring::teardown::Deferred>));
+    }
+    if impl_filter.matches("fanring-coordinated") {
+        implementations.push((
+            "fanring-coordinated",
+            bench_fanring::<T, fanring::teardown::Coordinated>,
+        ));
     }
     if impl_filter.matches("crossbeam-channel") {
         implementations.push(("crossbeam-channel", bench_crossbeam_channel::<T>));
@@ -312,17 +318,34 @@ fn run_payload<T>(
     }
 }
 
-fn bench_fanring<T>(context: &RunContext, config: Config, mode: Mode, payload: Payload<T>) -> Row
+fn bench_fanring<T, P: fanring::teardown::Teardown>(
+    context: &RunContext,
+    config: Config,
+    mode: Mode,
+    payload: Payload<T>,
+) -> Row
 where
     T: Copy + Send + 'static,
 {
-    let (tx0, rx) = fanring::mpsc::channel::<T>(config.capacity_per_sender);
+    let (tx0, rx) = fanring::mpsc::channel_with_policy::<T, P>(config.capacity_per_sender);
     let mut senders = vec![tx0];
     for _ in 1..config.producers {
         let tx = senders[0].try_clone().expect("fanring sender slot");
         senders.push(tx);
     }
-    run_channel(context, "fanring", config, mode, payload, senders, rx)
+    run_channel(
+        context,
+        if P::COORDINATED {
+            "fanring-coordinated"
+        } else {
+            "fanring"
+        },
+        config,
+        mode,
+        payload,
+        senders,
+        rx,
+    )
 }
 
 fn bench_crossbeam_channel<T>(
@@ -664,7 +687,9 @@ fn join_counts(handles: Vec<thread::JoinHandle<u64>>, implementation: &str) -> u
         .sum()
 }
 
-impl<T: Send + 'static> BenchSender<T> for fanring::mpsc::Sender<T> {
+impl<T: Send + 'static, P: fanring::teardown::Teardown> BenchSender<T>
+    for fanring::mpsc::Sender<T, P>
+{
     #[inline(always)]
     fn try_send(&mut self, value: T) -> SendAttempt {
         match self.try_send(value) {
@@ -680,7 +705,7 @@ impl<T: Send + 'static> BenchSender<T> for fanring::mpsc::Sender<T> {
     }
 }
 
-impl<T> BenchReceiver<T> for fanring::mpsc::Receiver<T> {
+impl<T, P: fanring::teardown::Teardown> BenchReceiver<T> for fanring::mpsc::Receiver<T, P> {
     #[inline(always)]
     fn try_recv(&mut self) -> RecvAttempt<T> {
         match self.try_recv() {
@@ -924,7 +949,7 @@ fn row<T>(
         producers: config.producers,
         capacity_per_sender: config.capacity_per_sender,
         nominal_capacity: config.total_capacity(),
-        capacity_model: if implementation == "fanring" {
+        capacity_model: if implementation.starts_with("fanring") {
             "per-ring-hwm"
         } else {
             "shared-bound"
@@ -1033,6 +1058,7 @@ fn selected_payload_count(filter: &Filter) -> usize {
 fn selected_implementation_count(filter: &Filter, mode: Mode) -> usize {
     [
         ("fanring", true),
+        ("fanring-coordinated", true),
         ("crossbeam-channel", true),
         ("crossfire", true),
         ("flume", true),
