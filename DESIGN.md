@@ -29,6 +29,11 @@ tokens. The immutable page/group topology is published with `ArcSwap` only
 when registration crosses a 64-lane boundary; each receiver caches it until a
 generation change.
 
+Topology snapshots freeze the page/group vectors. Their referenced readiness
+groups remain shared and mutable, so a claimed bit can name a page registered
+after the snapshot was cached. Work claims and lane requeues resolve missing
+pages through the published topology to preserve access to their lane tokens.
+
 The registry also tracks one bounded synchronized work queue per live receiver.
 Receiver creation and drop rebuild an immutable queue snapshot under the
 registry mutex and publish it with `ArcSwap`. Receivers load the snapshot itself
