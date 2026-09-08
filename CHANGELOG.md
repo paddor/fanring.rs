@@ -4,12 +4,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-08
+
 ### Added
 
 - Per-channel `Deferred` and `Coordinated` teardown policies, selected with
-  `channel_with_policy` or `try_channel_with_policy`. Existing constructors use
-  Deferred and preserve their send path without cleanup coordination.
-- Coordinated teardown destroys unread payloads while sender handles remain
+  `channel_with_policy` or `try_channel_with_policy`. `Deferred` is the default
+  and preserves the send path without cleanup coordination.
+- `Coordinated` teardown destroys unread payloads while sender handles remain
   alive. Overlapping sends reclaim late publications when they resume, without
   making receiver teardown wait for a paused producer.
 
@@ -116,7 +118,8 @@ All notable changes to this project are documented here.
 
 - Initial bounded, nonblocking MPSC implementation with a fixed sender limit.
 
-[Unreleased]: https://github.com/paddor/fanring.rs/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/paddor/fanring.rs/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/paddor/fanring.rs/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/paddor/fanring.rs/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/paddor/fanring.rs/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/paddor/fanring.rs/compare/v0.2.2...v0.3.0
