@@ -269,7 +269,9 @@ impl<T> Receiver<T> {
         }
     }
 
-    #[inline]
+    // Keep LanePoll in the caller. Extra yring branches can otherwise exceed
+    // the compiler's inline budget and add a call/return to every blocking recv.
+    #[inline(always)]
     fn poll_lane(&mut self, key: LaneKey) -> LanePoll<T> {
         let Some(lane) = self.lanes.get_mut(key.slot).and_then(Option::as_mut) else {
             return LanePoll::Stale;

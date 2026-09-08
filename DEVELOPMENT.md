@@ -199,7 +199,10 @@ cargo run --example fanring-chart -- --latency mpmc
 Default outputs: `doc/charts/latency-mpsc.svg` and
 `doc/charts/latency-mpmc.svg`.
 
-Chart subtitles use the ignored `.chart_hw` file in the repository root:
+Chart subtitles automatically use the nearest `.chart_hw` in the current
+directory or its ancestors. If none exists, they use `.chart_hw` in the build's
+source directory. This also works when running a copied chart binary from the
+repository or one of its subdirectories. The file is ignored by Git:
 
 ```text
 prefix=Linux VM on a 2018 Mac Mini
