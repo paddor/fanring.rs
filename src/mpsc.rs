@@ -2,6 +2,12 @@
 //!
 //! Each sender owns its ring producer and the receiver owns every ring
 //! consumer. Ordering is FIFO per sender and relaxed across senders.
+//!
+//! Single-value receives batch slot release, so a sender can still observe
+//! `Full` after values have been received. [`Receiver::release_consumed`]
+//! publishes those freed slots immediately. [`Receiver::recv_batch_into`]
+//! receives a bounded batch into a caller-owned vector and releases consumed
+//! slots before returning, waiting only for the first value.
 
 use crate::teardown::{Deferred, Teardown};
 

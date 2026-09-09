@@ -89,8 +89,28 @@ drop(rx);
 assert_eq!(tx0.send("closed").unwrap_err().into_inner(), "closed");
 ```
 
-`mpsc` keeps receive-side batching entirely inside `recv`/`try_recv`. It
-preserves FIFO within each sender lane and relaxes order across senders.
+`mpsc` preserves FIFO within each sender lane and relaxes order across senders.
+Single-value receives batch slot release: receiving a value may leave its slot
+unavailable to the sender until a later receive. Call `rx.release_consumed()`
+before returning application permits or issuing completions that allow more
+sends. This publishes freed slots across sender lanes and wakes blocked senders.
+
+To receive a bounded batch into reusable storage:
+
+```rust
+let mut batch = Vec::with_capacity(32);
+while rx.recv_batch_into(&mut batch, 32).is_ok() {
+    for value in batch.drain(..) {
+        // Process value. Its ring slot is already reusable.
+    }
+}
+```
+
+`recv_batch_into` appends at most the requested limit, waits only for the first
+value, and releases consumed slots before returning. It returns the number
+appended; a partial batch succeeds even after disconnect. Reserve enough spare
+vector capacity to avoid output reallocations. A zero limit receives nothing,
+releases consumed slots, and returns `Ok(0)`.
 
 ## MPMC
 

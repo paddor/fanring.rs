@@ -18,6 +18,12 @@ use super::{
 /// The receiver owns every SPSC consumer and drains active lanes in bounded
 /// round-robin bursts. It is `Send` when `T` is `Send`, but it is not `Sync`.
 ///
+/// Single-value receives batch slot release, so receiving a value does not
+/// necessarily make its slot immediately reusable by the sender. Call
+/// [`release_consumed`](Self::release_consumed) or use
+/// [`recv_batch_into`](Self::recv_batch_into) to publish freed slots before
+/// processing received values.
+///
 /// Dropping the last receiver disconnects senders. Unread payload destruction
 /// follows `P`: [`Deferred`] may retain ring values until their sender drops;
 /// [`Coordinated`](crate::teardown::Coordinated) reclaims them during teardown
@@ -36,6 +42,9 @@ pub struct Receiver<T, P: Teardown = Deferred> {
 
 impl<T, P: Teardown> Receiver<T, P> {
     /// Try to receive one value.
+    ///
+    /// Consumed slots are released in batches. Use
+    /// [`release_consumed`](Self::release_consumed) to release them immediately.
     ///
     /// # Errors
     ///
@@ -140,6 +149,9 @@ impl<T, P: Teardown> Receiver<T, P> {
 
     /// Receive one value, blocking while the channel is empty.
     ///
+    /// Consumed slots are released in batches. Use
+    /// [`release_consumed`](Self::release_consumed) to release them immediately.
+    ///
     /// # Errors
     ///
     /// Returns [`RecvError`] after all senders and buffered values are gone.
@@ -158,6 +170,102 @@ impl<T, P: Teardown> Receiver<T, P> {
                 Err(TryRecvError::Empty) => return self.recv_slow(),
             }
         }
+    }
+
+    /// Publish all consumed slots and notify senders waiting for capacity.
+    ///
+    /// This releases slots consumed by earlier receives across all sender
+    /// lanes, including partial batches. It does not receive more values or
+    /// release unread slots. Calling it again without receiving more values
+    /// has no effect.
+    ///
+    /// Call this before returning application permits or issuing completions
+    /// that allow producers to send more work.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fanring::mpsc::{channel, TrySendError};
+    ///
+    /// let (mut tx, mut rx) = channel(4);
+    /// for value in 0..4 {
+    ///     tx.try_send(value).unwrap();
+    /// }
+    /// assert_eq!(rx.recv(), Ok(0));
+    /// assert_eq!(rx.recv(), Ok(1));
+    /// assert_eq!(tx.try_send(4), Err(TrySendError::Full(4)));
+    /// rx.release_consumed();
+    /// assert_eq!(tx.try_send(4), Ok(()));
+    /// assert_eq!(tx.try_send(5), Ok(()));
+    /// ```
+    pub fn release_consumed(&mut self) {
+        for lane in self.lanes.iter_mut().flatten() {
+            if lane.release_pending() {
+                lane.signal.notify_space();
+            }
+        }
+    }
+
+    /// Append up to `limit` values to `output`, returning the number appended.
+    ///
+    /// Waits only for the first value. Subsequent receives are nonblocking and
+    /// stop when no value is immediately available or `limit` is reached.
+    /// Existing output values are preserved. FIFO ordering within each sender
+    /// lane is the same as for single-value receives.
+    ///
+    /// Before returning, publishes all consumed slots and notifies senders
+    /// waiting for capacity, including slots consumed by earlier receive calls.
+    /// A zero limit receives nothing, releases consumed slots, and returns
+    /// `Ok(0)` even if the channel is disconnected.
+    ///
+    /// The output vector grows as needed. Reserve space for `limit` additional
+    /// values before calling to avoid reallocating it. Receiver topology may
+    /// still allocate when new senders are registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecvError`] only when `limit` is nonzero and all senders and
+    /// buffered values are gone before receiving the first value. A partial
+    /// batch returns `Ok(count)` even if the channel disconnects.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fanring::mpsc::channel;
+    ///
+    /// let (mut tx, mut rx) = channel(4);
+    /// for value in 0..4 {
+    ///     tx.try_send(value).unwrap();
+    /// }
+    /// let mut batch = Vec::with_capacity(2);
+    /// assert_eq!(rx.recv_batch_into(&mut batch, 2), Ok(2));
+    /// assert_eq!(batch, [0, 1]);
+    /// assert_eq!(tx.try_send(4), Ok(()));
+    /// assert_eq!(tx.try_send(5), Ok(()));
+    /// ```
+    pub fn recv_batch_into(
+        &mut self,
+        output: &mut Vec<T>,
+        limit: usize,
+    ) -> Result<usize, RecvError> {
+        let result = if limit == 0 {
+            Ok(0)
+        } else {
+            self.recv().map(|first| {
+                output.push(first);
+                let mut received = 1;
+                while received < limit {
+                    let Ok(value) = self.try_recv() else {
+                        break;
+                    };
+                    output.push(value);
+                    received += 1;
+                }
+                received
+            })
+        };
+        self.release_consumed();
+        result
     }
 
     #[cold]
