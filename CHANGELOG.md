@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-09-10
+
 ### Added
 
 - MPSC `Receiver::release_consumed` publishes consumed slots across sender
@@ -126,7 +128,8 @@ All notable changes to this project are documented here.
 
 - Initial bounded, nonblocking MPSC implementation with a fixed sender limit.
 
-[Unreleased]: https://github.com/paddor/fanring.rs/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/paddor/fanring.rs/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/paddor/fanring.rs/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/paddor/fanring.rs/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/paddor/fanring.rs/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/paddor/fanring.rs/compare/v0.3.0...v0.3.1
