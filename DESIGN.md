@@ -113,6 +113,15 @@ or when the lane reaches visible empty. A full release batch can span several
 prefetch windows. Empty-lane release prevents a producer and receiver from
 parking while partial credits remain unpublished.
 
+Single-value receives can therefore return before their slots become reusable
+by the sender. `Receiver::release_consumed` scans the receiver's lane slots,
+publishes each lane's pending consumed capacity, and notifies its space waiter.
+It preserves unread prefetched values and the scheduling counters.
+`recv_batch_into` appends a bounded number of values to a caller-owned vector,
+blocks only for the first value, and calls `release_consumed` before returning.
+Applications can use either API before issuing completions or returning permits
+that admit more sends.
+
 ## MPMC Receive Path
 
 Each receiver has a private deque for sole-receiver staging and a bounded,

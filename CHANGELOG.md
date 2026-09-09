@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- MPSC `Receiver::release_consumed` publishes consumed slots across sender
+  lanes and notifies blocked senders, including after partial receive batches.
+- MPSC `Receiver::recv_batch_into` appends a bounded batch to a caller-owned
+  vector, waits only for the first value, and releases consumed slots before
+  returning.
+
 ## [0.3.3] - 2026-09-08
 
 ### Added

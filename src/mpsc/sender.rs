@@ -52,6 +52,10 @@ impl<T, P: Teardown> Sender<T, P> {
     ///
     /// A successful send is immediately visible to the receiver. Internally,
     /// the value is pushed into this sender's SPSC ring and flushed.
+    /// Consumed slots remain occupied until the receiver releases them. Use
+    /// [`Receiver::release_consumed`](super::Receiver::release_consumed) or
+    /// [`Receiver::recv_batch_into`](super::Receiver::recv_batch_into) when
+    /// capacity must be reusable before processing received values.
     ///
     /// # Errors
     ///

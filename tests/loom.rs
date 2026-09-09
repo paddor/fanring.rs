@@ -436,6 +436,144 @@ fn blocking_send_does_not_lose_space_wakeup() {
 }
 
 #[test]
+fn mpsc_release_consumed_does_not_lose_space_wakeup() {
+    fn check<P: fanring::teardown::Teardown>() {
+        model(|| {
+            let (mut tx, mut rx) = fanring::mpsc::channel_with_policy::<_, P>(2);
+            tx.try_send(0).unwrap();
+            tx.try_send(1).unwrap();
+            let sender = thread::spawn(move || {
+                tx.send(2).unwrap();
+                tx
+            });
+
+            assert_eq!(rx.recv(), Ok(0));
+            rx.release_consumed();
+            let tx = sender.join().unwrap();
+            assert_eq!(rx.recv(), Ok(1));
+            assert_eq!(rx.recv(), Ok(2));
+            drop(tx);
+            assert_eq!(rx.recv(), Err(RecvError));
+        });
+    }
+    check::<fanring::teardown::Deferred>();
+    check::<fanring::teardown::Coordinated>();
+}
+
+#[test]
+fn mpsc_recv_batch_releases_capacity_before_returning() {
+    fn check<P: fanring::teardown::Teardown>() {
+        model(|| {
+            let (mut tx, mut rx) = fanring::mpsc::channel_with_policy::<_, P>(2);
+            tx.try_send(0).unwrap();
+            tx.try_send(1).unwrap();
+            let sender = thread::spawn(move || {
+                tx.send(2).unwrap();
+                tx
+            });
+
+            let mut output = Vec::with_capacity(1);
+            assert_eq!(rx.recv_batch_into(&mut output, 1), Ok(1));
+            assert_eq!(output, [0]);
+            let tx = sender.join().unwrap();
+            assert_eq!(rx.recv(), Ok(1));
+            assert_eq!(rx.recv(), Ok(2));
+            drop(tx);
+        });
+    }
+    check::<fanring::teardown::Deferred>();
+    check::<fanring::teardown::Coordinated>();
+}
+
+#[test]
+fn mpsc_recv_batch_waits_only_for_first_value() {
+    fn check<P: fanring::teardown::Teardown>() {
+        model(|| {
+            let (mut tx, mut rx) = fanring::mpsc::channel_with_policy::<_, P>(2);
+            let receiver = thread::spawn(move || {
+                let mut output = Vec::with_capacity(2);
+                assert_eq!(rx.recv_batch_into(&mut output, 2), Ok(1));
+                assert_eq!(output, [7]);
+                rx
+            });
+            tx.send(7).unwrap();
+            // Join before disconnecting. Waiting for a second value would
+            // deadlock, while returning before the first would fail above.
+            let mut rx = receiver.join().unwrap();
+            tx.try_send(8).unwrap();
+            tx.try_send(9).unwrap();
+            assert_eq!(tx.try_send(10), Err(TrySendError::Full(10)));
+            drop(tx);
+            assert_eq!(rx.iter().collect::<Vec<_>>(), [8, 9]);
+        });
+    }
+    check::<fanring::teardown::Deferred>();
+    check::<fanring::teardown::Coordinated>();
+}
+
+#[test]
+fn mpsc_recv_batch_wakes_on_last_sender_drop() {
+    fn check<P: fanring::teardown::Teardown>() {
+        model(|| {
+            let (tx, mut rx) = fanring::mpsc::channel_with_policy::<_, P>(2);
+            let sender = thread::spawn(move || drop(tx));
+            let mut output = vec![7];
+            assert_eq!(rx.recv_batch_into(&mut output, 2), Err(RecvError));
+            assert_eq!(output, [7]);
+            sender.join().unwrap();
+        });
+    }
+    check::<fanring::teardown::Deferred>();
+    check::<fanring::teardown::Coordinated>();
+}
+
+#[test]
+fn mpsc_recv_batch_slot_refill_racing_receiver_drop_preserves_ownership() {
+    fn check<P: fanring::teardown::Teardown>() {
+        model(|| {
+            let (mut tx, mut rx) = fanring::mpsc::channel_with_policy::<_, P>(2);
+            let first = Arc::new(loom::sync::atomic::AtomicUsize::new(0));
+            let unread = Arc::new(loom::sync::atomic::AtomicUsize::new(0));
+            let refill = Arc::new(loom::sync::atomic::AtomicUsize::new(0));
+            tx.try_send(DropCount(first.clone())).unwrap();
+            tx.try_send(DropCount(unread.clone())).unwrap();
+            let value = DropCount(refill.clone());
+            let sender = thread::spawn(move || {
+                let sent = match tx.send(value) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        drop(error);
+                        false
+                    }
+                };
+                (tx, sent)
+            });
+
+            let mut output = Vec::with_capacity(1);
+            assert_eq!(rx.recv_batch_into(&mut output, 1), Ok(1));
+            // The sender can reuse the released slot while the receiver closes
+            // a window still containing the unread value.
+            drop(rx);
+            let (tx, sent) = sender.join().unwrap();
+            assert_eq!(first.load(Ordering::Relaxed), 0);
+            assert_eq!(unread.load(Ordering::Relaxed), usize::from(P::COORDINATED));
+            assert_eq!(
+                refill.load(Ordering::Relaxed),
+                usize::from(P::COORDINATED || !sent)
+            );
+            drop(tx);
+            assert_eq!(first.load(Ordering::Relaxed), 0);
+            assert_eq!(unread.load(Ordering::Relaxed), 1);
+            assert_eq!(refill.load(Ordering::Relaxed), 1);
+            drop(output);
+            assert_eq!(first.load(Ordering::Relaxed), 1);
+        });
+    }
+    check::<fanring::teardown::Deferred>();
+    check::<fanring::teardown::Coordinated>();
+}
+
+#[test]
 fn blocking_send_recv_do_not_deadlock_while_sender_stays_alive() {
     model(|| {
         let (mut tx, mut rx) = channel(1);
