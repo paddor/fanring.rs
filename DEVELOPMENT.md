@@ -3,16 +3,33 @@
 ## Checks
 
 ```sh
-cargo test --all-features
-cargo clippy --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
-RUSTFLAGS="--cfg loom" cargo test --lib --test loom -- --test-threads=1
-cargo +nightly miri test --all-features -- --test-threads=1
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+RUSTFLAGS="--cfg loom" cargo test -p fanring --lib --test loom -- --test-threads=1
+cargo +nightly miri test -p fanring --all-features -- --test-threads=1
 MIRIFLAGS="-Zmiri-tree-borrows" \
-  cargo +nightly miri test --all-features -- --test-threads=1
+  cargo +nightly miri test -p fanring --all-features -- --test-threads=1
 ```
 
-`.github/workflows/concurrency.yml` runs Loom and both Miri modes every Monday.
+`yring` lives in `yring/`; the root package is `fanring`. Both remain
+independently consumable. Use `--workspace` for shared checks and `-p` to
+select one crate. A versioned path dependency uses the local yring during
+development and the published yring when fanring is packaged.
+
+`.github/workflows/ci.yml` tests both crates on Linux, macOS, and Windows,
+checks Rust 1.93, builds documentation, verifies packages, and checks 32-bit
+and WebAssembly targets. Linux 32-bit tests run through `cross`.
+`.github/workflows/concurrency.yml` gates changes with both Loom suites and
+yring Miri. Weekly checks also exercise fanring Miri in both aliasing modes
+and yring Miri with multiple seeds.
+
+```sh
+RUSTFLAGS="--cfg loom" cargo test -p yring --features async --test loom --release -- --test-threads=1
+cargo +nightly miri test -p yring --features async
+MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-many-seeds=0..16" \
+  cargo +nightly miri test -p yring --features async
+```
 
 The test suite covers per-sender FIFO, per-sender backpressure, disconnect and
 timeout races, drop cleanup, dynamic lane registration and reuse, ready
@@ -36,18 +53,20 @@ is covered by normal stress tests and sanitizer runs.
 
 ## Release
 
-`release-plz` runs on every push to `main`
-(`.github/workflows/release-plz.yml`). It opens or updates a release PR. After
-that PR merges, it creates an annotated `v<version>` tag, publishes to
-crates.io, and creates a GitHub release. Configuration lives in
-`release-plz.toml`; changelogs remain hand-curated.
+One `release-plz` workflow runs on pushes to `main`
+(`.github/workflows/release-plz.yml`). It manages separate crate versions,
+changelogs, crates.io publications, and GitHub releases. Tags are
+`fanring-v<version>` and `yring-v<version>`; the old fanring `v<version>` tags
+remain historical tags. Configuration lives in `release-plz.toml`.
+There is no shared version group. Publish yring before a fanring release
+that requires its new version; release-plz orders workspace dependencies.
 
 Release notes describe changes to the published crate only. Benchmark tooling
 and charts are repository-only and are not part of a release. Exclude them from
 release notes and release PR descriptions.
 
 Publishing uses crates.io trusted publishing through GitHub Actions OIDC.
-Configure the trusted publisher with:
+Configure the trusted publisher for **both** crates with:
 
 ```text
 GitHub owner: paddor
@@ -61,11 +80,13 @@ Review the release-plz PR, verify its semver bump, and move the relevant
 release PR, run:
 
 ```sh
-cargo +1.93.0 test --all-features --locked
-cargo clippy --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
-cargo package --locked
-cargo publish --dry-run --locked
+cargo +1.93.0 test --workspace --all-features --locked
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+cargo package -p yring --locked
+cargo package -p fanring --locked
+cargo publish -p yring --dry-run --locked
+cargo publish -p fanring --dry-run --locked
 ```
 
 Merging the release PR is the explicit publish step. CI then tags and publishes
@@ -74,11 +95,11 @@ the version through trusted publishing.
 ## Benchmarks
 
 ```sh
-cargo bench --bench comparison
-FANRING_BENCH_MODE=blocking cargo bench --bench comparison
-cargo bench --bench mpmc
-FANRING_BENCH_MODE=blocking cargo bench --bench mpmc
-cargo bench --bench wake_latency
+cargo bench -p fanring --bench comparison
+FANRING_BENCH_MODE=blocking cargo bench -p fanring --bench comparison
+cargo bench -p fanring --bench mpmc
+FANRING_BENCH_MODE=blocking cargo bench -p fanring --bench mpmc
+cargo bench -p fanring --bench wake_latency
 ```
 
 The benchmark compares `fanring` against:
@@ -141,7 +162,7 @@ Short smoke run:
 FANRING_BENCH_SECS=0.1 \
 FANRING_BENCH_SAMPLES=1 \
 FANRING_BENCH_WARMUP_SECS=0 \
-cargo bench --bench comparison
+cargo bench -p fanring --bench comparison
 ```
 
 Focused run:
@@ -150,13 +171,13 @@ Focused run:
 FANRING_BENCH_PAYLOADS=bytes64 \
 FANRING_BENCH_PRODUCERS=8 \
 FANRING_BENCH_IMPLS=fanring,crossbeam-channel \
-cargo bench --bench comparison
+cargo bench -p fanring --bench comparison
 ```
 
 Saturated occupancy run:
 
 ```sh
-FANRING_BENCH_PROFILE=saturated cargo bench --bench comparison
+FANRING_BENCH_PROFILE=saturated cargo bench -p fanring --bench comparison
 ```
 
 ## Charts
@@ -249,8 +270,8 @@ format, and run Clippy before benchmarking; stop on any warning or timeout.
 ```sh
 cargo fmt --all --check
 cargo build --locked
-cargo clippy --all-targets --all-features -- -D warnings
-cargo bench --locked --no-run --bench comparison --bench mpmc
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo bench -p fanring --locked --no-run --bench comparison --bench mpmc
 
 FANRING_BENCH_CACHE_DIR=target/teardown-policy-results \
 FANRING_BENCH_PAYLOADS=u64 \

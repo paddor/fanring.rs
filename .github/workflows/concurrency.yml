@@ -1,6 +1,9 @@
 name: Concurrency checks
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
@@ -20,12 +23,45 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install stable Rust
         run: rustup toolchain install stable --profile minimal
-      - name: Run Loom models
+      - name: Run fanring Loom models
         env:
           RUSTFLAGS: --cfg loom
-        run: cargo +stable test --lib --test loom --locked -- --test-threads=1
+        run: cargo +stable test -p fanring --lib --test loom --locked -- --test-threads=1
+
+      - name: Run yring Loom models
+        env:
+          RUSTFLAGS: --cfg loom
+        run: cargo +stable test -p yring --features async --test loom --release --locked -- --test-threads=1
+
+  yring-miri:
+    name: Miri (yring)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MIRIFLAGS: -Zmiri-disable-isolation
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install nightly Rust and Miri
+        run: rustup toolchain install nightly --profile minimal --component miri
+      - name: Run Miri
+        run: cargo +nightly miri test -p yring --features async --locked
+
+  yring-miri-seeds:
+    name: Miri (yring, many seeds)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-many-seeds=0..16
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install nightly Rust and Miri
+        run: rustup toolchain install nightly --profile minimal --component miri
+      - name: Run Miri with multiple seeds
+        run: cargo +nightly miri test -p yring --features async --locked
 
   miri:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: Miri
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -34,8 +70,8 @@ jobs:
       - name: Install nightly Rust and Miri
         run: rustup toolchain install nightly --profile minimal --component miri
       - name: Run Miri
-        run: cargo +nightly miri test --all-features --locked -- --test-threads=1
+        run: cargo +nightly miri test -p fanring --all-features --locked -- --test-threads=1
       - name: Run Miri with Tree Borrows
         env:
           MIRIFLAGS: -Zmiri-tree-borrows
-        run: cargo +nightly miri test --all-features --locked -- --test-threads=1
+        run: cargo +nightly miri test -p fanring --all-features --locked -- --test-threads=1

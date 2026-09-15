@@ -12,6 +12,13 @@ lifetimes.
 
 Requires Rust 1.93 or newer.
 
+This workspace maintains two independently published crates:
+
+- `fanring`: typed MPSC and MPMC channels.
+- [`yring`](yring/README.md): bounded SPSC rings with batched publication.
+
+Each crate has its own version and changelog.
+
 | | Nonblocking | Blocking | Timeout | Deadline |
 | --- | --- | --- | --- | --- |
 | Send | `try_send` | `send` | `send_timeout` | `send_deadline` |
