@@ -136,7 +136,7 @@ impl fmt::Debug for ReadyPage {
 /// boundary.
 pub(crate) struct LaneSignal {
     readiness: LaneReadiness,
-    space_waiter: WaitCell,
+    pub(crate) space_waiter: WaitCell,
 }
 
 #[repr(C, align(128))]

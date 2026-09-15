@@ -57,7 +57,7 @@ jobs:
       - name: Verify packages
         run: |
           cargo +stable package -p yring --locked
-          cargo +stable package -p fanring --locked
+          cargo +stable package -p fanring --all-features --locked
 
   portability:
     name: Check ${{ matrix.target }}

@@ -92,6 +92,11 @@ pub(crate) struct Producer<T, P: Teardown> {
 }
 
 impl<T, P: Teardown> Producer<T, P> {
+    #[cfg(feature = "async")]
+    pub(crate) fn is_full(&mut self) -> bool {
+        self.inner.is_full()
+    }
+
     #[inline]
     pub(crate) fn push_and_flush(&mut self, value: T) -> Result<(), T> {
         if !P::COORDINATED {

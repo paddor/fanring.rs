@@ -26,7 +26,7 @@ jobs:
       - name: Run fanring Loom models
         env:
           RUSTFLAGS: --cfg loom
-        run: cargo +stable test -p fanring --lib --test loom --locked -- --test-threads=1
+        run: cargo +stable test -p fanring --features async --lib --test loom --test async_loom --locked -- --test-threads=1
 
       - name: Run yring Loom models
         env:

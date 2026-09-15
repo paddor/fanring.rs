@@ -29,7 +29,7 @@ cast_precision_loss = "allow"
 
 [package]
 name = "fanring"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2024"
 rust-version = "1.93"
 autobins = false
@@ -60,7 +60,12 @@ unsafe_op_in_unsafe_fn = "deny"
 level = "warn"
 check-cfg = ["cfg(loom)"]
 
+[features]
+default = []
+async = ["dep:atomic-waker"]
+
 [dependencies]
+atomic-waker = { version = "1.1", optional = true }
 arc-swap = "1.7"
 concurrent-queue = { version = "2.5", features = ["loom"] }
 yring = { version = "0.3.16", path = "yring" }
@@ -69,6 +74,7 @@ yring = { version = "0.3.16", path = "yring" }
 loom = "0.7"
 
 [dev-dependencies]
+futures-lite = "2"
 core_affinity = "0.8.3"
 crossbeam-channel = "0.5"
 crossfire = "3.1.19"

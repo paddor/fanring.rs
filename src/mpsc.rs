@@ -18,16 +18,20 @@ use crate::config::validate_capacity;
 use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
 use crate::wait::WaitCell;
 
+#[cfg(feature = "async")]
+mod asynchronous;
 mod receiver;
 mod sender;
 
+#[cfg(feature = "async")]
+pub use asynchronous::SendFuture;
 use receiver::Lane;
 pub use receiver::{IntoIter, Iter, Receiver, TryIter};
 pub use sender::Sender;
 
 pub use crate::error::{
     ChannelError, RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError,
-    TryRegisterError, TrySendError,
+    TryRegisterBoundedError, TryRegisterError, TrySendError,
 };
 
 /// Maximum per-sender capacity accepted by [`channel`] and [`try_channel`].
@@ -185,16 +189,21 @@ impl<T, P: Teardown> Shared<T, P> {
     )]
     fn register_sender(
         &self,
-    ) -> Result<(LaneKey, Arc<LaneSignal>, crate::ring::Producer<T, P>), TryRegisterError> {
+        max_lanes: usize,
+    ) -> Result<(LaneKey, Arc<LaneSignal>, crate::ring::Producer<T, P>), TryRegisterBoundedError>
+    {
         if !self.receiver_alive.load(Ordering::Acquire) {
-            return Err(TryRegisterError::Disconnected);
+            return Err(TryRegisterBoundedError::Disconnected);
         }
 
         let mut registry = lock(&self.registry);
         if !self.receiver_alive.load(Ordering::Acquire) {
-            return Err(TryRegisterError::Disconnected);
+            return Err(TryRegisterBoundedError::Disconnected);
         }
 
+        if self.registered_lanes.load(Ordering::Acquire) >= max_lanes {
+            return Err(TryRegisterBoundedError::AtCapacity);
+        }
         let (key, page) = registry.allocate_lane();
         let signal = Arc::new(LaneSignal::new(page, key.slot));
         let (producer, consumer) = crate::ring::spsc(self.capacity_per_sender);

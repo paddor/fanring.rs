@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-09-15
+
+### Added
+
+- Optional runtime-independent `async` MPSC send, receive, and bounded batch
+  receive, with per-producer capacity wakeups and cancellation-safe waits.
+- `try_register_bounded`, `registered_lanes`, and `TryRegisterBoundedError`
+  bound live and retired producer rings without changing `TryRegisterError`.
+
 ## [0.3.4] - 2026-09-10
 
 ### Added

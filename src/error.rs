@@ -69,6 +69,35 @@ impl fmt::Display for TryRegisterError {
 
 impl std::error::Error for TryRegisterError {}
 
+/// Registration failed with a caller-specified ring limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryRegisterBoundedError {
+    /// All receivers have been dropped.
+    Disconnected,
+    /// The caller's maximum number of allocated sender rings was reached.
+    AtCapacity,
+}
+
+impl TryRegisterBoundedError {
+    /// Return whether every receiver was dropped.
+    #[inline]
+    #[must_use]
+    pub const fn is_disconnected(&self) -> bool {
+        matches!(self, Self::Disconnected)
+    }
+}
+
+impl fmt::Display for TryRegisterBoundedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disconnected => f.write_str("all receivers have been dropped"),
+            Self::AtCapacity => f.write_str("sender registration limit reached"),
+        }
+    }
+}
+
+impl std::error::Error for TryRegisterBoundedError {}
+
 /// Blocking send failed because the receiving side disconnected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SendError<T>(pub T);

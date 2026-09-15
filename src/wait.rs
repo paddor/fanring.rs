@@ -21,6 +21,8 @@ pub(crate) struct WaitCell {
     state: AtomicUsize,
     mutex: Mutex<()>,
     condvar: Condvar,
+    #[cfg(feature = "async")]
+    waker: atomic_waker::AtomicWaker,
 }
 
 impl WaitCell {
@@ -29,6 +31,8 @@ impl WaitCell {
             state: AtomicUsize::new(0),
             mutex: Mutex::new(()),
             condvar: Condvar::new(),
+            #[cfg(feature = "async")]
+            waker: atomic_waker::AtomicWaker::new(),
         }
     }
 
@@ -47,6 +51,8 @@ impl WaitCell {
     #[inline]
     pub(crate) fn notify(&self) {
         let previous = self.state.fetch_add(NOTIFY_INCREMENT, Ordering::AcqRel);
+        #[cfg(feature = "async")]
+        self.waker.wake();
         if previous & WAITING == 0 {
             return;
         }
@@ -55,6 +61,19 @@ impl WaitCell {
         if self.state.load(Ordering::Relaxed) & WAITING != 0 {
             self.condvar.notify_one();
         }
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn register_async(&self, waker: &std::task::Waker) {
+        self.waker.register(waker);
+        // Pair with notify even when its wake preceded registration. The
+        // caller rechecks the queue after acquiring that publication.
+        self.state.fetch_add(0, Ordering::AcqRel);
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn cancel_async(&self) {
+        self.waker.take();
     }
 }
 

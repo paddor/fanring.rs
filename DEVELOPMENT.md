@@ -6,7 +6,7 @@
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-RUSTFLAGS="--cfg loom" cargo test -p fanring --lib --test loom -- --test-threads=1
+RUSTFLAGS="--cfg loom" cargo test -p fanring --features async --lib --test loom --test async_loom -- --test-threads=1
 cargo +nightly miri test -p fanring --all-features -- --test-threads=1
 MIRIFLAGS="-Zmiri-tree-borrows" \
   cargo +nightly miri test -p fanring --all-features -- --test-threads=1
