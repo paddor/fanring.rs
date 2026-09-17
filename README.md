@@ -12,6 +12,13 @@ lifetimes.
 
 Requires Rust 1.93 or newer.
 
+This workspace maintains two independently published crates:
+
+- `fanring`: typed MPSC and MPMC channels.
+- [`yring`](yring/README.md): bounded SPSC rings with batched publication.
+
+Each crate has its own version and changelog.
+
 | | Nonblocking | Blocking | Timeout | Deadline |
 | --- | --- | --- | --- | --- |
 | Send | `try_send` | `send` | `send_timeout` | `send_deadline` |
@@ -169,7 +176,7 @@ flight.
 - Need global FIFO or strict one-item round robin.
 - Need one exact capacity shared across all producers.
 - Need an exact total MPMC bound that includes receiver staging.
-- Need async wakeups.
+- Need async MPMC wakeups.
 
 ## Further reading
 
@@ -180,3 +187,25 @@ flight.
 ## License
 
 [ISC](LICENSE)
+
+## Async MPSC
+
+Enable the optional `async` feature for runtime-independent `send_async`,
+`recv_async`, and `recv_batch_into_async`. No Tokio dependency or blocking wait
+is required. Successful sends publish immediately. Bulk receive waits only for
+the first value and releases consumed slots before returning. Reserve the output
+vector once to avoid per-value allocations. MPMC remains synchronous.
+
+Each sender has its own capacity waker; the receiver has one data waker.
+Registration is followed by a queue recheck. Canceling an incomplete send drops
+its unsent value without reserving capacity. Canceling an incomplete receive
+consumes nothing. Both remove retained wakers. Manual `poll_ready` and `poll_recv`
+users must cancel abandoned registrations explicitly. Synchronous methods and
+both teardown policies retain their existing contracts.
+
+`Sender::try_register_bounded(max_lanes)` limits allocated rings, including
+retired senders awaiting receiver drain. The ordinary registration API remains
+unbounded. `registered_lanes()` reports allocated rings, rather than live senders.
+
+Both workspace crates remain independently consumable. Fanring's versioned
+yring path dependency resolves to the published yring version when packaged.

@@ -14,10 +14,11 @@ env:
 
 jobs:
   test:
-    name: Test Rust ${{ matrix.rust }} (without Loom)
-    runs-on: ubuntu-latest
+    name: Test Rust ${{ matrix.rust }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
         rust:
           - 1.93.0
           - stable
@@ -29,10 +30,12 @@ jobs:
         if: matrix.rust == 'stable'
         run: cargo +stable update
       - name: Run tests
-        run: cargo +${{ matrix.rust }} test --all-features --locked
+        run: cargo +${{ matrix.rust }} test --workspace --all-features --locked
+      - name: Test without optional features
+        run: cargo +${{ matrix.rust }} test --workspace --no-default-features --locked
       - name: Run release channel stress tests
-        if: matrix.rust == 'stable'
-        run: cargo +stable test --release --test mpmc_stress --test stress --locked -- --test-threads=1
+        if: matrix.rust == 'stable' && matrix.os == 'ubuntu-latest'
+        run: cargo +stable test -p fanring --release --test mpmc_stress --test stress --locked -- --test-threads=1
 
   quality:
     name: Quality
@@ -44,13 +47,17 @@ jobs:
       - name: Check formatting
         run: cargo +stable fmt --all --check
       - name: Run Clippy
-        run: cargo +stable clippy --all-targets --all-features -- -D warnings
+        run: cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Check default features
+        run: cargo +stable clippy --workspace --all-targets -- -D warnings
       - name: Build documentation
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo +stable doc --all-features --no-deps
-      - name: Verify package
-        run: cargo +stable package --locked
+        run: cargo +stable doc --workspace --all-features --no-deps
+      - name: Verify packages
+        run: |
+          cargo +stable package -p yring --locked
+          cargo +stable package -p fanring --all-features --locked
 
   portability:
     name: Check ${{ matrix.target }}
@@ -66,4 +73,31 @@ jobs:
       - name: Install stable Rust target
         run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
       - name: Check target
-        run: cargo +stable check --all-features --locked --target ${{ matrix.target }}
+        run: cargo +stable check --workspace --all-features --locked --target ${{ matrix.target }}
+
+  linux-32bit:
+    name: Test ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # QEMU 5.1 in cross 0.2.5 grows memory during thread-heavy stress tests.
+      CROSS_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_IMAGE: ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf@sha256:afef8332535916fad64f3c1143e1d2f15f97ef84e4cbffdcd82de674e691cbea
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - i686-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        run: rustup toolchain install 1.93 --profile minimal
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Compile all targets
+        run: cross check --target ${{ matrix.target }} --workspace --all-targets --all-features --locked
+      - name: Test yring
+        run: timeout --kill-after=10s 25m cross test --target ${{ matrix.target }} -p yring --all-features --locked
+      - name: Test fanring
+        run: timeout --kill-after=10s 25m cross test --target ${{ matrix.target }} -p fanring --all-features --locked

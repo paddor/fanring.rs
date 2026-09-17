@@ -642,6 +642,8 @@ enum LanePoll<T> {
 
 impl<T, P: Teardown> Drop for Receiver<T, P> {
     fn drop(&mut self) {
+        #[cfg(feature = "async")]
+        self.cancel_recv_wait();
         self.shared.receiver_alive.store(false, Ordering::Release);
         for lane in self.lanes.iter_mut().flatten() {
             lane.consumer.close();

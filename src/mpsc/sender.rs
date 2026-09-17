@@ -6,7 +6,8 @@ use crate::compat::{Arc, Ordering};
 use crate::ready::LaneSignal;
 
 use super::{
-    LaneKey, PARK_SPINS, SendError, SendTimeoutError, Shared, TryRegisterError, TrySendError,
+    LaneKey, PARK_SPINS, SendError, SendTimeoutError, Shared, TryRegisterBoundedError,
+    TryRegisterError, TrySendError,
 };
 
 /// Sending half.
@@ -39,13 +40,31 @@ impl<T, P: Teardown> Sender<T, P> {
     ///
     /// Returns [`TryRegisterError::Disconnected`] when the receiver is gone.
     pub fn try_register(&self) -> Result<Self, TryRegisterError> {
-        let (key, signal, producer) = self.shared.register_sender()?;
+        self.try_register_bounded(usize::MAX)
+            .map_err(|error| match error {
+                TryRegisterBoundedError::Disconnected => TryRegisterError::Disconnected,
+                TryRegisterBoundedError::AtCapacity => unreachable!("unbounded registration"),
+            })
+    }
+
+    /// Register only if fewer than `max_lanes` rings are allocated.
+    ///
+    /// Includes this sender and dropped senders with unread values. The
+    /// receiver must retire an old ring before its registration can be reused.
+    /// Returns [`TryRegisterBoundedError::AtCapacity`] when the limit is reached.
+    pub fn try_register_bounded(&self, max_lanes: usize) -> Result<Self, TryRegisterBoundedError> {
+        let (key, signal, producer) = self.shared.register_sender(max_lanes)?;
         Ok(Self {
             shared: self.shared.clone(),
             producer,
             key,
             signal,
         })
+    }
+
+    /// Number of allocated rings, including dropped senders awaiting drain.
+    pub fn registered_lanes(&self) -> usize {
+        self.shared.registered_lanes.load(Ordering::Acquire)
     }
 
     /// Try to send one value.
@@ -268,6 +287,8 @@ impl<T, P: Teardown> Sender<T, P> {
 
 impl<T, P: Teardown> Drop for Sender<T, P> {
     fn drop(&mut self) {
+        #[cfg(feature = "async")]
+        self.cancel_send_wait();
         self.producer.close();
         let _ = self.shared.mark_ready(&self.signal);
         self.shared.live_senders.fetch_sub(1, Ordering::AcqRel);

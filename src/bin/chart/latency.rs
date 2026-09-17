@@ -589,7 +589,7 @@ fn format_duration(ns: f64) -> String {
     if ns >= 1_000_000.0 {
         format!("{:.0} ms", ns / 1_000_000.0)
     } else if ns >= 1_000.0 {
-        format!("{:.0} µs", ns / 1_000.0)
+        format!("{:.0} \u{b5}s", ns / 1_000.0)
     } else {
         format!("{ns:.0} ns")
     }

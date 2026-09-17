@@ -1,6 +1,35 @@
+[workspace]
+members = ["yring"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.93"
+license = "ISC"
+authors = ["Patrik Wenger <paddor@gmail.com>"]
+repository = "https://github.com/paddor/fanring.rs"
+
+[workspace.lints.rust]
+missing_debug_implementations = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+
 [package]
 name = "fanring"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2024"
 rust-version = "1.93"
 autobins = false
@@ -31,15 +60,24 @@ unsafe_op_in_unsafe_fn = "deny"
 level = "warn"
 check-cfg = ["cfg(loom)"]
 
+[features]
+default = []
+async = ["dep:atomic-waker"]
+
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
+atomic-waker = { version = "1.1", optional = true }
 arc-swap = "1.7"
 concurrent-queue = { version = "2.5", features = ["loom"] }
-yring = "0.3.16"
+yring = { version = "0.3.16", path = "yring" }
 
 [target.'cfg(all(loom, target_pointer_width = "64"))'.dependencies]
 loom = "0.7"
 
 [dev-dependencies]
+futures-lite = "2"
 core_affinity = "0.8.3"
 crossbeam-channel = "0.5"
 crossfire = "3.1.19"
