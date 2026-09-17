@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.16"
+version = "0.3.17"
 dependencies = [
  "atomic-waker",
  "crossbeam-channel",

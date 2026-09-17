@@ -176,7 +176,7 @@ flight.
 - Need global FIFO or strict one-item round robin.
 - Need one exact capacity shared across all producers.
 - Need an exact total MPMC bound that includes receiver staging.
-- Need async wakeups.
+- Need async MPMC wakeups.
 
 ## Further reading
 

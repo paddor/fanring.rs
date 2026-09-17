@@ -79,6 +79,9 @@ jobs:
     name: Test ${{ matrix.target }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      # QEMU 5.1 in cross 0.2.5 grows memory during thread-heavy stress tests.
+      CROSS_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_IMAGE: ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf@sha256:afef8332535916fad64f3c1143e1d2f15f97ef84e4cbffdcd82de674e691cbea
     strategy:
       fail-fast: false
       matrix:
