@@ -564,3 +564,74 @@ fn cross_thread_many_senders() {
         assert_eq!(seen, vec![per_thread; threads]);
     });
 }
+
+#[test]
+fn fair_receive_rotates_and_mixes_with_bursts() {
+    let (tx, mut rx) = channel(128);
+    let mut senders: Vec<_> = (0..4).map(|_| tx.try_clone().unwrap()).collect();
+    drop(tx);
+    for (peer, sender) in senders.iter_mut().enumerate() {
+        for seq in 0..100 {
+            sender.try_send((peer, seq)).unwrap();
+        }
+    }
+    for seq in 0..4 {
+        for peer in 0..4 {
+            assert_eq!(rx.try_recv_fair(), Ok((peer, seq)));
+        }
+    }
+    for seq in 4..12 {
+        assert_eq!(rx.try_recv(), Ok((0, seq)));
+    }
+    assert_eq!(rx.try_recv_fair(), Ok((0, 12)));
+    assert_eq!(rx.try_recv_fair(), Ok((1, 4)));
+    let mut next = [13, 5, 4, 4];
+    drop(senders);
+    while let Ok((peer, seq)) = rx.try_recv_fair() {
+        assert_eq!(seq, next[peer]);
+        next[peer] += 1;
+    }
+    assert_eq!(next, [100; 4]);
+    assert_eq!(rx.try_recv_fair(), Err(TryRecvError::Disconnected));
+}
+
+#[test]
+fn fair_receive_discovers_new_lanes_and_releases_partial_windows() {
+    let (mut hot, mut rx) = channel(4);
+    for seq in 0..4 {
+        hot.try_send((0, seq)).unwrap();
+    }
+    assert_eq!(rx.try_recv_fair(), Ok((0, 0)));
+    let mut quiet = hot.try_clone().unwrap();
+    quiet.try_send((1, 0)).unwrap();
+    assert_eq!(rx.try_recv_fair(), Ok((0, 1)));
+    assert_eq!(rx.try_recv_fair(), Ok((1, 0)));
+    rx.release_consumed();
+    hot.try_send((0, 4)).unwrap();
+    hot.try_send((0, 5)).unwrap();
+    assert!(matches!(hot.try_send((0, 6)), Err(TrySendError::Full(_))));
+    for seq in 2..6 {
+        assert_eq!(rx.try_recv_fair(), Ok((0, seq)));
+    }
+    assert_eq!(rx.try_recv_fair(), Err(TryRecvError::Empty));
+    quiet.try_send((1, 1)).unwrap();
+    assert_eq!(rx.try_recv_fair(), Ok((1, 1)));
+}
+
+#[test]
+fn fair_receive_rotates_across_ready_groups_before_repeating_a_sender() {
+    let (root, mut rx) = channel(2);
+    let mut senders: Vec<_> = (0..4097).map(|_| root.try_clone().unwrap()).collect();
+    drop(root);
+    for (peer, sender) in senders.iter_mut().enumerate() {
+        sender.try_send((peer, 0)).unwrap();
+        sender.try_send((peer, 1)).unwrap();
+    }
+    let mut seen = vec![false; senders.len()];
+    for _ in 0..senders.len() {
+        let (peer, seq) = rx.try_recv_fair().unwrap();
+        assert_eq!(seq, 0);
+        assert!(!std::mem::replace(&mut seen[peer], true));
+    }
+    assert!(seen.into_iter().all(|seen| seen));
+}

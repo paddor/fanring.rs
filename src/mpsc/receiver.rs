@@ -81,7 +81,60 @@ impl<T, P: Teardown> Receiver<T, P> {
             }
         }
         loop {
-            let (result, released) = self.try_recv_inner();
+            let (result, released) = self.try_recv_inner::<false>();
+            let retry = released.is_some() && matches!(result, Err(TryRecvError::Empty));
+            self.notify_released(released);
+            if !retry {
+                return result;
+            }
+        }
+    }
+
+    /// Try to receive one value, rotating to the next ready sender afterward.
+    ///
+    /// Unlike [`try_recv`](Self::try_recv), this never continues a per-sender
+    /// burst. Newly ready senders are collected before each call and join the
+    /// back of the active queue. FIFO within each sender is preserved, including
+    /// when alternating this operation with ordinary batched scheduling.
+    ///
+    /// Slot release is still batched. Call [`release_consumed`](Self::release_consumed)
+    /// before processing values if senders must immediately reuse their slots.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TryRecvError::Empty`] when no value is ready, or
+    /// [`TryRecvError::Disconnected`] after all senders and buffered values are gone.
+    #[inline]
+    pub fn try_recv_fair(&mut self) -> Result<T, TryRecvError> {
+        if self.shared.registry_generation.load(Ordering::Acquire) != self.seen_registry_generation
+            || self.groups.iter().any(|group| group.has_ready())
+        {
+            self.collect_ready(true);
+        }
+        self.items_until_ready_poll = READY_POLL_INTERVAL;
+        // A single active lane has nothing to rotate past. Keep its cached
+        // window until slot release is due, after checking for new ready lanes.
+        if self.active.len() == 1
+            && let Some(&key) = self.active.front()
+            && let Some(lane) = self.lanes.get_mut(key.slot).and_then(Option::as_mut)
+            && lane.key == key
+        {
+            if lane.cached_available == 0 {
+                lane.cached_available = lane.consumer.prefetch();
+            }
+            if lane.cached_available != 0 && lane.unreleased + 1 < lane.release_batch {
+                lane.cached_available -= 1;
+                lane.unreleased += 1;
+                lane.burst = 0;
+                self.items_until_ready_poll -= 1;
+                return Ok(lane
+                    .consumer
+                    .pop()
+                    .expect("cached_available guarantees prefetched data"));
+            }
+        }
+        loop {
+            let (result, released) = self.try_recv_inner::<true>();
             let retry = released.is_some() && matches!(result, Err(TryRecvError::Empty));
             self.notify_released(released);
             if !retry {
@@ -92,7 +145,7 @@ impl<T, P: Teardown> Receiver<T, P> {
 
     // Fold the intermediate result into each caller's return buffer.
     #[inline(always)]
-    fn try_recv_inner(&mut self) -> (Result<T, TryRecvError>, Option<LaneKey>) {
+    fn try_recv_inner<const FAIR: bool>(&mut self) -> (Result<T, TryRecvError>, Option<LaneKey>) {
         loop {
             if self.active.is_empty() {
                 self.collect_ready(true);
@@ -112,7 +165,7 @@ impl<T, P: Teardown> Receiver<T, P> {
             }
 
             let key = self.active.pop_front().expect("active lane present");
-            match self.poll_lane(key) {
+            match self.poll_lane::<FAIR>(key) {
                 LanePoll::Item {
                     value,
                     rotate,
@@ -160,7 +213,7 @@ impl<T, P: Teardown> Receiver<T, P> {
         // Convert directly to the blocking result type. Going through try_recv
         // adds another payload-sized return on this path.
         loop {
-            let (result, released) = self.try_recv_inner();
+            let (result, released) = self.try_recv_inner::<false>();
             let retry = released.is_some() && matches!(result, Err(TryRecvError::Empty));
             self.notify_released(released);
             match result {
@@ -289,7 +342,7 @@ impl<T, P: Teardown> Receiver<T, P> {
 
             let shared = self.shared.clone();
             let wait = shared.data_waiter.prepare();
-            let (result, released) = self.try_recv_inner();
+            let (result, released) = self.try_recv_inner::<false>();
             match result {
                 Ok(value) => {
                     wait.cancel();
@@ -347,7 +400,7 @@ impl<T, P: Teardown> Receiver<T, P> {
 
             let shared = self.shared.clone();
             let wait = shared.data_waiter.prepare();
-            let (result, released) = self.try_recv_inner();
+            let (result, released) = self.try_recv_inner::<false>();
             match result {
                 Ok(value) => {
                     wait.cancel();
@@ -387,7 +440,7 @@ impl<T, P: Teardown> Receiver<T, P> {
     // Keep LanePoll in the caller. Extra yring branches can otherwise exceed
     // the compiler's inline budget and add a call/return to every blocking recv.
     #[inline(always)]
-    fn poll_lane(&mut self, key: LaneKey) -> LanePoll<T> {
+    fn poll_lane<const FAIR: bool>(&mut self, key: LaneKey) -> LanePoll<T> {
         let Some(lane) = self.lanes.get_mut(key.slot).and_then(Option::as_mut) else {
             return LanePoll::Stale;
         };
@@ -422,7 +475,7 @@ impl<T, P: Teardown> Receiver<T, P> {
         lane.burst += 1;
         let released = lane.unreleased == lane.release_batch && lane.release_pending();
 
-        let rotate = lane.burst == PREFETCH_LIMIT;
+        let rotate = FAIR || lane.burst == PREFETCH_LIMIT;
         if rotate {
             lane.burst = 0;
         }
@@ -449,8 +502,9 @@ impl<T, P: Teardown> Receiver<T, P> {
     fn collect_ready(&mut self, all: bool) {
         self.refresh_registry();
         let group_count = self.groups.len();
+        let start = self.ready_group_cursor;
         for offset in 0..group_count {
-            let group_index = (self.ready_group_cursor + offset) % group_count;
+            let group_index = (start + offset) % group_count;
             let mut page_bits = self.groups[group_index].take_all();
             if page_bits == 0 {
                 continue;
