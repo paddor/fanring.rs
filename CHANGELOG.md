@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-09-19
+
+### Added
+
+- `Receiver::try_recv_fair` rotates after each received value so ready sender
+  lanes take turns, while preserving FIFO order within each sender.
+- `Sender<Deferred>::try_send_deferred` and `flush` queue multiple values
+  before one publication and receiver wakeup.
+
+### Fixed
+
+- Advance ready-group traversal after scanning sender readiness.
+
 ## [0.3.5] - 2026-09-15
 
 ### Added
@@ -137,7 +150,8 @@ All notable changes to this project are documented here.
 
 - Initial bounded, nonblocking MPSC implementation with a fixed sender limit.
 
-[Unreleased]: https://github.com/paddor/fanring.rs/compare/fanring-v0.3.5...HEAD
+[Unreleased]: https://github.com/paddor/fanring.rs/compare/fanring-v0.3.6...HEAD
+[0.3.6]: https://github.com/paddor/fanring.rs/compare/fanring-v0.3.5...fanring-v0.3.6
 [0.3.5]: https://github.com/paddor/fanring.rs/compare/v0.3.4...fanring-v0.3.5
 [0.3.4]: https://github.com/paddor/fanring.rs/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/paddor/fanring.rs/compare/v0.3.2...v0.3.3
