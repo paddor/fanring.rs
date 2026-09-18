@@ -2,6 +2,7 @@
 //!
 //! Each sender owns its ring producer and the receiver owns every ring
 //! consumer. Ordering is FIFO per sender and relaxed across senders.
+//! [`Receiver::try_recv_fair`] opts into one-value rotation among ready senders.
 //!
 //! Single-value receives batch slot release, so a sender can still observe
 //! `Full` after values have been received. [`Receiver::release_consumed`]

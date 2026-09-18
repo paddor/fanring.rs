@@ -91,6 +91,18 @@ pub(crate) struct Producer<T, P: Teardown> {
     policy: PhantomData<P>,
 }
 
+impl<T> Producer<T, crate::teardown::Deferred> {
+    #[inline]
+    pub(crate) fn push_deferred(&mut self, value: T) -> Result<(), T> {
+        self.inner.push(value)
+    }
+
+    #[inline]
+    pub(crate) fn flush(&mut self) {
+        self.inner.flush();
+    }
+}
+
 impl<T, P: Teardown> Producer<T, P> {
     #[cfg(feature = "async")]
     pub(crate) fn is_full(&mut self) -> bool {

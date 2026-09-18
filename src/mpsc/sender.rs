@@ -285,6 +285,43 @@ impl<T, P: Teardown> Sender<T, P> {
     }
 }
 
+impl<T> Sender<T, Deferred> {
+    /// Enqueue without publishing, allowing one publication for a batch.
+    ///
+    /// Call [`flush`](Self::flush) before waiting for space or data. An ordinary
+    /// successful send or dropping this sender also publishes pending values.
+    /// Only the deferred teardown policy supports unpublished values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrySendError::Full`] when this sender's lane is full or
+    /// [`TrySendError::Disconnected`] when the receiver is gone. A full result
+    /// publishes earlier values so the receiver can free capacity.
+    #[inline]
+    pub fn try_send_deferred(&mut self, value: T) -> Result<(), TrySendError<T>> {
+        if !self.shared.receiver_alive.load(Ordering::Acquire) {
+            return Err(TrySendError::Disconnected(value));
+        }
+        self.producer.push_deferred(value).map_err(|value| {
+            self.flush();
+            if self.is_disconnected() {
+                TrySendError::Disconnected(value)
+            } else {
+                TrySendError::Full(value)
+            }
+        })
+    }
+
+    /// Publish earlier deferred sends and wake the receiver if needed.
+    #[inline]
+    pub fn flush(&mut self) {
+        self.producer.flush();
+        if self.shared.mark_ready(&self.signal) {
+            self.shared.data_waiter.notify();
+        }
+    }
+}
+
 impl<T, P: Teardown> Drop for Sender<T, P> {
     fn drop(&mut self) {
         #[cfg(feature = "async")]

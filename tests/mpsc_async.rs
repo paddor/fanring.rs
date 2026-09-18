@@ -203,3 +203,24 @@ fn cross_thread_async_churn_preserves_fifo_and_reclaims_payloads() {
     }
     assert_eq!(next, [1000; 4]);
 }
+
+#[test]
+fn deferred_flush_wakes_a_waiting_receiver_once_per_publication() {
+    let (mut tx, mut rx) = mpsc::channel(4);
+    let wakes = Arc::new(Wakes::default());
+    let waker = Waker::from(wakes.clone());
+    let mut cx = Context::from_waker(&waker);
+    assert!(rx.poll_recv(&mut cx).is_pending());
+    tx.try_send_deferred(0).unwrap();
+    tx.try_send_deferred(1).unwrap();
+    assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
+    tx.flush();
+    assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+    assert_eq!(rx.poll_recv(&mut cx), Poll::Ready(Ok(0)));
+    assert_eq!(rx.poll_recv(&mut cx), Poll::Ready(Ok(1)));
+    assert!(rx.poll_recv(&mut cx).is_pending());
+    tx.try_send_deferred(2).unwrap();
+    drop(tx);
+    assert_eq!(rx.poll_recv(&mut cx), Poll::Ready(Ok(2)));
+    assert_eq!(rx.poll_recv(&mut cx), Poll::Ready(Err(RecvError)));
+}
