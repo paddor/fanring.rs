@@ -17,63 +17,69 @@ million items/s
 <text x="62" y="226" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
 40
 </text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,179 830,179 "/>
-<text x="62" y="179" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,180 830,180 "/>
+<text x="62" y="180" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
 60
 </text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,133 830,133 "/>
-<text x="62" y="133" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,134 830,134 "/>
+<text x="62" y="134" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
 80
 </text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,87 830,87 "/>
-<text x="62" y="87" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,88 830,88 "/>
+<text x="62" y="88" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
 100
 </text>
 <polyline fill="none" opacity="1" stroke="#30363D" stroke-width="2" points="70,318 830,318 "/>
-<rect x="100" y="97" width="44" height="221" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="146" y="280" width="44" height="38" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="192" y="254" width="44" height="64" opacity="1" fill="#22D3EE" stroke="none"/>
-<rect x="238" y="298" width="44" height="20" opacity="1" fill="#4ADE80" stroke="none"/>
-<rect x="284" y="300" width="44" height="18" opacity="1" fill="#A78BFA" stroke="none"/>
-<rect x="330" y="308" width="44" height="10" opacity="1" fill="#F472B6" stroke="none"/>
-<rect x="376" y="269" width="44" height="49" opacity="1" fill="#F59E0B" stroke="none"/>
+<rect x="77" y="110" width="44" height="208" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="123" y="96" width="44" height="222" opacity="1" fill="#FBBF24" stroke="none"/>
+<rect x="169" y="274" width="44" height="44" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="215" y="249" width="44" height="69" opacity="1" fill="#22D3EE" stroke="none"/>
+<rect x="261" y="298" width="44" height="20" opacity="1" fill="#4ADE80" stroke="none"/>
+<rect x="307" y="300" width="44" height="18" opacity="1" fill="#A78BFA" stroke="none"/>
+<rect x="353" y="308" width="44" height="10" opacity="1" fill="#F472B6" stroke="none"/>
+<rect x="399" y="266" width="44" height="52" opacity="1" fill="#F59E0B" stroke="none"/>
 <text x="260" y="338" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E6EDF3" font-weight="bold">
 MPSC: 4 producers
 </text>
-<rect x="526" y="95" width="44" height="223" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="572" y="271" width="44" height="47" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="618" y="232" width="44" height="86" opacity="1" fill="#22D3EE" stroke="none"/>
-<rect x="664" y="306" width="44" height="12" opacity="1" fill="#F472B6" stroke="none"/>
-<rect x="710" y="267" width="44" height="51" opacity="1" fill="#F59E0B" stroke="none"/>
+<rect x="503" y="95" width="44" height="223" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="549" y="100" width="44" height="218" opacity="1" fill="#FBBF24" stroke="none"/>
+<rect x="595" y="263" width="44" height="55" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="641" y="252" width="44" height="66" opacity="1" fill="#22D3EE" stroke="none"/>
+<rect x="687" y="306" width="44" height="12" opacity="1" fill="#F472B6" stroke="none"/>
+<rect x="733" y="265" width="44" height="53" opacity="1" fill="#F59E0B" stroke="none"/>
 <text x="640" y="338" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E6EDF3" font-weight="bold">
 MPMC: 4 producers / 4 consumers
 </text>
 <rect x="65" y="364" width="12" height="12" opacity="1" fill="#F87171" stroke="none"/>
 <text x="83" y="370" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
-fanring (4 x 2048-item rings)
+fanring Deferred (4 x 2048)
 </text>
-<rect x="295" y="364" width="12" height="12" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="295" y="364" width="12" height="12" opacity="1" fill="#FBBF24" stroke="none"/>
 <text x="313" y="370" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
+fanring Coordinated (4 x 2048)
+</text>
+<rect x="525" y="364" width="12" height="12" opacity="1" fill="#60A5FA" stroke="none"/>
+<text x="543" y="370" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
 crossbeam-channel 0.5.16
 </text>
-<rect x="525" y="364" width="12" height="12" opacity="1" fill="#22D3EE" stroke="none"/>
-<text x="543" y="370" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
+<rect x="65" y="384" width="12" height="12" opacity="1" fill="#22D3EE" stroke="none"/>
+<text x="83" y="390" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
 crossfire 3.1.19
 </text>
-<rect x="65" y="384" width="12" height="12" opacity="1" fill="#4ADE80" stroke="none"/>
-<text x="83" y="390" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
+<rect x="295" y="384" width="12" height="12" opacity="1" fill="#4ADE80" stroke="none"/>
+<text x="313" y="390" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
 concurrent-queue 2.5.0
 </text>
-<rect x="295" y="384" width="12" height="12" opacity="1" fill="#A78BFA" stroke="none"/>
-<text x="313" y="390" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
+<rect x="525" y="384" width="12" height="12" opacity="1" fill="#A78BFA" stroke="none"/>
+<text x="543" y="390" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
 thingbuf 0.1.6
 </text>
-<rect x="525" y="384" width="12" height="12" opacity="1" fill="#F472B6" stroke="none"/>
-<text x="543" y="390" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
+<rect x="65" y="404" width="12" height="12" opacity="1" fill="#F472B6" stroke="none"/>
+<text x="83" y="410" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
 flume 0.12.0
 </text>
-<rect x="65" y="404" width="12" height="12" opacity="1" fill="#F59E0B" stroke="none"/>
-<text x="83" y="410" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
+<rect x="295" y="404" width="12" height="12" opacity="1" fill="#F59E0B" stroke="none"/>
+<text x="313" y="410" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
 kanal 0.1.1
 </text>
 </svg>

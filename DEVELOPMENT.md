@@ -95,15 +95,15 @@ the version through trusted publishing.
 ## Benchmarks
 
 ```sh
-cargo bench -p fanring --bench comparison
-FANRING_BENCH_MODE=blocking cargo bench -p fanring --bench comparison
-cargo bench -p fanring --bench mpmc
-FANRING_BENCH_MODE=blocking cargo bench -p fanring --bench mpmc
-cargo bench -p fanring --bench wake_latency
+cargo bench -p fanring --bench fanring_comparison
+FANRING_BENCH_MODE=blocking cargo bench -p fanring --bench fanring_comparison
+cargo bench -p fanring --bench fanring_mpmc
+FANRING_BENCH_MODE=blocking cargo bench -p fanring --bench fanring_mpmc
+cargo bench -p fanring --bench fanring_wake_latency
 FANRING_WAKE_SPIN_NS=50000 \
   FANRING_WAKE_SETTLE_NS=25000 \
   FANRING_WAKE_SETTLE_MODE=spin \
-  cargo bench -p fanring --bench wake_latency
+  cargo bench -p fanring --bench fanring_wake_latency
 ```
 
 The benchmark compares `fanring` against:
@@ -168,7 +168,7 @@ Short smoke run:
 FANRING_BENCH_SECS=0.1 \
 FANRING_BENCH_SAMPLES=1 \
 FANRING_BENCH_WARMUP_SECS=0 \
-cargo bench -p fanring --bench comparison
+cargo bench -p fanring --bench fanring_comparison
 ```
 
 Focused run:
@@ -177,13 +177,13 @@ Focused run:
 FANRING_BENCH_PAYLOADS=bytes64 \
 FANRING_BENCH_PRODUCERS=8 \
 FANRING_BENCH_IMPLS=fanring,crossbeam-channel \
-cargo bench -p fanring --bench comparison
+cargo bench -p fanring --bench fanring_comparison
 ```
 
 Saturated occupancy run:
 
 ```sh
-FANRING_BENCH_PROFILE=saturated cargo bench -p fanring --bench comparison
+FANRING_BENCH_PROFILE=saturated cargo bench -p fanring --bench fanring_comparison
 ```
 
 ## Charts
@@ -277,7 +277,7 @@ format, and run Clippy before benchmarking; stop on any warning or timeout.
 cargo fmt --all --check
 cargo build --locked
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo bench -p fanring --locked --no-run --bench comparison --bench mpmc
+cargo bench -p fanring --locked --no-run --bench fanring_comparison --bench fanring_mpmc
 
 FANRING_BENCH_CACHE_DIR=target/teardown-policy-results \
 FANRING_BENCH_PAYLOADS=u64 \
@@ -287,7 +287,7 @@ FANRING_BENCH_SAMPLES=5 FANRING_BENCH_SECS=1 \
 FANRING_BENCH_WARMUP_SECS=0.25 FANRING_BENCH_CAPACITY=8192 \
 FANRING_BENCH_MODE=try FANRING_BENCH_PROFILE=uncontrolled \
 FANRING_BENCH_AFFINITY=auto \
-cargo bench --locked --bench comparison
+cargo bench --locked --bench fanring_comparison
 
 FANRING_BENCH_CACHE_DIR=target/teardown-policy-results \
 FANRING_BENCH_PAYLOADS=u64 \
@@ -297,7 +297,7 @@ FANRING_BENCH_SAMPLES=5 FANRING_BENCH_SECS=1 \
 FANRING_BENCH_WARMUP_SECS=0.25 FANRING_BENCH_CAPACITY=8192 \
 FANRING_BENCH_MODE=try FANRING_BENCH_PROFILE=uncontrolled \
 FANRING_BENCH_AFFINITY=auto \
-cargo bench --locked --bench mpmc
+cargo bench --locked --bench fanring_mpmc
 
 cargo run --example fanring-chart -- \
   --results-dir target/teardown-policy-results \

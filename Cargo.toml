@@ -89,17 +89,20 @@ serde_json = "1"
 thingbuf = "0.1"
 
 [[bench]]
-name = "comparison"
+name = "fanring_comparison"
+path = "benches/comparison.rs"
 harness = false
 test = false
 
 [[bench]]
-name = "wake_latency"
+name = "fanring_wake_latency"
+path = "benches/wake_latency.rs"
 harness = false
 test = false
 
 [[bench]]
-name = "mpmc"
+name = "fanring_mpmc"
+path = "benches/mpmc.rs"
 harness = false
 test = false
 
