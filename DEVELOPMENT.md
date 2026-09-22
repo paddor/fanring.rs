@@ -100,6 +100,10 @@ FANRING_BENCH_MODE=blocking cargo bench -p fanring --bench comparison
 cargo bench -p fanring --bench mpmc
 FANRING_BENCH_MODE=blocking cargo bench -p fanring --bench mpmc
 cargo bench -p fanring --bench wake_latency
+FANRING_WAKE_SPIN_NS=50000 \
+  FANRING_WAKE_SETTLE_NS=25000 \
+  FANRING_WAKE_SETTLE_MODE=spin \
+  cargo bench -p fanring --bench wake_latency
 ```
 
 The benchmark compares `fanring` against:
@@ -148,9 +152,11 @@ Comparison benches accept `FANRING_BENCH_MODE`, `FANRING_BENCH_SECS`,
 CPU order in each row. Use `taskset` to restrict the available CPUs.
 
 Wake latency accepts `FANRING_WAKE_ROUNDS`, `FANRING_WAKE_WARMUP`,
-`FANRING_WAKE_SETTLE_NS`, and `FANRING_WAKE_SETTLE_MODE` (`sleep` or `spin`). It
-measures both a blocked receiver woken by a send and a blocked sender woken by
-a receive on capacity-one channels. Results are appended to
+`FANRING_WAKE_SETTLE_NS`, and `FANRING_WAKE_SETTLE_MODE` (`sleep` or `spin`).
+Set `FANRING_WAKE_SPIN_NS` to also measure `fanring-spin` and
+`fanring-spin-mpmc` with `WaitStrategy::SpinFor`. It measures both a blocked
+receiver woken by a send and a blocked sender woken by a receive on
+capacity-one channels. Results are appended to
 `~/.cache/fanring/<implementation>/latency-{mpsc,mpmc}.jsonl`.
 
 `FANRING_BENCH_CACHE_DIR` overrides the `~/.cache/fanring` result root for every

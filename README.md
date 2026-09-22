@@ -148,6 +148,27 @@ or another receiver moves work. `Disconnected` is final: all senders are gone,
 sender rings and staged queues are drained, and no work publication is in
 flight.
 
+## Blocking wait strategies
+
+Synchronous endpoints briefly retry before parking by default. Latency-sensitive
+threads pinned to distinct CPUs can opt into bounded active spinning:
+
+```rust
+use std::time::Duration;
+use fanring::{WaitStrategy, mpsc};
+
+let (_tx, mut rx) = mpsc::channel::<u64>(256);
+rx.set_wait_strategy(WaitStrategy::SpinFor(Duration::from_micros(50)));
+```
+
+The policy is endpoint-local, so applications can spend CPU only on the send or
+receive side that needs lower wake latency. Newly registered senders and cloned
+MPMC receivers inherit their source endpoint's policy. `SpinFor` uses
+`spin_loop`, never scheduler yields, then falls back to the same lost-wakeup-safe
+parking path. Measure the application's empty/full interval distribution and
+CPU budget when choosing a duration. Timeout and deadline operations stop
+spinning at their operation deadline. Async MPSC operations ignore this policy.
+
 ## Contract
 
 - One bounded ring per dynamic sender; capacity is a per-sender HWM rounded up

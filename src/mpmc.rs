@@ -12,7 +12,7 @@ use arc_swap::ArcSwap;
 use concurrent_queue::ConcurrentQueue;
 
 use crate::compat::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock};
-use crate::config::validate_capacity;
+use crate::config::{WaitStrategy, validate_capacity};
 use crate::publication::PublicationTracker;
 use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
 use crate::wait::MultiWaitCell;
@@ -158,6 +158,7 @@ fn build_channel<T, P: Teardown>(capacity_per_sender: usize) -> (Sender<T, P>, R
             producer,
             key,
             signal,
+            wait_strategy: WaitStrategy::default(),
         },
         Receiver {
             shared,
@@ -174,6 +175,7 @@ fn build_channel<T, P: Teardown>(capacity_per_sender: usize) -> (Sender<T, P>, R
             direct_page_cursor: std::cell::Cell::new(0),
             prefer_work: std::cell::Cell::new(false),
             capacity_per_sender: capacity_per_sender.next_power_of_two(),
+            wait_strategy: WaitStrategy::default(),
         },
     )
 }

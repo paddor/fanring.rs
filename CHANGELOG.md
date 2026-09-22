@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Add endpoint-local `WaitStrategy::SpinFor` for bounded active spinning before
+  synchronous send and receive operations park.
+
 ## [0.3.6] - 2026-09-19
 
 ### Added

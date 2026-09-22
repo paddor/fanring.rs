@@ -195,6 +195,13 @@ inversion. With no waiter, notification is one atomic operation and no lock.
 
 Timeout variants use the same protocol with a deadline.
 
+Each endpoint has a synchronous wait strategy. `Park`, the default, retains the
+short retry phase above. `SpinFor(duration)` actively retries with `spin_loop`
+until its duration or the operation deadline expires, then enters the same
+registration and parking protocol. It never calls the OS scheduler's yield
+operation. The policy is endpoint-local; new senders and cloned MPMC receivers
+copy it from their source endpoint.
+
 ## Drop
 
 Sender drop closes and activates its lane, then decrements the live-sender

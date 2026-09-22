@@ -6,6 +6,7 @@ use std::mem;
 use std::time::{Duration, Instant};
 
 use crate::compat::{Arc, Ordering, lock};
+use crate::config::{SpinWait, WaitStrategy};
 use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
 
 use super::{
@@ -38,9 +39,23 @@ pub struct Receiver<T, P: Teardown = Deferred> {
     pub(super) seen_registry_generation: usize,
     pub(super) items_until_ready_poll: usize,
     pub(super) capacity_per_sender: usize,
+    pub(super) wait_strategy: WaitStrategy,
 }
 
 impl<T, P: Teardown> Receiver<T, P> {
+    /// Set the policy used by synchronous blocking receives before parking.
+    ///
+    /// This does not affect asynchronous operations.
+    pub fn set_wait_strategy(&mut self, strategy: WaitStrategy) {
+        self.wait_strategy = strategy;
+    }
+
+    /// Return this receiver's synchronous blocking wait policy.
+    #[must_use]
+    pub const fn wait_strategy(&self) -> WaitStrategy {
+        self.wait_strategy
+    }
+
     /// Try to receive one value.
     ///
     /// Consumed slots are released in batches. Use
@@ -324,7 +339,8 @@ impl<T, P: Teardown> Receiver<T, P> {
     #[cold]
     #[inline(never)]
     fn recv_slow(&mut self) -> Result<T, RecvError> {
-        for _ in 0..PARK_SPINS {
+        let mut spin = SpinWait::blocking(self.wait_strategy, PARK_SPINS);
+        while spin.step() {
             std::hint::spin_loop();
             match self.try_recv() {
                 Ok(value) => return Ok(value),
@@ -389,6 +405,18 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// Returns [`RecvTimeoutError::Timeout`] at the deadline, or
     /// [`RecvTimeoutError::Disconnected`] after the channel disconnects.
     pub fn recv_deadline(&mut self, deadline: Instant) -> Result<T, RecvTimeoutError> {
+        let mut spin = SpinWait::deadline(self.wait_strategy, deadline);
+        while spin.step() {
+            std::hint::spin_loop();
+            match self.try_recv() {
+                Ok(value) => return Ok(value),
+                Err(TryRecvError::Disconnected) => {
+                    return Err(RecvTimeoutError::Disconnected);
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+
         loop {
             match self.try_recv() {
                 Ok(value) => return Ok(value),
@@ -723,6 +751,7 @@ impl<T, P: Teardown> fmt::Debug for Receiver<T, P> {
                 &self.shared.registered_lanes.load(Ordering::Relaxed),
             )
             .field("capacity_per_sender", &self.capacity_per_sender())
+            .field("wait_strategy", &self.wait_strategy)
             .finish_non_exhaustive()
     }
 }

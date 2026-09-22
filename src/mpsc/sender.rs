@@ -3,6 +3,7 @@ use crate::teardown::{Deferred, Teardown};
 use std::time::{Duration, Instant};
 
 use crate::compat::{Arc, Ordering};
+use crate::config::{SpinWait, WaitStrategy};
 use crate::ready::LaneSignal;
 
 use super::{
@@ -20,9 +21,24 @@ pub struct Sender<T, P: Teardown = Deferred> {
     pub(super) producer: crate::ring::Producer<T, P>,
     pub(super) key: LaneKey,
     pub(super) signal: Arc<LaneSignal>,
+    pub(super) wait_strategy: WaitStrategy,
 }
 
 impl<T, P: Teardown> Sender<T, P> {
+    /// Set the policy used by synchronous blocking sends before parking.
+    ///
+    /// Newly registered senders inherit this sender's current policy. This
+    /// does not affect asynchronous operations.
+    pub fn set_wait_strategy(&mut self, strategy: WaitStrategy) {
+        self.wait_strategy = strategy;
+    }
+
+    /// Return this sender's synchronous blocking wait policy.
+    #[must_use]
+    pub const fn wait_strategy(&self) -> WaitStrategy {
+        self.wait_strategy
+    }
+
     /// Try to register another sender.
     ///
     /// Returns `None` when the receiver is gone.
@@ -59,6 +75,7 @@ impl<T, P: Teardown> Sender<T, P> {
             producer,
             key,
             signal,
+            wait_strategy: self.wait_strategy,
         })
     }
 
@@ -129,7 +146,8 @@ impl<T, P: Teardown> Sender<T, P> {
     #[cold]
     #[inline(never)]
     fn send_slow(&mut self, mut value: T) -> Result<(), SendError<T>> {
-        for _ in 0..PARK_SPINS {
+        let mut spin = SpinWait::blocking(self.wait_strategy, PARK_SPINS);
+        while spin.step() {
             std::hint::spin_loop();
             match self.try_send(value) {
                 Ok(()) => return Ok(()),
@@ -196,6 +214,18 @@ impl<T, P: Teardown> Sender<T, P> {
         mut value: T,
         deadline: Instant,
     ) -> Result<(), SendTimeoutError<T>> {
+        let mut spin = SpinWait::deadline(self.wait_strategy, deadline);
+        while spin.step() {
+            std::hint::spin_loop();
+            match self.try_send(value) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Disconnected(value)) => {
+                    return Err(SendTimeoutError::Disconnected(value));
+                }
+                Err(TrySendError::Full(returned)) => value = returned,
+            }
+        }
+
         loop {
             match self.try_send(value) {
                 Ok(()) => return Ok(()),
