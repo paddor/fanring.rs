@@ -224,3 +224,28 @@ fn deferred_flush_wakes_a_waiting_receiver_once_per_publication() {
     assert_eq!(rx.poll_recv(&mut cx), Poll::Ready(Ok(2)));
     assert_eq!(rx.poll_recv(&mut cx), Poll::Ready(Err(RecvError)));
 }
+
+#[test]
+fn async_bulk_moves_published_values_without_pending() {
+    futures_lite::future::block_on(async {
+        let (mut tx, mut rx) = mpsc::channel(8);
+        for n in 0..6 {
+            tx.try_send(n).unwrap();
+        }
+        let mut out = Vec::with_capacity(4);
+        let ready = futures_lite::future::poll_once(rx.recv_batch_into_async(&mut out, 4)).await;
+        assert_eq!(ready, Some(Ok(4)));
+        assert_eq!(out, [0, 1, 2, 3]);
+        for n in 6..8 {
+            tx.try_send(n).unwrap();
+        }
+        let pending = futures_lite::future::poll_once(rx.recv_batch_into_async(&mut out, 4)).await;
+        assert_eq!(pending, Some(Ok(4)));
+        assert_eq!(out, [0, 1, 2, 3, 4, 5, 6, 7]);
+        let empty = futures_lite::future::poll_once(rx.recv_batch_into_async(&mut out, 4)).await;
+        assert_eq!(empty, None);
+        assert_eq!(out.len(), 8);
+        drop(tx);
+        assert_eq!(rx.recv_batch_into_async(&mut out, 4).await, Err(RecvError));
+    });
+}

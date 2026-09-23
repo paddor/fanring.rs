@@ -163,6 +163,14 @@ impl<T, P: Teardown> Consumer<T, P> {
     }
 
     #[inline]
+    pub(crate) fn pop_into(&mut self, output: &mut Vec<T>, limit: usize) -> usize {
+        self.inner
+            .as_mut()
+            .expect("consumer is open")
+            .pop_into(output, limit)
+    }
+
+    #[inline]
     pub(crate) fn prefetch(&mut self) -> usize {
         self.inner.as_mut().expect("consumer is open").prefetch()
     }

@@ -162,6 +162,23 @@ capacity-one channels. Results are appended to
 `FANRING_BENCH_CACHE_DIR` overrides the `~/.cache/fanring` result root for every
 benchmark and the chart generator. Result files are append-only.
 
+The batch receive bench compares repeated `try_recv` against `recv_batch_into`
+and `try_recv_batch_into` on the MPSC channel:
+
+```sh
+cargo bench -p fanring --bench fanring_batch
+```
+
+Its `prefilled` profile lets producers fill their rings, stops them, and times
+only the consumer's drain, so it reports receive cost per item. Its `stream`
+profile keeps producers sending and reports end-to-end throughput. It accepts
+`FANRING_BENCH_SECS`, `FANRING_BENCH_SAMPLES`, `FANRING_BENCH_WARMUP_SECS`,
+`FANRING_BENCH_PRODUCERS`, `FANRING_BENCH_CAPACITY`, `FANRING_BENCH_PAYLOADS`,
+`FANRING_BENCH_AFFINITY`, `FANRING_BENCH_BATCH` (batch limits, default
+`64,1024`), `FANRING_BENCH_RECEIVES` (`try_recv`, `recv_batch_into`,
+`try_recv_batch_into`), and `FANRING_BENCH_PROFILE` (`prefilled`, `stream`).
+Rows are appended to `~/.cache/fanring/fanring/batch-mpsc.jsonl`.
+
 Short smoke run:
 
 ```sh

@@ -1132,3 +1132,92 @@ fn deferred_publish_racing_fair_receive() {
         assert_eq!(next, 2);
     });
 }
+
+#[test]
+fn mpsc_try_recv_batch_racing_send_preserves_values() {
+    fn check<P: fanring::teardown::Teardown>() {
+        model(|| {
+            let (mut tx, mut rx) = fanring::mpsc::channel_with_policy::<_, P>(2);
+            tx.try_send(0).unwrap();
+            let sender = thread::spawn(move || {
+                tx.try_send(1).unwrap();
+                tx
+            });
+
+            let mut output = Vec::with_capacity(2);
+            assert!(matches!(rx.try_recv_batch_into(&mut output, 2), Ok(1 | 2)));
+            let tx = sender.join().unwrap();
+            if output.len() < 2 {
+                assert_eq!(rx.try_recv_batch_into(&mut output, 2), Ok(1));
+            }
+            assert_eq!(output, [0, 1]);
+            assert_eq!(
+                rx.try_recv_batch_into(&mut output, 2),
+                Err(TryRecvError::Empty)
+            );
+            drop(tx);
+            assert_eq!(
+                rx.try_recv_batch_into(&mut output, 2),
+                Err(TryRecvError::Disconnected)
+            );
+            assert_eq!(output, [0, 1]);
+        });
+    }
+    check::<fanring::teardown::Deferred>();
+    check::<fanring::teardown::Coordinated>();
+}
+
+#[test]
+fn mpsc_try_recv_batch_racing_registration_collects_new_lane() {
+    model(|| {
+        let (mut root, mut rx) = channel::<usize>(2);
+        root.try_send(0).unwrap();
+        let registrar = thread::spawn(move || {
+            let mut child = root.try_clone().unwrap();
+            child.try_send(1).unwrap();
+            (root, child)
+        });
+
+        let mut output = Vec::with_capacity(2);
+        let first = rx.try_recv_batch_into(&mut output, 2);
+        assert!(matches!(first, Ok(1 | 2)));
+        let senders = registrar.join().unwrap();
+        if output.len() < 2 {
+            assert_eq!(rx.try_recv_batch_into(&mut output, 2), Ok(1));
+        }
+        output.sort_unstable();
+        assert_eq!(output, [0, 1]);
+        drop(senders);
+        assert_eq!(
+            rx.try_recv_batch_into(&mut output, 1),
+            Err(TryRecvError::Disconnected)
+        );
+    });
+}
+
+#[test]
+fn mpsc_recv_batch_bulk_release_wakes_blocked_sender() {
+    fn check<P: fanring::teardown::Teardown>() {
+        model(|| {
+            let (mut tx, mut rx) = fanring::mpsc::channel_with_policy::<_, P>(2);
+            tx.try_send(0).unwrap();
+            tx.try_send(1).unwrap();
+            let sender = thread::spawn(move || {
+                tx.send(2).unwrap();
+                tx.send(3).unwrap();
+                tx
+            });
+
+            let mut output = Vec::with_capacity(4);
+            while output.len() < 4 {
+                assert!(matches!(rx.recv_batch_into(&mut output, 4), Ok(1..=4)));
+            }
+            assert_eq!(output, [0, 1, 2, 3]);
+            let tx = sender.join().unwrap();
+            drop(tx);
+            assert_eq!(rx.recv_batch_into(&mut output, 1), Err(RecvError));
+        });
+    }
+    check::<fanring::teardown::Deferred>();
+    check::<fanring::teardown::Coordinated>();
+}

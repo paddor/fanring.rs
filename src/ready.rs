@@ -246,7 +246,7 @@ mod tests {
 #[cfg(all(test, loom, target_pointer_width = "64"))]
 mod loom_tests {
     use super::{LaneSignal, ReadyGroup, ReadyPage};
-    use crate::compat::Arc;
+    use crate::compat::{Arc, AtomicBool, Ordering};
 
     #[test]
     fn page_mark_racing_group_claim_remains_visible() {
@@ -314,15 +314,21 @@ mod loom_tests {
             let group = Arc::new(ReadyGroup::new(0));
             let page = Arc::new(ReadyPage::new(0, group.clone()));
             let signal = Arc::new(LaneSignal::new(page.clone(), 0));
+            let available = Arc::new(AtomicBool::new(false));
 
             assert!(signal.mark());
             assert_ne!(group.take_all(), 0);
             assert_ne!(page.take(), 0);
 
             let sender_signal = signal.clone();
-            let sender = loom::thread::spawn(move || sender_signal.mark());
+            let sender_available = available.clone();
+            let sender = loom::thread::spawn(move || {
+                sender_available.store(true, Ordering::Release);
+                sender_signal.mark();
+            });
             signal.finish_drain();
-            let claimed = signal.claim_after_empty();
+            let observed = available.load(Ordering::Acquire);
+            let claimed = observed && signal.claim_after_empty();
             sender.join().unwrap();
 
             let indexed = group.take_all() != 0 && page.take() != 0;

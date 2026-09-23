@@ -8,6 +8,17 @@ All notable changes to this project are documented here.
 
 - Add endpoint-local `WaitStrategy::SpinFor` for bounded active spinning before
   synchronous send and receive operations park.
+- MPSC `Receiver::try_recv_batch_into` appends a bounded batch without
+  blocking, releases consumed slots before returning, and reports `Empty` or
+  `Disconnected` when nothing was appended.
+
+### Changed
+
+- MPSC `recv_batch_into` and `recv_batch_into_async` move whole prefetched
+  windows out of sender rings with `yring::Consumer::pop_into` instead of
+  popping one value at a time. Lane rotation, readiness polling, slot release,
+  and per-sender FIFO order match repeated `try_recv` calls. Requires the
+  yring release that adds `pop_into`.
 
 ## [0.3.6] - 2026-09-19
 

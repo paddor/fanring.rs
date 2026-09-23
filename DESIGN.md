@@ -117,10 +117,23 @@ Single-value receives can therefore return before their slots become reusable
 by the sender. `Receiver::release_consumed` scans the receiver's lane slots,
 publishes each lane's pending consumed capacity, and notifies its space waiter.
 It preserves unread prefetched values and the scheduling counters.
-`recv_batch_into` appends a bounded number of values to a caller-owned vector,
-blocks only for the first value, and calls `release_consumed` before returning.
-Applications can use either API before issuing completions or returning permits
-that admit more sends.
+`recv_batch_into`, `try_recv_batch_into`, and `recv_batch_into_async` append a
+bounded number of values to a caller-owned vector and call `release_consumed`
+before returning. The blocking and async forms wait only when no value is
+published. Applications can use any of these before issuing completions or
+returning permits that admit more sends.
+
+Bulk receives share one nonblocking drain loop. Each step takes the front
+active lane, prefetches when its cached window is empty, and moves one
+contiguous chunk with `yring::Consumer::pop_into`, which reserves output
+capacity and copies at most two slot ranges. The chunk is bounded by the
+remaining limit, the cached window, the 64-item burst, the release batch, and
+the readiness-poll countdown. The step then applies the same slot release,
+rotation, and readiness poll that single receives perform after the value
+that reaches each boundary, so bulk and single receives produce the same
+delivery order. Empty windows use the same idle transition as `poll_lane`.
+Space wakeups are sent inline because the drain never holds a data-wait
+registration.
 
 ## MPMC Receive Path
 

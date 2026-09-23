@@ -117,7 +117,13 @@ while rx.recv_batch_into(&mut batch, 32).is_ok() {
 value, and releases consumed slots before returning. It returns the number
 appended; a partial batch succeeds even after disconnect. Reserve enough spare
 vector capacity to avoid output reallocations. A zero limit receives nothing,
-releases consumed slots, and returns `Ok(0)`.
+releases consumed slots, and returns `Ok(0)`. `try_recv_batch_into` is the
+nonblocking form and reports `Empty` or `Disconnected` when nothing was
+appended.
+
+Bulk receives move whole prefetched windows out of sender rings instead of
+popping one value at a time, while keeping the lane rotation and per-sender
+FIFO order of repeated `try_recv` calls.
 
 ## MPMC
 

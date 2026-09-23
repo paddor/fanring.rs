@@ -106,6 +106,12 @@ path = "benches/mpmc.rs"
 harness = false
 test = false
 
+[[bench]]
+name = "fanring_batch"
+path = "benches/batch.rs"
+harness = false
+test = false
+
 [[example]]
 name = "fanring-chart"
 path = "src/bin/chart.rs"

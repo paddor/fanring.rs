@@ -276,10 +276,12 @@ impl<T, P: Teardown> Receiver<T, P> {
 
     /// Append up to `limit` values to `output`, returning the number appended.
     ///
-    /// Waits only for the first value. Subsequent receives are nonblocking and
-    /// stop when no value is immediately available or `limit` is reached.
-    /// Existing output values are preserved. FIFO ordering within each sender
-    /// lane is the same as for single-value receives.
+    /// Waits only for the first value. Values already published are moved in
+    /// bulk: each step takes a whole prefetched window from the front sender
+    /// lane, bounded by the same per-lane burst, slot-release, and
+    /// readiness-poll limits as single-value receives, so lane rotation and
+    /// FIFO order within each lane match repeated [`try_recv`](Self::try_recv)
+    /// calls. Existing output values are preserved.
     ///
     /// Before returning, publishes all consumed slots and notifies senders
     /// waiting for capacity, including slots consumed by earlier receive calls.
@@ -319,21 +321,152 @@ impl<T, P: Teardown> Receiver<T, P> {
         let result = if limit == 0 {
             Ok(0)
         } else {
-            self.recv().map(|first| {
-                output.push(first);
-                let mut received = 1;
-                while received < limit {
-                    let Ok(value) = self.try_recv() else {
-                        break;
-                    };
-                    output.push(value);
-                    received += 1;
-                }
-                received
-            })
+            match self.drain_into(output, limit) {
+                0 => self.recv().map(|first| {
+                    output.push(first);
+                    1 + self.drain_into(output, limit - 1)
+                }),
+                received => Ok(received),
+            }
         };
         self.release_consumed();
         result
+    }
+
+    /// Append up to `limit` immediately available values to `output`.
+    ///
+    /// This is the nonblocking form of [`recv_batch_into`](Self::recv_batch_into)
+    /// and moves values with the same bulk steps, lane rotation, and per-lane
+    /// FIFO order. Before returning, it publishes all consumed slots and
+    /// notifies senders waiting for capacity, including slots consumed by
+    /// earlier receive calls. A zero limit receives nothing, releases consumed
+    /// slots, and returns `Ok(0)` even if the channel is disconnected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TryRecvError::Empty`] when `limit` is nonzero and no value is
+    /// currently available, or [`TryRecvError::Disconnected`] when `limit` is
+    /// nonzero and all senders and buffered values are gone. A partial batch
+    /// returns `Ok(count)` even if the channel disconnects.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fanring::mpsc::{TryRecvError, channel};
+    ///
+    /// let (mut tx, mut rx) = channel(4);
+    /// let mut batch = Vec::with_capacity(4);
+    /// assert_eq!(rx.try_recv_batch_into(&mut batch, 4), Err(TryRecvError::Empty));
+    /// for value in 0..3 {
+    ///     tx.try_send(value).unwrap();
+    /// }
+    /// assert_eq!(rx.try_recv_batch_into(&mut batch, 2), Ok(2));
+    /// assert_eq!(rx.try_recv_batch_into(&mut batch, 2), Ok(1));
+    /// assert_eq!(batch, [0, 1, 2]);
+    /// drop(tx);
+    /// assert_eq!(
+    ///     rx.try_recv_batch_into(&mut batch, 1),
+    ///     Err(TryRecvError::Disconnected)
+    /// );
+    /// ```
+    pub fn try_recv_batch_into(
+        &mut self,
+        output: &mut Vec<T>,
+        limit: usize,
+    ) -> Result<usize, TryRecvError> {
+        let received = self.drain_into(output, limit);
+        self.release_consumed();
+        if received == 0 && limit != 0 {
+            return Err(if self.is_drained() {
+                TryRecvError::Disconnected
+            } else {
+                TryRecvError::Empty
+            });
+        }
+        Ok(received)
+    }
+
+    /// Move up to `limit` published values to `output` without blocking.
+    ///
+    /// Each step moves one contiguous chunk from the front lane's prefetched
+    /// window and then applies the same bookkeeping that single receives
+    /// perform one value at a time: slot release at the release batch, lane
+    /// rotation at the burst limit, and a readiness poll at the poll interval.
+    /// Space wakeups are sent inline; no wait registration is held here.
+    /// Returns the number moved. Zero means no value was published; the
+    /// caller decides between empty and disconnected.
+    pub(super) fn drain_into(&mut self, output: &mut Vec<T>, limit: usize) -> usize {
+        let mut received = 0;
+        while received < limit {
+            if self.active.is_empty() {
+                self.collect_ready(true);
+                if self.active.is_empty() {
+                    break;
+                }
+            } else if self.items_until_ready_poll == 0 {
+                self.collect_ready(false);
+                self.items_until_ready_poll = READY_POLL_INTERVAL;
+            }
+
+            let key = *self.active.front().expect("active lane present");
+            let Some(lane) = self
+                .lanes
+                .get_mut(key.slot)
+                .and_then(Option::as_mut)
+                .filter(|lane| lane.key == key)
+            else {
+                self.active.pop_front();
+                continue;
+            };
+
+            if lane.cached_available == 0 {
+                lane.cached_available = lane.consumer.prefetch();
+                if lane.cached_available == 0 {
+                    match lane.settle_empty() {
+                        EmptyLane::Keep { released } => {
+                            if released {
+                                lane.signal.notify_space();
+                            }
+                            self.active.rotate_left(1);
+                        }
+                        EmptyLane::Idle {
+                            disconnected,
+                            released,
+                        } => {
+                            if released {
+                                lane.signal.notify_space();
+                            }
+                            self.active.pop_front();
+                            if disconnected {
+                                self.retire_lane(key);
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            let take = (limit - received)
+                .min(lane.cached_available)
+                .min(PREFETCH_LIMIT - lane.burst)
+                .min(lane.release_batch - lane.unreleased)
+                .min(self.items_until_ready_poll);
+            let moved = lane.consumer.pop_into(output, take);
+            debug_assert_eq!(moved, take, "prefetched window shorter than cached");
+            lane.cached_available -= take;
+            lane.unreleased += take;
+            lane.burst += take;
+            self.items_until_ready_poll -= take;
+            received += take;
+            if lane.unreleased == lane.release_batch && lane.release_pending() {
+                lane.signal.notify_space();
+            }
+            if lane.burst == PREFETCH_LIMIT {
+                lane.burst = 0;
+                self.active.rotate_left(1);
+            }
+        }
+        received
     }
 
     #[cold]
@@ -479,17 +612,15 @@ impl<T, P: Teardown> Receiver<T, P> {
         if lane.cached_available == 0 {
             lane.cached_available = lane.consumer.prefetch();
             if lane.cached_available == 0 {
-                let released = lane.release_pending();
-                lane.signal.finish_drain();
-                lane.cached_available = lane.consumer.prefetch();
-                lane.burst = 0;
-                return if lane.cached_available != 0 && lane.signal.claim_after_empty() {
-                    LanePoll::Keep { released }
-                } else {
-                    LanePoll::Idle {
-                        disconnected: lane.consumer.is_disconnected(),
+                return match lane.settle_empty() {
+                    EmptyLane::Keep { released } => LanePoll::Keep { released },
+                    EmptyLane::Idle {
+                        disconnected,
                         released,
-                    }
+                    } => LanePoll::Idle {
+                        disconnected,
+                        released,
+                    },
                 };
             }
         }
@@ -704,6 +835,33 @@ impl<T, P: Teardown> Lane<T, P> {
         self.unreleased = 0;
         true
     }
+
+    /// Handle a prefetch window that came back empty.
+    ///
+    /// Releases partial credits first so neither side parks on unpublished
+    /// slots, marks the lane idle, then rechecks the ring. A publication
+    /// that raced the idle transition is either claimed here or has queued
+    /// the lane in its ready page.
+    #[inline(always)]
+    fn settle_empty(&mut self) -> EmptyLane {
+        let released = self.release_pending();
+        self.signal.finish_drain();
+        self.cached_available = self.consumer.prefetch();
+        self.burst = 0;
+        if self.cached_available != 0 && self.signal.claim_after_empty() {
+            EmptyLane::Keep { released }
+        } else {
+            EmptyLane::Idle {
+                disconnected: self.consumer.is_disconnected(),
+                released,
+            }
+        }
+    }
+}
+
+enum EmptyLane {
+    Keep { released: bool },
+    Idle { disconnected: bool, released: bool },
 }
 
 enum LanePoll<T> {

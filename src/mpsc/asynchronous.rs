@@ -141,6 +141,8 @@ impl<T, P: Teardown> Receiver<T, P> {
 
     /// Append at most `limit` values, waiting only for the first value.
     ///
+    /// Values already published are moved in bulk with the same lane rotation
+    /// and per-lane FIFO order as [`recv_batch_into`](Self::recv_batch_into).
     /// Releases consumed slots in batches, including before returning. A zero
     /// limit succeeds even after disconnect. Reserve output capacity to avoid
     /// allocations while receiving. Cancellation before the first value leaves
@@ -154,12 +156,18 @@ impl<T, P: Teardown> Receiver<T, P> {
             self.release_consumed();
             return Ok(0);
         }
-        output.push(self.recv_async().await?);
-        let mut received = 1;
-        while received < limit {
-            let Ok(value) = self.try_recv() else { break };
-            output.push(value);
-            received += 1;
+        let mut received = self.drain_into(output, limit);
+        if received == 0 {
+            match self.recv_async().await {
+                Ok(first) => {
+                    output.push(first);
+                    received = 1 + self.drain_into(output, limit - 1);
+                }
+                Err(error) => {
+                    self.release_consumed();
+                    return Err(error);
+                }
+            }
         }
         self.release_consumed();
         Ok(received)
