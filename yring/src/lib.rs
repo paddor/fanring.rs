@@ -235,6 +235,70 @@ impl<T> Ring<T> {
         Some(val)
     }
 
+    /// Move `count` published items starting at `head` to the end of `output`.
+    ///
+    /// # Safety
+    ///
+    /// `count` must not exceed the consumer's prefetched window, so every slot
+    /// in `head..head + count` holds a value the producer published before the
+    /// consumer's Acquire load of `tail`. The consumer must own those slots
+    /// exclusively until it releases them.
+    #[inline]
+    pub(crate) unsafe fn pop_into(&self, head: &mut Cursor, count: usize, output: &mut Vec<T>) {
+        debug_assert!(count <= self.capacity());
+        output.reserve(count);
+        let start = self.index(*head);
+        let first = count.min(self.capacity() - start);
+        let len = output.len();
+        // SAFETY: `reserve` provides `count` spare slots after `len`. The
+        // first segment ends at the buffer end and the wrapped segment holds
+        // at most `start` items, so both stay inside the buffer and do not
+        // overlap. The caller guarantees the slots are initialized and owned.
+        unsafe {
+            let dst = output.as_mut_ptr().add(len);
+            self.move_slots(start, first, dst);
+            self.move_slots(0, count - first, dst.add(first));
+            output.set_len(len + count);
+        }
+        *head = head.wrapping_add(count);
+    }
+
+    /// Move `len` initialized slots starting at buffer index `start` to `dst`.
+    ///
+    /// # Safety
+    ///
+    /// `start + len` must not exceed the capacity, the slots must hold
+    /// initialized values owned by the caller, and `dst` must be valid for
+    /// `len` writes.
+    #[cfg(not(all(loom, target_pointer_width = "64")))]
+    #[inline]
+    unsafe fn move_slots(&self, start: usize, len: usize, dst: *mut T) {
+        // SAFETY: `UnsafeCell` and `MaybeUninit` are both `repr(transparent)`,
+        // so a slot pointer reads as a `T` pointer. The caller guarantees the
+        // source range is inside the buffer and initialized, and `dst` has
+        // room for `len` values. Moving out of the slots is a bitwise copy,
+        // exactly as `pop` does one value at a time.
+        unsafe {
+            let src = UnsafeCell::raw_get(self.buf.as_ptr().add(start)).cast::<T>();
+            std::ptr::copy_nonoverlapping(src, dst, len);
+        }
+    }
+
+    /// Move `len` initialized slots starting at buffer index `start` to `dst`.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as the non-loom implementation. Loom tracks each cell
+    /// access separately, so this moves one slot at a time.
+    #[cfg(all(loom, target_pointer_width = "64"))]
+    unsafe fn move_slots(&self, start: usize, len: usize, dst: *mut T) {
+        for (offset, slot) in self.buf[start..start + len].iter().enumerate() {
+            // SAFETY: the caller guarantees the slot is initialized and owned
+            // by the consumer, and that `dst` has room for `len` values.
+            slot.with_mut(|ptr| unsafe { dst.add(offset).write((*ptr).assume_init_read()) });
+        }
+    }
+
     #[inline]
     pub(crate) fn release(&self, head: Cursor) {
         self.head.0.store(head, Ordering::Release);
@@ -623,6 +687,27 @@ impl<T> Consumer<T> {
         self.ring.pop(&mut self.head, self.cached_tail)
     }
 
+    /// Move up to `limit` prefetched items to the end of `output`.
+    ///
+    /// Zero atomics. Takes only from the window loaded by the last
+    /// [`prefetch`](Self::prefetch), preserving FIFO order, and reserves
+    /// output capacity for the moved items. Returns the number moved, which
+    /// is zero when the window is exhausted. Call [`release`](Self::release)
+    /// afterward to publish the consumed slots.
+    #[inline]
+    pub fn pop_into(&mut self, output: &mut Vec<T>, limit: usize) -> usize {
+        let count = self.cached_tail.wrapping_sub(self.head).min(limit);
+        if count == 0 {
+            return 0;
+        }
+        // SAFETY: `count` is bounded by the prefetched window. The producer
+        // published those slots with a Release store that `prefetch`
+        // acquired, and the consumer owns them until `release` advances
+        // `head` past them.
+        unsafe { self.ring.pop_into(&mut self.head, count, output) };
+        count
+    }
+
     /// Publish consumed position so the producer can reuse slots.
     /// One Release store. Call after draining a batch of pops.
     ///
@@ -917,6 +1002,120 @@ mod tests {
             assert_eq!(c.pop(), Some(i));
         }
         assert!(c.pop().is_none());
+    }
+
+    #[test]
+    fn pop_into_moves_prefetched_window_in_order_and_appends() {
+        let (mut p, mut c) = spsc::<u32>(8);
+        let mut out = vec![99];
+        assert_eq!(c.pop_into(&mut out, 4), 0);
+        for i in 0..5 {
+            p.push(i).unwrap();
+        }
+        p.flush();
+        assert_eq!(c.pop_into(&mut out, 4), 0); // not prefetched yet
+        assert_eq!(c.prefetch(), 5);
+        assert_eq!(c.pop_into(&mut out, 3), 3);
+        assert_eq!(out, [99, 0, 1, 2]);
+        assert_eq!(c.pop(), Some(3));
+        assert_eq!(c.pop_into(&mut out, 8), 1);
+        assert_eq!(out, [99, 0, 1, 2, 4]);
+        assert_eq!(c.pop_into(&mut out, 8), 0);
+        assert_eq!(c.pop(), None);
+        c.release();
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn pop_into_crosses_ring_wraparound_and_reuses_slots() {
+        let (mut p, mut c) = spsc::<u32>(4);
+        for i in 0..3 {
+            p.push(i).unwrap();
+        }
+        p.flush();
+        assert_eq!(c.prefetch(), 3);
+        let mut out = Vec::new();
+        assert_eq!(c.pop_into(&mut out, 3), 3);
+        c.release();
+        for i in 3..7 {
+            p.push(i).unwrap();
+        }
+        assert_eq!(p.push(7), Err(7));
+        p.flush();
+        assert_eq!(c.prefetch(), 4);
+        assert_eq!(c.pop_into(&mut out, 2), 2);
+        assert_eq!(c.pop_into(&mut out, 4), 2);
+        assert_eq!(out, [0, 1, 2, 3, 4, 5, 6]);
+        c.release();
+        for i in 7..11 {
+            p.push(i).unwrap();
+        }
+        p.flush();
+        assert_eq!(c.prefetch(), 4);
+        assert_eq!(c.pop_into(&mut out, usize::MAX), 4);
+        assert_eq!(out, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    }
+
+    #[test]
+    fn pop_into_moves_owned_values_exactly_once() {
+        let (mut p, mut c) = spsc::<Box<usize>>(4);
+        for i in 0..4 {
+            p.push(Box::new(i)).unwrap();
+        }
+        p.flush();
+        assert_eq!(c.prefetch(), 4);
+        let mut out = Vec::with_capacity(1);
+        assert_eq!(c.pop_into(&mut out, 4), 4);
+        c.release();
+        p.push(Box::new(4)).unwrap();
+        p.flush();
+        assert_eq!(
+            out.iter().map(|value| **value).collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        assert_eq!(c.prefetch(), 1);
+        assert_eq!(c.pop_into(&mut out, 1), 1);
+        assert_eq!(*out[4], 4);
+        drop(out);
+        drop(c);
+        drop(p);
+    }
+
+    #[test]
+    fn pop_into_handles_zero_sized_values() {
+        let (mut p, mut c) = spsc::<()>(2);
+        p.push(()).unwrap();
+        p.push(()).unwrap();
+        p.flush();
+        assert_eq!(c.prefetch(), 2);
+        let mut out = Vec::new();
+        assert_eq!(c.pop_into(&mut out, 5), 2);
+        assert_eq!(out.len(), 2);
+        assert_eq!(c.pop_into(&mut out, 5), 0);
+    }
+
+    #[test]
+    fn pop_into_crosses_cursor_wrap_boundary() {
+        let (mut p, mut c) = spsc::<u32>(4);
+        let base: Cursor = usize::MAX - 1;
+        p.cursor = base;
+        p.cached_head = base;
+        c.head = base;
+        c.cached_tail = base;
+        p.ring.head.0.store(base, Ordering::Relaxed);
+        p.ring.tail.0.store(base, Ordering::Relaxed);
+
+        for i in 1..=4 {
+            p.push(i).unwrap();
+        }
+        p.flush();
+        assert_eq!(c.prefetch(), 4);
+        let mut out = Vec::new();
+        assert_eq!(c.pop_into(&mut out, 4), 4);
+        assert_eq!(out, [1, 2, 3, 4]);
+        assert_eq!(c.head, base.wrapping_add(4));
+        c.release();
+        assert!(p.is_empty());
     }
 
     #[test]

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Consumer::pop_into()` moves up to a limit of prefetched items into a `Vec`
+  with at most two contiguous copies, preserving FIFO order and slot
+  ownership rules.
+
 ## [0.3.17] - 2026-09-17
 
 ### Changed

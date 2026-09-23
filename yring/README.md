@@ -47,6 +47,23 @@ while let Some(val) = consumer.pop() {
 consumer.release(); // one Release store frees slots for producer
 ```
 
+`pop_into()` moves the prefetched window into a `Vec` in one step instead
+of popping items one at a time:
+
+```rust
+let (mut producer, mut consumer) = yring::spsc(1024);
+for i in 0..100 {
+    producer.push(i).unwrap();
+}
+producer.flush();
+
+let mut batch = Vec::with_capacity(64);
+consumer.prefetch();
+assert_eq!(consumer.pop_into(&mut batch, 64), 64);
+consumer.release();
+assert_eq!(batch.len(), 64);
+```
+
 ## Sharing the producer handle
 
 `Producer` needs `&mut self` for writes. To write through a handle stored in

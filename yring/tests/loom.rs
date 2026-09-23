@@ -816,3 +816,106 @@ fn upper_layer_blocking_wait_uses_stateful_generation() {
         assert!(finished.load(Ordering::Acquire));
     });
 }
+
+#[test]
+fn pop_into_moves_concurrently_published_windows_in_order() {
+    loom::model(|| {
+        let (mut p, mut c) = yring::spsc::<u32>(2);
+
+        let h = thread::spawn(move || {
+            p.push(1).unwrap();
+            p.flush();
+            let mut value = 2;
+            while value <= 3 {
+                if p.push(value).is_ok() {
+                    p.flush();
+                    value += 1;
+                } else {
+                    thread::yield_now();
+                }
+            }
+        });
+
+        let mut out = Vec::new();
+        while out.len() < 3 {
+            if c.prefetch() > 0 {
+                let before = out.len();
+                let moved = c.pop_into(&mut out, 2);
+                assert!(moved >= 1 && moved <= 2);
+                assert_eq!(out.len(), before + moved);
+                assert_eq!(c.pop_into(&mut out, 2), 0);
+                c.release();
+            } else {
+                thread::yield_now();
+            }
+        }
+        assert_eq!(out, [1, 2, 3]);
+
+        h.join().unwrap();
+    });
+}
+
+#[test]
+fn pop_into_values_survive_slot_reuse() {
+    use loom::sync::Arc;
+
+    loom::model(|| {
+        let (mut p, mut c) = yring::spsc::<Arc<usize>>(2);
+
+        p.push(Arc::new(10)).unwrap();
+        p.push(Arc::new(20)).unwrap();
+        p.flush();
+
+        let mut out = Vec::new();
+        assert_eq!(c.prefetch(), 2);
+        assert_eq!(c.pop_into(&mut out, 2), 2);
+        c.release();
+
+        let h = thread::spawn(move || {
+            while p.push(Arc::new(30)).is_err() {
+                thread::yield_now();
+            }
+            p.flush();
+        });
+
+        h.join().unwrap();
+        assert_eq!(*out[0], 10);
+        assert_eq!(*out[1], 20);
+
+        assert_eq!(c.prefetch(), 1);
+        assert_eq!(c.pop_into(&mut out, 2), 1);
+        c.release();
+        assert_eq!(
+            out.iter().map(|value| **value).collect::<Vec<_>>(),
+            [10, 20, 30]
+        );
+    });
+}
+
+#[test]
+fn pop_into_crosses_pointer_width_cursor_wrap() {
+    loom::model(|| {
+        let base = usize::MAX - 1;
+        let (mut p, mut c) = yring::loom_spsc_with_cursors::<u32>(2, base);
+
+        let h = thread::spawn(move || {
+            p.push(10).unwrap();
+            p.push(20).unwrap();
+            p.flush();
+        });
+
+        let mut out = Vec::new();
+        loop {
+            if c.prefetch() > 0 {
+                assert_eq!(c.pop_into(&mut out, 4), 2);
+                assert_eq!(out, [10, 20]);
+                assert_eq!(c.pop(), None);
+                c.release();
+                break;
+            }
+            thread::yield_now();
+        }
+
+        h.join().unwrap();
+    });
+}
