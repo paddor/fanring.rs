@@ -263,6 +263,36 @@ impl<T> Ring<T> {
         *head = head.wrapping_add(count);
     }
 
+    /// Count the longest prefix of `limit` published items starting at `head`
+    /// that `admit` accepts, reading each item in place.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`pop_into`](Self::pop_into): every slot in
+    /// `head..head + limit` holds a published value that the consumer owns
+    /// until it releases them.
+    #[inline]
+    pub(crate) unsafe fn accepted_prefix(
+        &self,
+        head: Cursor,
+        limit: usize,
+        admit: &mut impl FnMut(&T) -> bool,
+    ) -> usize {
+        let mut accepted = 0;
+        while accepted < limit {
+            let slot = &self.buf[self.index(head.wrapping_add(accepted))];
+            // SAFETY: the caller guarantees the slot is initialized and owned
+            // by the consumer, so a shared borrow of the value is valid for
+            // the duration of the call.
+            let accept = slot.with_mut(|ptr| unsafe { admit((*ptr).assume_init_ref()) });
+            if !accept {
+                break;
+            }
+            accepted += 1;
+        }
+        accepted
+    }
+
     /// Move `len` initialized slots starting at buffer index `start` to `dst`.
     ///
     /// # Safety
@@ -708,6 +738,38 @@ impl<T> Consumer<T> {
         count
     }
 
+    /// Move the accepted prefix of up to `limit` prefetched items to the end
+    /// of `output`.
+    ///
+    /// `admit` sees each item in place, in FIFO order, and the move stops at
+    /// the first item it rejects. That item stays at the front of the window
+    /// for a later pop. Zero atomics; the accepted prefix moves with the same
+    /// two contiguous copies as [`pop_into`](Self::pop_into). Returns the
+    /// number moved, which is zero when the window is exhausted or the first
+    /// item was rejected. Call [`release`](Self::release) afterward to
+    /// publish the consumed slots.
+    #[inline]
+    pub fn pop_into_while(
+        &mut self,
+        output: &mut Vec<T>,
+        limit: usize,
+        mut admit: impl FnMut(&T) -> bool,
+    ) -> usize {
+        let window = self.cached_tail.wrapping_sub(self.head).min(limit);
+        if window == 0 {
+            return 0;
+        }
+        // SAFETY: `window` is bounded by the prefetched window, exactly as in
+        // `pop_into`, and the consumer owns those slots until `release`.
+        let count = unsafe { self.ring.accepted_prefix(self.head, window, &mut admit) };
+        if count == 0 {
+            return 0;
+        }
+        // SAFETY: `count <= window`, so the same bound holds.
+        unsafe { self.ring.pop_into(&mut self.head, count, output) };
+        count
+    }
+
     /// Publish consumed position so the producer can reuse slots.
     /// One Release store. Call after draining a batch of pops.
     ///
@@ -1116,6 +1178,100 @@ mod tests {
         assert_eq!(c.head, base.wrapping_add(4));
         c.release();
         assert!(p.is_empty());
+    }
+
+    #[test]
+    fn pop_into_while_moves_accepted_prefix_and_keeps_rejected_item() {
+        let (mut p, mut c) = spsc::<u32>(8);
+        let mut out = vec![99];
+        assert_eq!(c.pop_into_while(&mut out, 8, |_| true), 0);
+        for i in 0..6 {
+            p.push(i).unwrap();
+        }
+        p.flush();
+        assert_eq!(c.pop_into_while(&mut out, 8, |_| true), 0); // not prefetched yet
+        assert_eq!(c.prefetch(), 6);
+        assert_eq!(c.pop_into_while(&mut out, 8, |value| *value < 3), 3);
+        assert_eq!(out, [99, 0, 1, 2]);
+        // The rejected item stays at the front of the window.
+        assert_eq!(c.pop_into_while(&mut out, 8, |value| *value < 3), 0);
+        assert_eq!(c.pop(), Some(3));
+        assert_eq!(c.pop_into_while(&mut out, 1, |_| true), 1);
+        assert_eq!(out, [99, 0, 1, 2, 4]);
+        assert_eq!(c.pop_into_while(&mut out, 8, |_| true), 1);
+        assert_eq!(out, [99, 0, 1, 2, 4, 5]);
+        assert_eq!(c.pop_into_while(&mut out, 8, |_| true), 0);
+        assert_eq!(c.pop(), None);
+        c.release();
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn pop_into_while_crosses_wraparound_and_stops_calling_after_rejection() {
+        let (mut p, mut c) = spsc::<u32>(4);
+        for i in 0..3 {
+            p.push(i).unwrap();
+        }
+        p.flush();
+        assert_eq!(c.prefetch(), 3);
+        let mut out = Vec::new();
+        assert_eq!(c.pop_into(&mut out, 3), 3);
+        c.release();
+        for i in 3..7 {
+            p.push(i).unwrap();
+        }
+        p.flush();
+        assert_eq!(c.prefetch(), 4);
+        let mut calls = 0;
+        let moved = c.pop_into_while(&mut out, 4, |value| {
+            calls += 1;
+            *value != 5
+        });
+        assert_eq!(moved, 2);
+        assert_eq!(calls, 3);
+        assert_eq!(out, [0, 1, 2, 3, 4]);
+        assert_eq!(c.pop(), Some(5));
+        assert_eq!(c.pop_into_while(&mut out, 4, |_| true), 1);
+        assert_eq!(out, [0, 1, 2, 3, 4, 6]);
+        c.release();
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn pop_into_while_moves_owned_values_exactly_once() {
+        let (mut p, mut c) = spsc::<Box<usize>>(4);
+        for i in 0..4 {
+            p.push(Box::new(i)).unwrap();
+        }
+        p.flush();
+        assert_eq!(c.prefetch(), 4);
+        let mut out = Vec::with_capacity(1);
+        assert_eq!(c.pop_into_while(&mut out, 4, |value| **value < 2), 2);
+        assert_eq!(c.pop_into_while(&mut out, 4, |_| true), 2);
+        c.release();
+        p.push(Box::new(4)).unwrap();
+        p.flush();
+        assert_eq!(
+            out.iter().map(|value| **value).collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        assert_eq!(c.prefetch(), 1);
+        assert_eq!(c.pop_into_while(&mut out, 1, |_| true), 1);
+        assert_eq!(*out[4], 4);
+        drop(out);
+        drop(c);
+        drop(p);
+    }
+
+    #[test]
+    fn pop_into_while_zero_limit_never_calls_admit() {
+        let (mut p, mut c) = spsc::<u32>(2);
+        p.push(1).unwrap();
+        p.flush();
+        assert_eq!(c.prefetch(), 1);
+        let mut out = Vec::new();
+        assert_eq!(c.pop_into_while(&mut out, 0, |_| panic!("admit called")), 0);
+        assert_eq!(c.pop(), Some(1));
     }
 
     #[test]

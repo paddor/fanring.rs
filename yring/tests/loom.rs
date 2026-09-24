@@ -919,3 +919,51 @@ fn pop_into_crosses_pointer_width_cursor_wrap() {
         h.join().unwrap();
     });
 }
+
+#[test]
+fn pop_into_while_moves_accepted_prefix_of_concurrent_windows() {
+    loom::model(|| {
+        let (mut p, mut c) = yring::spsc::<u32>(2);
+
+        let h = thread::spawn(move || {
+            p.push(1).unwrap();
+            p.flush();
+            let mut value = 2;
+            while value <= 3 {
+                if p.push(value).is_ok() {
+                    p.flush();
+                    value += 1;
+                } else {
+                    thread::yield_now();
+                }
+            }
+        });
+
+        let mut out = Vec::new();
+        // Track the prefetched window: a rejected value stays in it without
+        // adding to the next prefetch count.
+        let mut window = 0usize;
+        while out.len() < 3 {
+            window += c.prefetch();
+            if window == 0 {
+                thread::yield_now();
+                continue;
+            }
+            let before = out.len();
+            // Reject 3 while it is at the front, then take it explicitly.
+            let moved = c.pop_into_while(&mut out, 2, |value| *value != 3);
+            assert!(moved <= 2);
+            assert_eq!(out.len(), before + moved);
+            window -= moved;
+            if moved == 0 {
+                assert_eq!(c.pop(), Some(3));
+                out.push(3);
+                window -= 1;
+            }
+            c.release();
+        }
+        assert_eq!(out, [1, 2, 3]);
+
+        h.join().unwrap();
+    });
+}

@@ -64,6 +64,25 @@ consumer.release();
 assert_eq!(batch.len(), 64);
 ```
 
+`pop_into_while()` moves only the prefix that an admission predicate accepts.
+The predicate sees each item in place, and the first rejected item stays at
+the front of the window:
+
+```rust
+let (mut producer, mut consumer) = yring::spsc(8);
+for i in 0..6u32 {
+    producer.push(i).unwrap();
+}
+producer.flush();
+
+let mut batch = Vec::new();
+consumer.prefetch();
+assert_eq!(consumer.pop_into_while(&mut batch, 8, |i| *i < 3), 3);
+assert_eq!(batch, [0, 1, 2]);
+assert_eq!(consumer.pop(), Some(3));
+consumer.release();
+```
+
 ## Sharing the producer handle
 
 `Producer` needs `&mut self` for writes. To write through a handle stored in
