@@ -25,6 +25,7 @@ enum Receive {
     TryRecv,
     RecvBatchInto,
     TryRecvBatchInto,
+    TryRecvBatchIntoWhile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -479,6 +480,24 @@ fn receive_batch<T>(
             Err(TryRecvError::Empty) => Batch::Empty,
             Err(TryRecvError::Disconnected) => Batch::Disconnected,
         },
+        Receive::TryRecvBatchIntoWhile => {
+            // A counting budget that admits exactly `limit` values measures
+            // the per-value admission check without changing the batch shape.
+            let mut budget = limit;
+            let result = rx.try_recv_batch_into_while(batch, limit, |_| {
+                if budget == 0 {
+                    return false;
+                }
+                budget -= 1;
+                true
+            });
+            match result {
+                Ok(0) => Batch::Empty,
+                Ok(count) => Batch::Items(count),
+                Err(TryRecvError::Empty) => Batch::Empty,
+                Err(TryRecvError::Disconnected) => Batch::Disconnected,
+            }
+        }
     }
 }
 
@@ -515,13 +534,19 @@ fn row<T>(
 }
 
 impl Receive {
-    const ALL: [Self; 3] = [Self::TryRecv, Self::RecvBatchInto, Self::TryRecvBatchInto];
+    const ALL: [Self; 4] = [
+        Self::TryRecv,
+        Self::RecvBatchInto,
+        Self::TryRecvBatchInto,
+        Self::TryRecvBatchIntoWhile,
+    ];
 
     const fn label(self) -> &'static str {
         match self {
             Self::TryRecv => "try_recv",
             Self::RecvBatchInto => "recv_batch_into",
             Self::TryRecvBatchInto => "try_recv_batch_into",
+            Self::TryRecvBatchIntoWhile => "try_recv_batch_into_while",
         }
     }
 }

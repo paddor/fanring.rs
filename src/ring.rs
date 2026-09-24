@@ -104,7 +104,7 @@ impl<T> Producer<T, crate::teardown::Deferred> {
 }
 
 impl<T, P: Teardown> Producer<T, P> {
-    #[cfg(feature = "async")]
+    #[inline]
     pub(crate) fn is_full(&mut self) -> bool {
         self.inner.is_full()
     }
@@ -168,6 +168,19 @@ impl<T, P: Teardown> Consumer<T, P> {
             .as_mut()
             .expect("consumer is open")
             .pop_into(output, limit)
+    }
+
+    #[inline]
+    pub(crate) fn pop_into_while(
+        &mut self,
+        output: &mut Vec<T>,
+        limit: usize,
+        admit: impl FnMut(&T) -> bool,
+    ) -> usize {
+        self.inner
+            .as_mut()
+            .expect("consumer is open")
+            .pop_into_while(output, limit, admit)
     }
 
     #[inline]

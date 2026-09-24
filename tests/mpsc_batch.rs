@@ -635,3 +635,368 @@ fn bulk_receives_preserve_per_sender_fifo_across_threads() {
     check::<Deferred>();
     check::<Coordinated>();
 }
+
+#[test]
+fn try_recv_batch_while_stops_at_first_rejected_value_and_keeps_lane_turn() {
+    fn check<P: Teardown>() {
+        let (mut tx0, mut rx) = channel_with_policy::<_, P>(4);
+        let mut tx1 = tx0.try_clone().unwrap();
+        for value in 0..4 {
+            tx0.try_send((0, value)).unwrap();
+            tx1.try_send((1, value)).unwrap();
+        }
+        let mut batch = Vec::with_capacity(16);
+        assert_eq!(
+            rx.try_recv_batch_into_while(&mut batch, 8, |(_, value)| *value < 2),
+            Ok(2)
+        );
+        assert_eq!(batch, [(0, 0), (0, 1)]);
+        // Consumed slots are released before returning.
+        tx0.try_send((0, 4)).unwrap();
+        tx0.try_send((0, 5)).unwrap();
+        assert_eq!(tx0.try_send((0, 6)), Err(TrySendError::Full((0, 6))));
+        // The rejected value stays at the front of its lane and the lane keeps
+        // its turn, so the plain bulk receive continues there.
+        assert_eq!(rx.try_recv_batch_into(&mut batch, 8), Ok(8));
+        assert_eq!(
+            batch,
+            [
+                (0, 0),
+                (0, 1),
+                (0, 2),
+                (0, 3),
+                (0, 4),
+                (0, 5),
+                (1, 0),
+                (1, 1),
+                (1, 2),
+                (1, 3)
+            ]
+        );
+    }
+    check::<Deferred>();
+    check::<Coordinated>();
+}
+
+#[test]
+fn try_recv_batch_while_reports_rejection_empty_and_disconnect() {
+    fn check<P: Teardown>() {
+        let (mut tx, mut rx) = channel_with_policy::<_, P>(2);
+        let mut batch = Vec::new();
+        assert_eq!(
+            rx.try_recv_batch_into_while(&mut batch, 1, |_| true),
+            Err(TryRecvError::Empty)
+        );
+        tx.try_send(7).unwrap();
+        assert_eq!(
+            rx.try_recv_batch_into_while(&mut batch, 1, |_| false),
+            Ok(0)
+        );
+        assert_eq!(
+            rx.try_recv_batch_into_while(&mut batch, 0, |_| panic!("zero limit admits nothing")),
+            Ok(0)
+        );
+        assert_eq!(rx.try_recv_batch_into_while(&mut batch, 1, |_| true), Ok(1));
+        assert_eq!(batch, [7]);
+        assert_eq!(
+            rx.try_recv_batch_into_while(&mut batch, 1, |_| true),
+            Err(TryRecvError::Empty)
+        );
+        tx.try_send(8).unwrap();
+        drop(tx);
+        assert_eq!(
+            rx.try_recv_batch_into_while(&mut batch, 1, |_| false),
+            Ok(0)
+        );
+        assert_eq!(rx.try_recv_batch_into_while(&mut batch, 1, |_| true), Ok(1));
+        assert_eq!(
+            rx.try_recv_batch_into_while(&mut batch, 1, |_| true),
+            Err(TryRecvError::Disconnected)
+        );
+        assert_eq!(rx.try_recv_batch_into_while(&mut batch, 0, |_| true), Ok(0));
+        assert_eq!(batch, [7, 8]);
+    }
+    check::<Deferred>();
+    check::<Coordinated>();
+}
+
+#[test]
+fn try_recv_batch_while_follows_single_receive_schedule_under_budget() {
+    // Same sends into two identical channels. Side A receives one value at a
+    // time and stops once a cost budget is spent. Side B uses the bulk drain
+    // with that budget as its admission predicate. Both accept exactly the
+    // same prefix, so the delivered sequences must match, including rotation,
+    // readiness polls, and slot reuse.
+    fn cost(value: &(usize, usize)) -> usize {
+        1 + value.1 % 7
+    }
+    fn check<P: Teardown>() {
+        for budget in [1usize, 5, 64, 300, 5_000] {
+            let (root_a, mut rx_a) = channel_with_policy::<_, P>(128);
+            let (root_b, mut rx_b) = channel_with_policy::<_, P>(128);
+            let mut txs_a = vec![root_a];
+            let mut txs_b = vec![root_b];
+            for _ in 1..4 {
+                let a = txs_a[0].try_clone().unwrap();
+                let b = txs_b[0].try_clone().unwrap();
+                txs_a.push(a);
+                txs_b.push(b);
+            }
+            let mut next = [0usize; 4];
+            let mut batch_a = Vec::new();
+            let mut batch_b = Vec::new();
+            let mut sequence_a = Vec::new();
+            let mut sequence_b = Vec::new();
+            let rounds = if cfg!(miri) { 12 } else { 40 };
+            let mut state = 0x9E37_79B9_7F4A_7C15u64;
+            for round in 0..rounds {
+                for lane in 0..4 {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let count = ((state >> 33) % 90) as usize;
+                    for _ in 0..count {
+                        let value = (lane, next[lane]);
+                        let sent_a = txs_a[lane].try_send(value).is_ok();
+                        let sent_b = txs_b[lane].try_send(value).is_ok();
+                        assert_eq!(sent_a, sent_b, "budget {budget} round {round}");
+                        if !sent_a {
+                            break;
+                        }
+                        next[lane] += 1;
+                    }
+                }
+                for _ in 0..2 {
+                    let mut left = budget;
+                    let mut single = 0;
+                    while left != 0 {
+                        match rx_a.try_recv() {
+                            Ok(value) => {
+                                left = left.saturating_sub(cost(&value));
+                                batch_a.push(value);
+                                single += 1;
+                            }
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => panic!("senders alive"),
+                        }
+                    }
+                    rx_a.release_consumed();
+                    let mut left = budget;
+                    let bulk =
+                        match rx_b.try_recv_batch_into_while(&mut batch_b, usize::MAX, |value| {
+                            if left == 0 {
+                                return false;
+                            }
+                            left = left.saturating_sub(cost(value));
+                            true
+                        }) {
+                            Ok(count) => count,
+                            Err(TryRecvError::Empty) => 0,
+                            Err(TryRecvError::Disconnected) => panic!("senders alive"),
+                        };
+                    assert_eq!(single, bulk, "budget {budget} round {round}");
+                    assert_eq!(batch_a, batch_b, "budget {budget} round {round}");
+                    sequence_a.append(&mut batch_a);
+                    sequence_b.append(&mut batch_b);
+                }
+            }
+            drop(txs_a);
+            drop(txs_b);
+            let before = sequence_a.len();
+            sequence_a.extend(rx_a.try_iter());
+            let remaining = sequence_a.len() - before;
+            assert_eq!(
+                rx_b.try_recv_batch_into_while(&mut sequence_b, usize::MAX, |_| true),
+                if remaining == 0 {
+                    Err(TryRecvError::Disconnected)
+                } else {
+                    Ok(remaining)
+                },
+                "budget {budget}"
+            );
+            assert_eq!(sequence_a, sequence_b, "budget {budget}");
+            assert_eq!(
+                sequence_a.len(),
+                next.iter().sum::<usize>(),
+                "budget {budget}"
+            );
+        }
+    }
+    check::<Deferred>();
+    check::<Coordinated>();
+}
+
+#[test]
+fn budgeted_bulk_receives_preserve_per_sender_fifo_across_threads() {
+    fn check<P: Teardown>() {
+        let per_sender = if cfg!(miri) { 300 } else { 20_000 };
+        let (root, mut rx) = channel_with_policy::<_, P>(64);
+        let threads: Vec<_> = (0..4)
+            .map(|sender| {
+                let mut tx = root.try_clone().unwrap();
+                std::thread::spawn(move || {
+                    for sequence in 0..per_sender {
+                        tx.send((sender, sequence)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        drop(root);
+        let mut next = [0usize; 4];
+        let mut batch = Vec::with_capacity(1024);
+        let mut total = 0;
+        loop {
+            let mut budget = 100usize;
+            let result = rx.try_recv_batch_into_while(&mut batch, 1024, |_| {
+                if budget == 0 {
+                    return false;
+                }
+                budget -= 1;
+                true
+            });
+            match result {
+                Ok(count) => {
+                    assert!((1..=100).contains(&count));
+                    total += count;
+                    for (sender, sequence) in batch.drain(..) {
+                        assert_eq!(sequence, next[sender]);
+                        next[sender] += 1;
+                    }
+                }
+                Err(TryRecvError::Empty) => std::thread::yield_now(),
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+        assert_eq!(total, 4 * per_sender);
+        assert_eq!(next, [per_sender; 4]);
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    }
+    check::<Deferred>();
+    check::<Coordinated>();
+}
+
+#[test]
+fn is_full_follows_lane_capacity_and_slot_release() {
+    fn check<P: Teardown>() {
+        let (mut tx, mut rx) = channel_with_policy::<_, P>(4);
+        let mut other = tx.try_clone().unwrap();
+        assert!(!tx.is_full());
+        for value in 0..4 {
+            tx.try_send(value).unwrap();
+        }
+        assert!(tx.is_full());
+        // Lanes are independent.
+        assert!(!other.is_full());
+        other.try_send(10).unwrap();
+        // Consumed slots become visible to the sender once released.
+        assert_eq!(rx.try_recv(), Ok(0));
+        rx.release_consumed();
+        assert!(!tx.is_full());
+        tx.try_send(4).unwrap();
+        assert!(tx.is_full());
+        let mut batch = Vec::new();
+        assert_eq!(rx.try_recv_batch_into(&mut batch, 8), Ok(5));
+        assert!(!tx.is_full());
+    }
+    check::<Deferred>();
+    check::<Coordinated>();
+}
+
+#[test]
+fn scan_receives_unsignaled_values_in_per_sender_order() {
+    fn check<P: Teardown>() {
+        let (mut tx0, mut rx) = channel_with_policy::<_, P>(8);
+        let mut tx1 = tx0.try_clone().unwrap();
+        for value in 0..4 {
+            tx0.try_send_unsignaled((0, value)).unwrap();
+            tx1.try_send_unsignaled((1, value)).unwrap();
+        }
+        let mut batch = Vec::with_capacity(8);
+        assert_eq!(rx.try_recv_scan_into_while(&mut batch, 8, |_| true), Ok(8));
+        for sender in 0..2 {
+            let values: Vec<_> = batch
+                .iter()
+                .filter(|(from, _)| *from == sender)
+                .map(|(_, value)| *value)
+                .collect();
+            assert_eq!(values, [0, 1, 2, 3]);
+        }
+        assert_eq!(
+            rx.try_recv_scan_into_while(&mut batch, 8, |_| true),
+            Err(TryRecvError::Empty)
+        );
+        drop((tx0, tx1));
+        assert_eq!(
+            rx.try_recv_scan_into_while(&mut batch, 8, |_| true),
+            Err(TryRecvError::Disconnected)
+        );
+    }
+    check::<Deferred>();
+    check::<Coordinated>();
+}
+
+#[test]
+fn scan_visits_lanes_outside_the_current_rotation() {
+    let (mut tx0, mut rx) = channel_with_policy::<usize, Deferred>(128);
+    let mut tx1 = tx0.try_clone().unwrap();
+    for value in 0..100 {
+        tx0.try_send(value).unwrap();
+    }
+    let mut batch = Vec::with_capacity(128);
+    // A limited receive leaves the first lane queued with values left.
+    assert_eq!(rx.try_recv_batch_into(&mut batch, 10), Ok(10));
+    tx1.try_send_unsignaled(1000).unwrap();
+    assert_eq!(
+        rx.try_recv_scan_into_while(&mut batch, 128, |_| true),
+        Ok(91)
+    );
+    assert!(batch.contains(&1000));
+    assert_eq!(
+        batch.iter().filter(|&&value| value < 100).count(),
+        100,
+        "every signaled value arrives once"
+    );
+}
+
+#[test]
+fn scan_admission_keeps_rejected_value_queued() {
+    let (mut tx, mut rx) = channel_with_policy::<usize, Deferred>(8);
+    for value in [10, 20, 30] {
+        tx.try_send_unsignaled(value).unwrap();
+    }
+    let mut batch = Vec::with_capacity(8);
+    let mut budget = 25;
+    let admitted = rx.try_recv_scan_into_while(&mut batch, 8, |value| {
+        if *value > budget {
+            return false;
+        }
+        budget -= *value;
+        true
+    });
+    assert_eq!(admitted, Ok(1));
+    assert_eq!(rx.try_recv_scan_into_while(&mut batch, 8, |_| false), Ok(0));
+    assert_eq!(rx.try_recv_scan_into_while(&mut batch, 8, |_| true), Ok(2));
+    assert_eq!(batch, [10, 20, 30]);
+}
+
+#[test]
+fn unsignaled_send_reports_full_and_disconnected() {
+    fn check<P: Teardown>() {
+        let (mut tx, mut rx) = channel_with_policy::<usize, P>(2);
+        tx.try_send_unsignaled(0).unwrap();
+        tx.try_send_unsignaled(1).unwrap();
+        assert_eq!(tx.try_send_unsignaled(2), Err(TrySendError::Full(2)));
+        let mut batch = Vec::with_capacity(2);
+        assert_eq!(rx.try_recv_scan_into_while(&mut batch, 2, |_| true), Ok(2));
+        tx.try_send_unsignaled(2).unwrap();
+        drop(rx);
+        assert_eq!(
+            tx.try_send_unsignaled(3),
+            Err(TrySendError::Disconnected(3))
+        );
+    }
+    check::<Deferred>();
+    check::<Coordinated>();
+}

@@ -7,6 +7,7 @@ use std::task::{Context, Poll};
 use crate::teardown::{Deferred, Teardown};
 use crate::wait::WaitCell;
 
+use super::receiver::AdmitAll;
 use super::{Receiver, RecvError, SendError, Sender, TryRecvError};
 
 impl<T, P: Teardown> Sender<T, P> {
@@ -156,12 +157,12 @@ impl<T, P: Teardown> Receiver<T, P> {
             self.release_consumed();
             return Ok(0);
         }
-        let mut received = self.drain_into(output, limit);
+        let mut received = self.drain_into(output, limit, &mut AdmitAll).received;
         if received == 0 {
             match self.recv_async().await {
                 Ok(first) => {
                     output.push(first);
-                    received = 1 + self.drain_into(output, limit - 1);
+                    received = 1 + self.drain_into(output, limit - 1, &mut AdmitAll).received;
                 }
                 Err(error) => {
                     self.release_consumed();

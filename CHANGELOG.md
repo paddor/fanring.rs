@@ -11,6 +11,19 @@ All notable changes to this project are documented here.
 - MPSC `Receiver::try_recv_batch_into` appends a bounded batch without
   blocking, releases consumed slots before returning, and reports `Empty` or
   `Disconnected` when nothing was appended.
+- MPSC `Sender::is_full` reports whether the sender's lane can take another
+  value, so lossy producers can skip building a value they would drop.
+- MPSC `Receiver::try_recv_batch_into_while` takes an admission predicate that
+  sees each value in place and stops the batch at the first rejected value,
+  which stays queued. Accepted windows still move in bulk. Requires the yring
+  release that adds `pop_into_while`.
+- MPSC `Sender::try_send_unsignaled` publishes a value without marking its
+  lane ready or waking the receiver, which skips the per-send atomic
+  read-modify-write. The caller provides the wakeup and the fences it needs.
+- MPSC `Receiver::try_recv_scan_into_while` visits every registered lane
+  instead of relying on readiness, so it finds unsignaled values. When it
+  returns fewer values than requested without a rejection, every lane was
+  observed empty during the call.
 
 ### Changed
 

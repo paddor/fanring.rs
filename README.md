@@ -125,6 +125,38 @@ Bulk receives move whole prefetched windows out of sender rings instead of
 popping one value at a time, while keeping the lane rotation and per-sender
 FIFO order of repeated `try_recv` calls.
 
+`Sender::is_full` reports whether the sender's lane can take another value.
+Only the receiver frees slots, so a producer that drops on a full lane can
+skip building the value it would drop.
+
+`try_recv_batch_into_while` adds an admission predicate. It sees each value in
+place before the move and stops the batch at the first value it rejects, which
+stays queued for a later receive. This bounds a batch by a caller-defined
+measure, such as a byte budget, while accepted windows still move in bulk:
+
+```rust
+let mut budget = 64 * 1024;
+let admitted = rx.try_recv_batch_into_while(&mut batch, 256, |message: &Vec<u8>| {
+    if message.len() > budget {
+        return false;
+    }
+    budget -= message.len();
+    true
+});
+```
+
+A rejected first value returns `Ok(0)`; `Empty` and `Disconnected` mean no
+value was available.
+
+`Sender::try_send_unsignaled` publishes a value without marking its lane ready
+or waking the receiver. `try_send` does one atomic read-modify-write per send
+for that; this variant does none. `Receiver::try_recv_scan_into_while` finds
+such values by visiting every registered lane, at a cost proportional to the
+lane count. The application then owns the wakeup. It needs a sequentially
+consistent fence between the send and reading its own wake flag, and the
+receiver needs one between clearing that flag and scanning. Otherwise both
+sides can read stale values, and the receiver parks with a value queued.
+
 ## MPMC
 
 ```rust

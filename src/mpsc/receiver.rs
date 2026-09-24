@@ -14,6 +14,44 @@ use super::{
     TryRecvError,
 };
 
+/// Per-value admission for the bulk drain.
+///
+/// [`AdmitAll`] compiles to a plain window move. A predicate stops the drain
+/// at the first value it rejects.
+pub(super) trait Admit<T> {
+    const ALWAYS: bool;
+    fn admit(&mut self, value: &T) -> bool;
+}
+
+pub(super) struct AdmitAll;
+
+impl<T> Admit<T> for AdmitAll {
+    const ALWAYS: bool = true;
+
+    #[inline]
+    fn admit(&mut self, _value: &T) -> bool {
+        true
+    }
+}
+
+impl<T, F: FnMut(&T) -> bool> Admit<T> for F {
+    const ALWAYS: bool = false;
+
+    #[inline]
+    fn admit(&mut self, value: &T) -> bool {
+        self(value)
+    }
+}
+
+/// Outcome of one bulk drain.
+pub(super) struct Drained {
+    /// Values appended to the output.
+    pub(super) received: usize,
+    /// The admission predicate rejected a published value, so the drain
+    /// stopped with data still available.
+    pub(super) rejected: bool,
+}
+
 /// Receiving half.
 ///
 /// The receiver owns every SPSC consumer and drains active lanes in bounded
@@ -35,6 +73,8 @@ pub struct Receiver<T, P: Teardown = Deferred> {
     pub(super) groups: Vec<Arc<ReadyGroup>>,
     pub(super) pages: Vec<Arc<ReadyPage>>,
     pub(super) active: VecDeque<LaneKey>,
+    /// Scratch for `activate_all_lanes`: which lane slots are already queued.
+    pub(super) scan_queued: Vec<bool>,
     pub(super) ready_group_cursor: usize,
     pub(super) seen_registry_generation: usize,
     pub(super) items_until_ready_poll: usize,
@@ -321,10 +361,10 @@ impl<T, P: Teardown> Receiver<T, P> {
         let result = if limit == 0 {
             Ok(0)
         } else {
-            match self.drain_into(output, limit) {
+            match self.drain_into(output, limit, &mut AdmitAll).received {
                 0 => self.recv().map(|first| {
                     output.push(first);
-                    1 + self.drain_into(output, limit - 1)
+                    1 + self.drain_into(output, limit - 1, &mut AdmitAll).received
                 }),
                 received => Ok(received),
             }
@@ -374,7 +414,7 @@ impl<T, P: Teardown> Receiver<T, P> {
         output: &mut Vec<T>,
         limit: usize,
     ) -> Result<usize, TryRecvError> {
-        let received = self.drain_into(output, limit);
+        let received = self.drain_into(output, limit, &mut AdmitAll).received;
         self.release_consumed();
         if received == 0 && limit != 0 {
             return Err(if self.is_drained() {
@@ -386,17 +426,159 @@ impl<T, P: Teardown> Receiver<T, P> {
         Ok(received)
     }
 
+    /// Append immediately available values to `output` while `admit` accepts
+    /// them.
+    ///
+    /// Works like [`try_recv_batch_into`](Self::try_recv_batch_into) with one
+    /// difference: `admit` sees each value in place before it moves, in the
+    /// order the values are appended, and the drain stops at the first value
+    /// it rejects. That value stays at the front of its sender lane for a
+    /// later receive, and the lane keeps its turn. This bounds a batch by a
+    /// caller-defined measure, such as a byte budget, while each accepted
+    /// window still moves in bulk. Before returning, publishes all consumed
+    /// slots and notifies senders waiting for capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TryRecvError::Empty`] or [`TryRecvError::Disconnected`] under
+    /// the same conditions as `try_recv_batch_into`, only when no value was
+    /// available. When a value is available but `admit` rejects it before
+    /// anything was appended, returns `Ok(0)`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fanring::mpsc::{TryRecvError, channel};
+    ///
+    /// let (mut tx, mut rx) = channel(8);
+    /// for value in [10usize, 20, 30, 40] {
+    ///     tx.try_send(value).unwrap();
+    /// }
+    /// let mut batch = Vec::with_capacity(4);
+    /// let mut budget = 50usize;
+    /// let admitted = rx.try_recv_batch_into_while(&mut batch, 4, |value| {
+    ///     if *value > budget {
+    ///         return false;
+    ///     }
+    ///     budget -= *value;
+    ///     true
+    /// });
+    /// assert_eq!(admitted, Ok(2));
+    /// assert_eq!(batch, [10, 20]);
+    /// assert_eq!(rx.try_recv_batch_into_while(&mut batch, 4, |_| false), Ok(0));
+    /// assert_eq!(rx.try_recv_batch_into(&mut batch, 4), Ok(2));
+    /// assert_eq!(batch, [10, 20, 30, 40]);
+    /// assert_eq!(
+    ///     rx.try_recv_batch_into_while(&mut batch, 1, |_| true),
+    ///     Err(TryRecvError::Empty)
+    /// );
+    /// ```
+    pub fn try_recv_batch_into_while(
+        &mut self,
+        output: &mut Vec<T>,
+        limit: usize,
+        mut admit: impl FnMut(&T) -> bool,
+    ) -> Result<usize, TryRecvError> {
+        let drained = self.drain_into(output, limit, &mut admit);
+        self.release_consumed();
+        if drained.received == 0 && limit != 0 && !drained.rejected {
+            return Err(if self.is_drained() {
+                TryRecvError::Disconnected
+            } else {
+                TryRecvError::Empty
+            });
+        }
+        Ok(drained.received)
+    }
+
+    /// Scan every registered lane and append available values to `output`
+    /// while `admit` accepts them.
+    ///
+    /// Works like [`try_recv_batch_into_while`](Self::try_recv_batch_into_while),
+    /// but it does not rely on lane readiness. Every registered lane joins the
+    /// rotation first, so values sent with
+    /// [`Sender::try_send_unsignaled`](super::Sender::try_send_unsignaled) are
+    /// found as well. A lane leaves the rotation only after this call observes
+    /// it empty. So when fewer than `limit` values are appended and `admit`
+    /// rejected none, every lane was observed empty during this call. The cost
+    /// is proportional to the number of registered lanes.
+    ///
+    /// # Errors
+    ///
+    /// Same as `try_recv_batch_into_while`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fanring::mpsc::{TryRecvError, channel};
+    ///
+    /// let (mut tx0, mut rx) = channel(8);
+    /// let mut tx1 = tx0.try_clone().expect("receiver alive");
+    /// tx0.try_send_unsignaled(1).unwrap();
+    /// tx1.try_send_unsignaled(2).unwrap();
+    /// let mut batch = Vec::with_capacity(8);
+    /// assert_eq!(rx.try_recv_scan_into_while(&mut batch, 8, |_| true), Ok(2));
+    /// batch.sort_unstable();
+    /// assert_eq!(batch, [1, 2]);
+    /// assert_eq!(
+    ///     rx.try_recv_scan_into_while(&mut batch, 8, |_| true),
+    ///     Err(TryRecvError::Empty)
+    /// );
+    /// ```
+    pub fn try_recv_scan_into_while(
+        &mut self,
+        output: &mut Vec<T>,
+        limit: usize,
+        mut admit: impl FnMut(&T) -> bool,
+    ) -> Result<usize, TryRecvError> {
+        self.activate_all_lanes();
+        self.try_recv_batch_into_while(output, limit, &mut admit)
+    }
+
+    /// Put every registered lane in the rotation, keeping the current order
+    /// of lanes that are already queued.
+    fn activate_all_lanes(&mut self) {
+        self.refresh_registry();
+        if self.active.is_empty() {
+            self.active
+                .extend(self.lanes.iter().flatten().map(|lane| lane.key));
+            return;
+        }
+        self.scan_queued.clear();
+        self.scan_queued.resize(self.lanes.len(), false);
+        for key in &self.active {
+            if let Some(flag) = self.scan_queued.get_mut(key.slot) {
+                *flag = true;
+            }
+        }
+        for (lane, &queued) in self.lanes.iter().zip(&self.scan_queued) {
+            if let Some(lane) = lane
+                && !queued
+            {
+                self.active.push_back(lane.key);
+            }
+        }
+    }
+
     /// Move up to `limit` published values to `output` without blocking.
     ///
     /// Each step moves one contiguous chunk from the front lane's prefetched
     /// window and then applies the same bookkeeping that single receives
     /// perform one value at a time: slot release at the release batch, lane
     /// rotation at the burst limit, and a readiness poll at the poll interval.
-    /// Space wakeups are sent inline; no wait registration is held here.
-    /// Returns the number moved. Zero means no value was published; the
-    /// caller decides between empty and disconnected.
-    pub(super) fn drain_into(&mut self, output: &mut Vec<T>, limit: usize) -> usize {
+    /// With an admission predicate, a chunk ends at the first rejected value
+    /// and the drain stops there without rotating the lane. Space wakeups are
+    /// sent inline; no wait registration is held here. Zero received values
+    /// with no rejection means no value was published; the caller decides
+    /// between empty and disconnected.
+    pub(super) fn drain_into<A: Admit<T>>(
+        &mut self,
+        output: &mut Vec<T>,
+        limit: usize,
+        admit: &mut A,
+    ) -> Drained {
         let mut received = 0;
+        let mut rejected = false;
         while received < limit {
             if self.active.is_empty() {
                 self.collect_ready(true);
@@ -451,13 +633,19 @@ impl<T, P: Teardown> Receiver<T, P> {
                 .min(PREFETCH_LIMIT - lane.burst)
                 .min(lane.release_batch - lane.unreleased)
                 .min(self.items_until_ready_poll);
-            let moved = lane.consumer.pop_into(output, take);
-            debug_assert_eq!(moved, take, "prefetched window shorter than cached");
-            lane.cached_available -= take;
-            lane.unreleased += take;
-            lane.burst += take;
-            self.items_until_ready_poll -= take;
-            received += take;
+            let moved = if A::ALWAYS {
+                let moved = lane.consumer.pop_into(output, take);
+                debug_assert_eq!(moved, take, "prefetched window shorter than cached");
+                moved
+            } else {
+                lane.consumer
+                    .pop_into_while(output, take, |value| admit.admit(value))
+            };
+            lane.cached_available -= moved;
+            lane.unreleased += moved;
+            lane.burst += moved;
+            self.items_until_ready_poll -= moved;
+            received += moved;
             if lane.unreleased == lane.release_batch && lane.release_pending() {
                 lane.signal.notify_space();
             }
@@ -465,8 +653,12 @@ impl<T, P: Teardown> Receiver<T, P> {
                 lane.burst = 0;
                 self.active.rotate_left(1);
             }
+            if moved < take {
+                rejected = true;
+                break;
+            }
         }
-        received
+        Drained { received, rejected }
     }
 
     #[cold]

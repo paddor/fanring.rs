@@ -1221,3 +1221,80 @@ fn mpsc_recv_batch_bulk_release_wakes_blocked_sender() {
     check::<fanring::teardown::Deferred>();
     check::<fanring::teardown::Coordinated>();
 }
+
+#[test]
+fn mpsc_try_recv_batch_while_racing_send_keeps_rejected_value() {
+    fn check<P: fanring::teardown::Teardown>() {
+        model(|| {
+            let (mut tx, mut rx) = fanring::mpsc::channel_with_policy::<_, P>(2);
+            tx.try_send(0).unwrap();
+            let sender = thread::spawn(move || {
+                tx.try_send(1).unwrap();
+                tx
+            });
+
+            // Value 1 may or may not be visible yet. Either way only 0 is admitted.
+            let mut output = Vec::with_capacity(2);
+            assert_eq!(
+                rx.try_recv_batch_into_while(&mut output, 2, |value| *value == 0),
+                Ok(1)
+            );
+            let tx = sender.join().unwrap();
+            assert_eq!(
+                rx.try_recv_batch_into_while(&mut output, 2, |value| *value == 0),
+                Ok(0)
+            );
+            assert_eq!(rx.try_recv_batch_into(&mut output, 2), Ok(1));
+            assert_eq!(output, [0, 1]);
+            drop(tx);
+            assert_eq!(
+                rx.try_recv_batch_into_while(&mut output, 2, |_| true),
+                Err(TryRecvError::Disconnected)
+            );
+        });
+    }
+    check::<fanring::teardown::Deferred>();
+    check::<fanring::teardown::Coordinated>();
+}
+
+/// The handoff documented on `Sender::try_send_unsignaled`: a sender that
+/// sees the receiver awake skips its wake, so the receiver must find the
+/// value when it scans after announcing sleep.
+#[test]
+fn mpsc_unsignaled_send_with_fenced_flag_is_not_stranded() {
+    use loom::sync::atomic::{AtomicU8, fence};
+    const AWAKE: u8 = 0;
+    const SLEEPING: u8 = 1;
+    model(|| {
+        let (mut tx, mut rx) = channel::<usize>(2);
+        let flag = Arc::new(AtomicU8::new(AWAKE));
+        let sender = {
+            let flag = flag.clone();
+            thread::spawn(move || {
+                tx.try_send_unsignaled(1).unwrap();
+                fence(Ordering::SeqCst);
+                let woke = flag.load(Ordering::Acquire) == SLEEPING;
+                (tx, woke)
+            })
+        };
+
+        let mut output = Vec::with_capacity(1);
+        let _ = rx.try_recv_scan_into_while(&mut output, 1, |_| true);
+        let mut parked = false;
+        if output.is_empty() {
+            flag.store(SLEEPING, Ordering::Release);
+            fence(Ordering::SeqCst);
+            parked = rx
+                .try_recv_scan_into_while(&mut output, 1, |_| true)
+                .is_err();
+        }
+        let (_tx, woke) = sender.join().unwrap();
+        assert!(
+            !parked || woke,
+            "value published but receiver parked unwoken"
+        );
+        if !parked {
+            assert_eq!(output, [1]);
+        }
+    });
+}

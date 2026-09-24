@@ -117,16 +117,47 @@ impl<T, P: Teardown> Sender<T, P> {
                 let wake_receiver = self.shared.mark_ready(&self.signal);
                 (Ok(()), wake_receiver)
             }
-            Err(value) => {
-                if !self.shared.receiver_alive.load(Ordering::Acquire)
-                    || self.producer.is_consumer_dropped()
-                {
-                    (Err(TrySendError::Disconnected(value)), false)
-                } else {
-                    (Err(TrySendError::Full(value)), false)
-                }
-            }
+            Err(value) => (Err(self.push_error(value)), false),
         }
+    }
+
+    #[inline]
+    fn push_error(&self, value: T) -> TrySendError<T> {
+        if !self.shared.receiver_alive.load(Ordering::Acquire)
+            || self.producer.is_consumer_dropped()
+        {
+            TrySendError::Disconnected(value)
+        } else {
+            TrySendError::Full(value)
+        }
+    }
+
+    /// Try to send one value without marking this lane ready.
+    ///
+    /// The value is pushed and published like [`try_send`](Self::try_send),
+    /// but the receiver is not told which lane has data and is not woken.
+    /// This skips the atomic read-modify-write that `try_send` performs on
+    /// every send. Only [`Receiver::try_recv_scan_into_while`] is guaranteed to
+    /// find values sent this way, because it visits every registered lane.
+    ///
+    /// The caller provides the wakeup. Between this send and reading its own
+    /// wake flag, the caller needs a sequentially consistent fence, and the
+    /// receiver needs one between clearing that flag and scanning. Without
+    /// both fences, a send can read a stale flag while the receiver reads a
+    /// stale ring and parks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrySendError::Full`] when this sender's lane is full, or
+    /// [`TrySendError::Disconnected`] when the receiver is gone.
+    #[inline]
+    pub fn try_send_unsignaled(&mut self, value: T) -> Result<(), TrySendError<T>> {
+        if !self.shared.receiver_alive.load(Ordering::Acquire) {
+            return Err(TrySendError::Disconnected(value));
+        }
+        self.producer
+            .push_and_flush(value)
+            .map_err(|value| self.push_error(value))
     }
 
     /// Send one value, blocking while this sender's ring is full.
@@ -284,6 +315,17 @@ impl<T, P: Teardown> Sender<T, P> {
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.producer.capacity()
+    }
+
+    /// Return whether this sender's lane cannot accept another value now.
+    ///
+    /// Only the receiver frees lane slots, so a full lane stays full until
+    /// the receiver consumes and releases values. Producers that drop on a
+    /// full lane can use this to skip building a value they would drop. A
+    /// `false` result does not reserve a slot.
+    #[inline]
+    pub fn is_full(&mut self) -> bool {
+        self.producer.is_full()
     }
 
     /// Return whether the receiver has been dropped.

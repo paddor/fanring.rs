@@ -135,6 +135,14 @@ delivery order. Empty windows use the same idle transition as `poll_lane`.
 Space wakeups are sent inline because the drain never holds a data-wait
 registration.
 
+`try_recv_batch_into_while` runs the same loop with an admission predicate.
+Each chunk moves through `yring::Consumer::pop_into_while`, which scans the
+chunk in place, counts the accepted prefix, and copies only that prefix. A
+rejection ends the drain without rotating the lane, so the rejected value
+stays at the front of its lane and the next receive resumes there. The plain
+bulk receives use a zero-cost always-accept admission, so their chunk moves
+are unchanged.
+
 ## MPMC Receive Path
 
 Each receiver has a private deque for sole-receiver staging and a bounded,

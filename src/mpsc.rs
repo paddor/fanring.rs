@@ -165,6 +165,7 @@ fn build_channel<T, P: Teardown>(capacity_per_sender: usize) -> (Sender<T, P>, R
             groups: vec![group],
             pages: vec![page],
             active: std::collections::VecDeque::with_capacity(1),
+            scan_queued: Vec::new(),
             ready_group_cursor: 0,
             seen_registry_generation: 0,
             items_until_ready_poll: READY_POLL_INTERVAL,
