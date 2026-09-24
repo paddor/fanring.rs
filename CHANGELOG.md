@@ -25,6 +25,13 @@ All notable changes to this project are documented here.
   returns fewer values than requested without a rejection, every lane was
   observed empty during the call.
 
+### Fixed
+
+- MPMC receivers return consumed ring slots once they take a lane's whole
+  prefetched window, not only after `min(64, capacity)` values. A lane whose
+  sender keeps few values outstanding no longer reports `Full` below its
+  capacity.
+
 ### Changed
 
 - MPSC `recv_batch_into` and `recv_batch_into_async` move whole prefetched

@@ -489,8 +489,12 @@ impl<T, P: Teardown> Receiver<T, P> {
         }
         lane.cached_available -= batch;
         lane.unreleased += batch;
-        let released = (lane.unreleased >= lane.release_batch && lane.release_pending())
-            .then(|| lane.signal.clone());
+        // Release a full batch, or everything once this receiver has taken the
+        // whole prefetched window. Withholding a partial batch from an idle
+        // lane would shrink the sender's usable capacity below its lane size.
+        let released = ((lane.unreleased >= lane.release_batch || lane.cached_available == 0)
+            && lane.release_pending())
+        .then(|| lane.signal.clone());
 
         let mut wake = if batch > 1 { Wake::All } else { Wake::None };
         if lane.cached_available != 0 {

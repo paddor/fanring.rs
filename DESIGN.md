@@ -153,7 +153,9 @@ so multiple producers naturally spread across receivers. Otherwise it rotates
 through the other receiver queues and steals a batch.
 
 After claiming a lane, a receiver prefetches and removes at most 64 values. The
-first value satisfies the current receive. With one live receiver, remaining
+first value satisfies the current receive. Their ring slots return to the
+sender after a full release batch or once the receiver has taken the lane's
+whole prefetched window, so an idle lane never withholds capacity. With one live receiver, remaining
 values move to its private deque. Cloning publishes that private work before
 registering the new receiver. With multiple receivers, remaining values move to
 the synchronized queue under one bounded critical section and become

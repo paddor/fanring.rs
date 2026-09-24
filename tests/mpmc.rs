@@ -299,3 +299,22 @@ fn non_copy_values_survive_receiver_handoff() {
     drop(rx0);
     assert_eq!(rx1.recv().as_deref(), Ok("second"));
 }
+
+#[test]
+fn consumed_slots_return_once_the_receiver_catches_up() {
+    // One value at a time through an 8-slot lane: each receive drains
+    // everything the receiver saw. Those slots must return to the sender then,
+    // not only after a whole release batch, or two values no longer fit.
+    for receivers in [1, 2] {
+        let (mut tx, mut rx) = channel::<u32>(8);
+        let _other = (receivers == 2).then(|| rx.clone());
+        for value in 0..7 {
+            tx.try_send(value).unwrap();
+            assert_eq!(rx.try_recv().unwrap(), value);
+        }
+        tx.try_send(7).unwrap();
+        tx.try_send(8).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), 7);
+        assert_eq!(rx.try_recv().unwrap(), 8);
+    }
+}
