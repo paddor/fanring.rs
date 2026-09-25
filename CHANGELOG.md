@@ -15,15 +15,25 @@ All notable changes to this project are documented here.
   value, so lossy producers can skip building a value they would drop.
 - MPSC `Receiver::try_recv_batch_into_while` takes an admission predicate that
   sees each value in place and stops the batch at the first rejected value,
-  which stays queued. Accepted windows still move in bulk. Requires the yring
-  release that adds `pop_into_while`.
+  which stays queued. Accepted windows still move in bulk. The predicate may
+  see a value again on a later call. Requires yring 0.3.18.
 - MPSC `Sender::try_send_unsignaled` publishes a value without marking its
   lane ready or waking the receiver, which skips the per-send atomic
-  read-modify-write. The caller provides the wakeup and the fences it needs.
+  read-modify-write under `Deferred` teardown. The caller provides the wakeup
+  and the fences it needs. Signaled and unsignaled sends may share a lane.
 - MPSC `Receiver::try_recv_scan_into_while` visits every registered lane
-  instead of relying on readiness, so it finds unsignaled values. When it
-  returns fewer values than requested without a rejection, every lane was
+  instead of relying on readiness, so it finds unsignaled values. Each lane
+  stays queued at most once. When it returns fewer values than requested
+  without a rejection, every lane registered when the call started was
   observed empty during the call.
+
+### Changed
+
+- MPSC `recv_batch_into` and `recv_batch_into_async` move whole prefetched
+  windows out of sender rings with `yring::Consumer::pop_into` instead of
+  popping one value at a time. Lane rotation, readiness polling, slot release,
+  and per-sender FIFO order match repeated `try_recv` calls. Requires yring
+  0.3.18.
 
 ### Fixed
 
@@ -31,14 +41,6 @@ All notable changes to this project are documented here.
   prefetched window, not only after `min(64, capacity)` values. A lane whose
   sender keeps few values outstanding no longer reports `Full` below its
   capacity.
-
-### Changed
-
-- MPSC `recv_batch_into` and `recv_batch_into_async` move whole prefetched
-  windows out of sender rings with `yring::Consumer::pop_into` instead of
-  popping one value at a time. Lane rotation, readiness polling, slot release,
-  and per-sender FIFO order match repeated `try_recv` calls. Requires the
-  yring release that adds `pop_into`.
 
 ## [0.3.6] - 2026-09-19
 

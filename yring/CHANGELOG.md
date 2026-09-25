@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ownership rules.
 - `Consumer::pop_into_while()` moves the prefix of the prefetched window that
   an admission predicate accepts, reading each item in place and leaving the
-  first rejected item at the front of the window.
+  first rejected item at the front of the window. A rejected item, or every
+  item seen before a panicking predicate, is offered again by the next call.
 
 ## [0.3.17] - 2026-09-17
 

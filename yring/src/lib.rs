@@ -748,6 +748,10 @@ impl<T> Consumer<T> {
     /// number moved, which is zero when the window is exhausted or the first
     /// item was rejected. Call [`release`](Self::release) afterward to
     /// publish the consumed slots.
+    ///
+    /// `admit` may see an item more than once: a rejected item is offered
+    /// again by the next call, and if `admit` panics, nothing has moved and
+    /// every item it saw is offered again.
     #[inline]
     pub fn pop_into_while(
         &mut self,

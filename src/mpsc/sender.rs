@@ -65,8 +65,10 @@ impl<T, P: Teardown> Sender<T, P> {
 
     /// Register only if fewer than `max_lanes` rings are allocated.
     ///
-    /// Includes this sender and dropped senders with unread values. The
-    /// receiver must retire an old ring before its registration can be reused.
+    /// Includes this sender and dropped senders whose lanes the receiver has
+    /// not yet observed empty, whether or not values remain. The receiver
+    /// must retire an old ring before its registration can be reused; it
+    /// does so on a receive that finds the dropped sender's lane empty.
     /// Returns [`TryRegisterBoundedError::AtCapacity`] when the limit is reached.
     pub fn try_register_bounded(&self, max_lanes: usize) -> Result<Self, TryRegisterBoundedError> {
         let (key, signal, producer) = self.shared.register_sender(max_lanes)?;
@@ -137,8 +139,14 @@ impl<T, P: Teardown> Sender<T, P> {
     /// The value is pushed and published like [`try_send`](Self::try_send),
     /// but the receiver is not told which lane has data and is not woken.
     /// This skips the atomic read-modify-write that `try_send` performs on
-    /// every send. Only [`Receiver::try_recv_scan_into_while`] is guaranteed to
-    /// find values sent this way, because it visits every registered lane.
+    /// every send (with [`Deferred`](crate::teardown::Deferred) teardown;
+    /// `Coordinated` teardown still does one to track the send).
+    ///
+    /// [`Receiver::try_recv_scan_into_while`] finds values sent this way
+    /// because it visits every registered lane. Other receives find them only
+    /// after a later signaled send or [`flush`](Self::flush) on the same
+    /// lane, which marks it ready. Signaled and unsignaled sends may be mixed
+    /// on one lane.
     ///
     /// The caller provides the wakeup. Between this send and reading its own
     /// wake flag, the caller needs a sequentially consistent fence, and the
@@ -324,6 +332,7 @@ impl<T, P: Teardown> Sender<T, P> {
     /// full lane can use this to skip building a value they would drop. A
     /// `false` result does not reserve a slot.
     #[inline]
+    #[must_use]
     pub fn is_full(&mut self) -> bool {
         self.producer.is_full()
     }

@@ -150,12 +150,16 @@ value was available.
 
 `Sender::try_send_unsignaled` publishes a value without marking its lane ready
 or waking the receiver. `try_send` does one atomic read-modify-write per send
-for that; this variant does none. `Receiver::try_recv_scan_into_while` finds
-such values by visiting every registered lane, at a cost proportional to the
-lane count. The application then owns the wakeup. It needs a sequentially
+for that. With the default `Deferred` teardown this variant does none;
+`Coordinated` teardown still does one to track the in-flight send.
+`Receiver::try_recv_scan_into_while` finds such values by visiting every
+registered lane, at a cost proportional to the lane count. Other receives find
+an unsignaled value only after a later signaled send or `flush` on the same
+lane. The application then owns the wakeup. It needs a sequentially
 consistent fence between the send and reading its own wake flag, and the
 receiver needs one between clearing that flag and scanning. Otherwise both
 sides can read stale values, and the receiver parks with a value queued.
+Signaled and unsignaled sends may be mixed on one lane.
 
 ## MPMC
 
