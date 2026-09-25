@@ -1000,3 +1000,80 @@ fn unsignaled_send_reports_full_and_disconnected() {
     check::<Deferred>();
     check::<Coordinated>();
 }
+
+#[test]
+fn scan_then_signaled_send_keeps_each_lane_queued_once() {
+    fn check<P: Teardown>() {
+        let (mut tx0, mut rx) = channel_with_policy::<u32, P>(16);
+        tx0.try_send_unsignaled(1).unwrap();
+        tx0.try_send_unsignaled(2).unwrap();
+        let mut out = Vec::new();
+        // The scan queues lane 0 and leaves it queued with a value left.
+        assert_eq!(rx.try_recv_scan_into_while(&mut out, 1, |_| true), Ok(1));
+        // A signaled send on the still-queued lane indexes it again.
+        for value in 10..14 {
+            tx0.try_send(value).unwrap();
+        }
+        let mut tx1 = tx0.try_clone().expect("receiver alive");
+        for value in 20..23 {
+            tx1.try_send(value).unwrap();
+        }
+        let mut order = Vec::new();
+        while let Ok(value) = rx.try_recv_fair() {
+            order.push(value);
+        }
+        assert_eq!(order, [2, 20, 10, 21, 11, 22, 12, 13]);
+    }
+    check::<Deferred>();
+    check::<Coordinated>();
+}
+
+#[test]
+fn short_scan_without_rejection_observed_every_lane_empty() {
+    fn check<P: Teardown>() {
+        let (mut tx0, mut rx) = channel_with_policy::<u32, P>(16);
+        let mut tx1 = tx0.try_clone().expect("receiver alive");
+        tx0.try_send_unsignaled(1).unwrap();
+        tx1.try_send(20).unwrap();
+        tx1.try_send_unsignaled(21).unwrap();
+        let mut out = Vec::new();
+        assert_eq!(rx.try_recv_scan_into_while(&mut out, 8, |_| true), Ok(3));
+        out.sort_unstable();
+        assert_eq!(out, [1, 20, 21]);
+        // Nothing is left behind in any lane, signaled or not.
+        assert_eq!(
+            rx.try_recv_scan_into_while(&mut out, 8, |_| true),
+            Err(TryRecvError::Empty)
+        );
+        assert_eq!(rx.try_recv_fair(), Err(TryRecvError::Empty));
+    }
+    check::<Deferred>();
+    check::<Coordinated>();
+}
+
+#[test]
+fn panicking_admission_leaves_the_window_queued() {
+    fn check<P: Teardown>() {
+        let (mut tx, mut rx) = channel_with_policy::<Box<u32>, P>(8);
+        for value in 0..4 {
+            tx.try_send(Box::new(value)).unwrap();
+        }
+        let mut out = Vec::new();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rx.try_recv_batch_into_while(&mut out, 4, |value| {
+                assert!(**value != 2, "admission panic");
+                true
+            })
+        }));
+        assert!(panicked.is_err());
+        assert!(
+            out.is_empty(),
+            "nothing moves before the window is admitted"
+        );
+        assert_eq!(rx.try_recv_batch_into(&mut out, 4), Ok(4));
+        let values: Vec<u32> = out.iter().map(|value| **value).collect();
+        assert_eq!(values, [0, 1, 2, 3]);
+    }
+    check::<Deferred>();
+    check::<Coordinated>();
+}

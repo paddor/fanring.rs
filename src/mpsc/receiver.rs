@@ -72,9 +72,9 @@ pub struct Receiver<T, P: Teardown = Deferred> {
     pub(super) lanes: Vec<Option<Lane<T, P>>>,
     pub(super) groups: Vec<Arc<ReadyGroup>>,
     pub(super) pages: Vec<Arc<ReadyPage>>,
+    /// Lanes in receive rotation. Each lane appears at most once; its
+    /// `queued` flag mirrors membership.
     pub(super) active: VecDeque<LaneKey>,
-    /// Scratch for `activate_all_lanes`: which lane slots are already queued.
-    pub(super) scan_queued: Vec<bool>,
     pub(super) ready_group_cursor: usize,
     pub(super) seen_registry_generation: usize,
     pub(super) items_until_ready_poll: usize,
@@ -438,6 +438,11 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// window still moves in bulk. Before returning, publishes all consumed
     /// slots and notifies senders waiting for capacity.
     ///
+    /// `admit` may see the same value more than once: a rejected value is
+    /// offered again on the next call, and if `admit` panics, the values it
+    /// saw in that window stay queued and are offered again. Keep side effects
+    /// in `admit` limited to accounting for the values it accepts.
+    ///
     /// # Errors
     ///
     /// Returns [`TryRecvError::Empty`] or [`TryRecvError::Disconnected`] under
@@ -499,9 +504,12 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// rotation first, so values sent with
     /// [`Sender::try_send_unsignaled`](super::Sender::try_send_unsignaled) are
     /// found as well. A lane leaves the rotation only after this call observes
-    /// it empty. So when fewer than `limit` values are appended and `admit`
-    /// rejected none, every lane was observed empty during this call. The cost
-    /// is proportional to the number of registered lanes.
+    /// it empty, also when a signaled send on that lane races the scan. So
+    /// when fewer than `limit` values are appended and `admit` rejected none,
+    /// every lane registered when the call started was observed empty during
+    /// this call. Lanes the rotation already held keep their order, and each
+    /// lane is queued at most once. The cost is proportional to the number of
+    /// registered lanes.
     ///
     /// # Errors
     ///
@@ -539,22 +547,9 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// of lanes that are already queued.
     fn activate_all_lanes(&mut self) {
         self.refresh_registry();
-        if self.active.is_empty() {
-            self.active
-                .extend(self.lanes.iter().flatten().map(|lane| lane.key));
-            return;
-        }
-        self.scan_queued.clear();
-        self.scan_queued.resize(self.lanes.len(), false);
-        for key in &self.active {
-            if let Some(flag) = self.scan_queued.get_mut(key.slot) {
-                *flag = true;
-            }
-        }
-        for (lane, &queued) in self.lanes.iter().zip(&self.scan_queued) {
-            if let Some(lane) = lane
-                && !queued
-            {
+        for lane in self.lanes.iter_mut().flatten() {
+            if !lane.queued {
+                lane.queued = true;
                 self.active.push_back(lane.key);
             }
         }
@@ -876,10 +871,13 @@ impl<T, P: Teardown> Receiver<T, P> {
                     let lane_bit = lane_bits.trailing_zeros() as usize;
                     lane_bits &= lane_bits - 1;
                     let slot = page_id * LANES_PER_PAGE + lane_bit;
-                    let Some(lane) = self.lanes.get(slot).and_then(Option::as_ref) else {
+                    let Some(lane) = self.lanes.get_mut(slot).and_then(Option::as_mut) else {
                         continue;
                     };
-                    if lane.signal.is_pending() {
+                    // A scan may already have queued a lane whose publication
+                    // indexed it afterward. Queue each lane once.
+                    if lane.signal.is_pending() && !lane.queued {
+                        lane.queued = true;
                         self.active.push_back(lane.key);
                     }
                 }
@@ -998,6 +996,8 @@ pub(super) struct Lane<T, P: Teardown> {
     unreleased: usize,
     release_batch: usize,
     burst: usize,
+    /// Whether `key` is in the receiver's `active` rotation.
+    queued: bool,
 }
 
 impl<T, P: Teardown> Lane<T, P> {
@@ -1015,6 +1015,7 @@ impl<T, P: Teardown> Lane<T, P> {
             unreleased: 0,
             release_batch,
             burst: 0,
+            queued: false,
         }
     }
 
@@ -1031,18 +1032,25 @@ impl<T, P: Teardown> Lane<T, P> {
     /// Handle a prefetch window that came back empty.
     ///
     /// Releases partial credits first so neither side parks on unpublished
-    /// slots, marks the lane idle, then rechecks the ring. A publication
-    /// that raced the idle transition is either claimed here or has queued
-    /// the lane in its ready page.
+    /// slots, marks the lane idle, then rechecks the ring. A lane whose
+    /// recheck finds data stays queued: either this call claims it back, or
+    /// a racing publication claimed it and its ready-page entry is ignored
+    /// because the lane is still queued. So a lane leaves the rotation only
+    /// after it was observed empty. The caller removes it from `active` on
+    /// `Idle`.
     #[inline(always)]
     fn settle_empty(&mut self) -> EmptyLane {
         let released = self.release_pending();
         self.signal.finish_drain();
         self.cached_available = self.consumer.prefetch();
         self.burst = 0;
-        if self.cached_available != 0 && self.signal.claim_after_empty() {
+        if self.cached_available != 0 {
+            // Fails only when a racing publication already set the lane
+            // pending, which keeps the queued-implies-pending invariant.
+            self.signal.claim_after_empty();
             EmptyLane::Keep { released }
         } else {
+            self.queued = false;
             EmptyLane::Idle {
                 disconnected: self.consumer.is_disconnected(),
                 released,
