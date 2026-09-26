@@ -94,11 +94,13 @@ release PR, run:
 cargo +1.93.0 test --workspace --all-features --locked
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-cargo package -p yring --locked
-cargo package -p fanring --locked
-cargo publish -p yring --dry-run --locked
-cargo publish -p fanring --dry-run --locked
+cargo package --workspace --all-features --locked
+cargo publish --workspace --all-features --dry-run --locked
 ```
+
+Package the workspace together when fanring requires an unpublished yring
+version. Cargo verifies both archives using a temporary registry; it does not
+substitute the sibling source directory or skip package verification.
 
 Merging the release PR is the explicit publish step. CI then tags and publishes
 the version through trusted publishing.

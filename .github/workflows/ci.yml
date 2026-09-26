@@ -55,9 +55,8 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo +stable doc --workspace --all-features --no-deps
       - name: Verify packages
-        run: |
-          cargo +stable package -p yring --locked
-          cargo +stable package -p fanring --all-features --locked
+        # Verify both archives together when fanring needs an unpublished yring.
+        run: cargo +stable package --workspace --all-features --locked
 
   portability:
     name: Check ${{ matrix.target }}

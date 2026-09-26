@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-09-26
+
 ### Added
 
 - Add endpoint-local `WaitStrategy::SpinFor` for bounded active spinning before

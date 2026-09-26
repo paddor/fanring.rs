@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "fanring"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "arc-swap",
  "atomic-waker",

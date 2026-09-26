@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.18] - 2026-09-26
+
 ### Added
 
 - `Consumer::pop_into()` moves up to a limit of prefetched items into a `Vec`
