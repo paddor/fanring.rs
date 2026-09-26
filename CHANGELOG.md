@@ -29,6 +29,12 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- MPSC single-value receive credits scale to half-ring batches, independent of
+  the 64-item fairness burst. Rings above 128 slots resume full producers at
+  the half-full low watermark; smaller rings retain their existing batch size.
+  Empty-lane handling and explicit, bulk, and async receive flushes still
+  release partial credits; capacity-one channels and teardown still wake
+  immediately when progress is possible.
 - MPSC `recv_batch_into` and `recv_batch_into_async` move whole prefetched
   windows out of sender rings with `yring::Consumer::pop_into` instead of
   popping one value at a time. Lane rotation, readiness polling, slot release,

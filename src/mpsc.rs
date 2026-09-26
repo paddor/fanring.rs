@@ -43,6 +43,12 @@ pub const MAX_CAPACITY_PER_SENDER: usize = 1usize << (usize::BITS - 2);
 
 const PREFETCH_LIMIT: usize = 64;
 const READY_POLL_INTERVAL: usize = 64;
+// Keep small rings' existing credit granularity. Smaller batches can turn
+// multi-producer traffic into repeated space-wait/notify contention.
+#[cfg(not(loom))]
+const MIN_RELEASE_BATCH: usize = 64;
+#[cfg(loom)]
+const MIN_RELEASE_BATCH: usize = 2;
 #[cfg(not(loom))]
 const PARK_SPINS: usize = 128;
 #[cfg(loom)]

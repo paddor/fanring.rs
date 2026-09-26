@@ -98,7 +98,12 @@ assert_eq!(tx0.send("closed").unwrap_err().into_inner(), "closed");
 
 `mpsc` preserves FIFO within each sender lane and relaxes order across senders.
 Single-value receives batch slot release: receiving a value may leave its slot
-unavailable to the sender until a later receive. Call `rx.release_consumed()`
+unavailable to the sender until a later receive. The credit batch is half a
+ring, with a minimum of 64 slots capped at capacity. Larger full rings resume
+at their half-full low watermark; rings up to 128 slots keep their existing
+batch size. A receive that observes a lane empty releases partial credits.
+This backpressure policy is independent of fair lane scheduling.
+Call `rx.release_consumed()`
 before returning application permits or issuing completions that allow more
 sends. This publishes freed slots across sender lanes and wakes blocked senders.
 
@@ -258,6 +263,10 @@ Enable the optional `async` feature for runtime-independent `send_async`,
 is required. Successful sends publish immediately. Bulk receive waits only for
 the first value and releases consumed slots before returning. Reserve the output
 vector once to avoid per-value allocations. MPMC remains synchronous.
+
+`recv_async` and `poll_recv` likewise release consumed slots before returning
+each value. Use the nonblocking single-value receives for LWM credit batching,
+then `release_consumed` before handing off work or waiting outside fanring.
 
 Each sender has its own capacity waker; the receiver has one data waker.
 Registration is followed by a queue recheck. Canceling an incomplete send drops

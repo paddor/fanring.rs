@@ -108,10 +108,24 @@ every rotation, capacity release, and readiness poll, including when callers
 alternate blocking and nonblocking receives.
 
 `yring::prefetch` caches all flushed items with one Acquire load. Pops are
-non-atomic. Consumed capacity is released after `min(64, lane capacity)` items
-or when the lane reaches visible empty. A full release batch can span several
-prefetch windows. Empty-lane release prevents a producer and receiver from
-parking while partial credits remain unpublished.
+non-atomic. The credit batch is half a ring, rounded up, with a minimum of 64
+items capped at the ring capacity. Rings up to 128 slots keep their existing
+batch size. Larger full rings resume at the half-full low watermark (LWM).
+Capacity one releases after one item. This is credit-based hysteresis, not a
+fresh occupancy load per pop. The minimum avoids increasing wake/park
+contention for small rings with multiple blocking producers.
+
+The release batch is independent of the 64-item fairness burst and readiness
+poll interval. A full release batch can span several prefetch windows and lane
+rotations. Large rings can therefore keep both endpoints working without
+publishing capacity or notifying a sender at every rotation. Each release
+retains the existing space-notification registration/recheck handshake; there
+is no new waiter flag, shared occupancy counter, or weakened memory ordering.
+
+Empty-lane handling publishes partial credits before clearing readiness and
+rechecking the ring. A receiver does not park with credits stranded on an empty
+lane. Senders using deferred publication must flush before waiting; a failed
+full deferred send also flushes. Disconnect notifications bypass the LWM.
 
 Single-value receives can therefore return before their slots become reusable
 by the sender. `Receiver::release_consumed` scans the receiver's lane slots,
@@ -122,6 +136,11 @@ bounded number of values to a caller-owned vector and call `release_consumed`
 before returning. The blocking and async forms wait only when no value is
 published. Applications can use any of these before issuing completions or
 returning permits that admit more sends.
+
+Async single-value receives also release before returning, preserving their
+immediate-capacity contract. Applications wanting credit batching use repeated
+`try_recv` / `try_recv_fair` calls and flush at their processing or wait boundary.
+Fanring cannot detect an application waiting outside its own receive methods.
 
 Bulk receives share one nonblocking drain loop. Each step takes the front
 active lane, prefetches when its cached window is empty, and moves one

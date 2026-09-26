@@ -10,8 +10,8 @@ use crate::config::{SpinWait, WaitStrategy};
 use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
 
 use super::{
-    LaneKey, PARK_SPINS, PREFETCH_LIMIT, READY_POLL_INTERVAL, RecvError, RecvTimeoutError, Shared,
-    TryRecvError,
+    LaneKey, MIN_RELEASE_BATCH, PARK_SPINS, PREFETCH_LIMIT, READY_POLL_INTERVAL, RecvError,
+    RecvTimeoutError, Shared, TryRecvError,
 };
 
 /// Per-value admission for the bulk drain.
@@ -1006,7 +1006,13 @@ impl<T, P: Teardown> Lane<T, P> {
         signal: Arc<LaneSignal>,
         consumer: crate::ring::Consumer<T, P>,
     ) -> Self {
-        let release_batch = consumer.capacity().min(PREFETCH_LIMIT);
+        // Scale credits to half a ring without shrinking the old batch size
+        // for small rings. Large full lanes resume at their low watermark
+        // while both sides still have work to do. This is independent of the
+        // fairness burst: rotation does not force a capacity notification.
+        // Empty-lane handling and explicit flushes release partial batches.
+        let capacity = consumer.capacity();
+        let release_batch = capacity.div_ceil(2).max(MIN_RELEASE_BATCH).min(capacity);
         Self {
             key,
             signal,
