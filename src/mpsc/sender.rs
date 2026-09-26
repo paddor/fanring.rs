@@ -142,9 +142,10 @@ impl<T, P: Teardown> Sender<T, P> {
     /// every send (with [`Deferred`](crate::teardown::Deferred) teardown;
     /// `Coordinated` teardown still does one to track the send).
     ///
-    /// [`Receiver::try_recv_scan_into_while`] finds values sent this way
-    /// because it visits every registered lane. Other receives find them only
-    /// after a later signaled send or [`flush`](Self::flush) on the same
+    /// [`Receiver::try_recv_scan_into_while`](super::Receiver::try_recv_scan_into_while)
+    /// finds values sent this way because it visits every registered lane.
+    /// Other receives find them only after a later signaled send or
+    /// [`flush`](Self::flush) on the same
     /// lane, which marks it ready. Signaled and unsignaled sends may be mixed
     /// on one lane.
     ///
