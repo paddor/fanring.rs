@@ -1132,3 +1132,316 @@ fn deferred_publish_racing_fair_receive() {
         assert_eq!(next, 2);
     });
 }
+
+#[test]
+fn mpsc_try_recv_batch_racing_send_preserves_values() {
+    fn check<P: fanring::teardown::Teardown>() {
+        model(|| {
+            let (mut tx, mut rx) = fanring::mpsc::channel_with_policy::<_, P>(2);
+            tx.try_send(0).unwrap();
+            let sender = thread::spawn(move || {
+                tx.try_send(1).unwrap();
+                tx
+            });
+
+            let mut output = Vec::with_capacity(2);
+            assert!(matches!(rx.try_recv_batch_into(&mut output, 2), Ok(1 | 2)));
+            let tx = sender.join().unwrap();
+            if output.len() < 2 {
+                assert_eq!(rx.try_recv_batch_into(&mut output, 2), Ok(1));
+            }
+            assert_eq!(output, [0, 1]);
+            assert_eq!(
+                rx.try_recv_batch_into(&mut output, 2),
+                Err(TryRecvError::Empty)
+            );
+            drop(tx);
+            assert_eq!(
+                rx.try_recv_batch_into(&mut output, 2),
+                Err(TryRecvError::Disconnected)
+            );
+            assert_eq!(output, [0, 1]);
+        });
+    }
+    check::<fanring::teardown::Deferred>();
+    check::<fanring::teardown::Coordinated>();
+}
+
+#[test]
+fn mpsc_try_recv_batch_racing_registration_collects_new_lane() {
+    model(|| {
+        let (mut root, mut rx) = channel::<usize>(2);
+        root.try_send(0).unwrap();
+        let registrar = thread::spawn(move || {
+            let mut child = root.try_clone().unwrap();
+            child.try_send(1).unwrap();
+            (root, child)
+        });
+
+        let mut output = Vec::with_capacity(2);
+        let first = rx.try_recv_batch_into(&mut output, 2);
+        assert!(matches!(first, Ok(1 | 2)));
+        let senders = registrar.join().unwrap();
+        if output.len() < 2 {
+            assert_eq!(rx.try_recv_batch_into(&mut output, 2), Ok(1));
+        }
+        output.sort_unstable();
+        assert_eq!(output, [0, 1]);
+        drop(senders);
+        assert_eq!(
+            rx.try_recv_batch_into(&mut output, 1),
+            Err(TryRecvError::Disconnected)
+        );
+    });
+}
+
+#[test]
+fn mpsc_recv_batch_bulk_release_wakes_blocked_sender() {
+    fn check<P: fanring::teardown::Teardown>() {
+        model(|| {
+            let (mut tx, mut rx) = fanring::mpsc::channel_with_policy::<_, P>(2);
+            tx.try_send(0).unwrap();
+            tx.try_send(1).unwrap();
+            let sender = thread::spawn(move || {
+                tx.send(2).unwrap();
+                tx.send(3).unwrap();
+                tx
+            });
+
+            let mut output = Vec::with_capacity(4);
+            while output.len() < 4 {
+                assert!(matches!(rx.recv_batch_into(&mut output, 4), Ok(1..=4)));
+            }
+            assert_eq!(output, [0, 1, 2, 3]);
+            let tx = sender.join().unwrap();
+            drop(tx);
+            assert_eq!(rx.recv_batch_into(&mut output, 1), Err(RecvError));
+        });
+    }
+    check::<fanring::teardown::Deferred>();
+    check::<fanring::teardown::Coordinated>();
+}
+
+#[test]
+fn mpsc_try_recv_batch_while_racing_send_keeps_rejected_value() {
+    fn check<P: fanring::teardown::Teardown>() {
+        model(|| {
+            let (mut tx, mut rx) = fanring::mpsc::channel_with_policy::<_, P>(2);
+            tx.try_send(0).unwrap();
+            let sender = thread::spawn(move || {
+                tx.try_send(1).unwrap();
+                tx
+            });
+
+            // Value 1 may or may not be visible yet. Either way only 0 is admitted.
+            let mut output = Vec::with_capacity(2);
+            assert_eq!(
+                rx.try_recv_batch_into_while(&mut output, 2, |value| *value == 0),
+                Ok(1)
+            );
+            let tx = sender.join().unwrap();
+            assert_eq!(
+                rx.try_recv_batch_into_while(&mut output, 2, |value| *value == 0),
+                Ok(0)
+            );
+            assert_eq!(rx.try_recv_batch_into(&mut output, 2), Ok(1));
+            assert_eq!(output, [0, 1]);
+            drop(tx);
+            assert_eq!(
+                rx.try_recv_batch_into_while(&mut output, 2, |_| true),
+                Err(TryRecvError::Disconnected)
+            );
+        });
+    }
+    check::<fanring::teardown::Deferred>();
+    check::<fanring::teardown::Coordinated>();
+}
+
+/// The handoff documented on `Sender::try_send_unsignaled`: a sender that
+/// sees the receiver awake skips its wake, so the receiver must find the
+/// value when it scans after announcing sleep.
+#[test]
+fn mpsc_unsignaled_send_with_fenced_flag_is_not_stranded() {
+    use loom::sync::atomic::{AtomicU8, fence};
+    const AWAKE: u8 = 0;
+    const SLEEPING: u8 = 1;
+    model(|| {
+        let (mut tx, mut rx) = channel::<usize>(2);
+        let flag = Arc::new(AtomicU8::new(AWAKE));
+        let sender = {
+            let flag = flag.clone();
+            thread::spawn(move || {
+                tx.try_send_unsignaled(1).unwrap();
+                fence(Ordering::SeqCst);
+                let woke = flag.load(Ordering::Acquire) == SLEEPING;
+                (tx, woke)
+            })
+        };
+
+        let mut output = Vec::with_capacity(1);
+        let _ = rx.try_recv_scan_into_while(&mut output, 1, |_| true);
+        let mut parked = false;
+        if output.is_empty() {
+            flag.store(SLEEPING, Ordering::Release);
+            fence(Ordering::SeqCst);
+            parked = rx
+                .try_recv_scan_into_while(&mut output, 1, |_| true)
+                .is_err();
+        }
+        let (_tx, woke) = sender.join().unwrap();
+        assert!(
+            !parked || woke,
+            "value published but receiver parked unwoken"
+        );
+        if !parked {
+            assert_eq!(output, [1]);
+        }
+    });
+}
+
+/// Receiver side of the fenced unsignaled handoff: drain with scans until
+/// short, then publish the sleeping flag, fence, and scan once more.
+/// Returns whether the receiver would park.
+fn scan_then_park(
+    rx: &mut fanring::mpsc::Receiver<usize>,
+    flag: &loom::sync::atomic::AtomicU8,
+    output: &mut Vec<usize>,
+    limit: usize,
+) -> bool {
+    use loom::sync::atomic::fence;
+    while rx.try_recv_scan_into_while(output, limit, |_| true).is_ok() {}
+    flag.store(1, Ordering::Release);
+    fence(Ordering::SeqCst);
+    let mut found = false;
+    while rx.try_recv_scan_into_while(output, limit, |_| true).is_ok() {
+        found = true;
+    }
+    !found
+}
+
+/// A sender that registers after the receiver's first scan still has its
+/// unsignaled value found or wakes the receiver.
+#[test]
+fn mpsc_unsignaled_send_from_late_registered_sender_is_not_stranded() {
+    use loom::sync::atomic::{AtomicU8, fence};
+    model(|| {
+        let (tx0, mut rx) = channel::<usize>(2);
+        let flag = Arc::new(AtomicU8::new(0));
+        let mut output = Vec::with_capacity(1);
+        assert_eq!(
+            rx.try_recv_scan_into_while(&mut output, 1, |_| true),
+            Err(TryRecvError::Empty)
+        );
+        let sender = {
+            let flag = flag.clone();
+            thread::spawn(move || {
+                let mut tx1 = tx0.try_clone().expect("receiver alive");
+                tx1.try_send_unsignaled(1).unwrap();
+                fence(Ordering::SeqCst);
+                let woke = flag.load(Ordering::Acquire) == 1;
+                (tx0, tx1, woke)
+            })
+        };
+        let parked = scan_then_park(&mut rx, &flag, &mut output, 1);
+        let (_tx0, _tx1, woke) = sender.join().unwrap();
+        assert!(
+            !(parked && !woke && output.is_empty()),
+            "late lane's value stranded"
+        );
+    });
+}
+
+/// With two lanes and a limit below the queued total, repeated short scans
+/// neither strand nor duplicate a value.
+#[test]
+fn mpsc_scan_below_queued_total_across_two_lanes_is_complete() {
+    use loom::sync::atomic::{AtomicU8, fence};
+    model(|| {
+        let (mut tx0, mut rx) = channel::<usize>(2);
+        let mut tx1 = tx0.try_clone().expect("receiver alive");
+        tx0.try_send_unsignaled(1).unwrap();
+        tx0.try_send_unsignaled(2).unwrap();
+        let flag = Arc::new(AtomicU8::new(0));
+        let sender = {
+            let flag = flag.clone();
+            thread::spawn(move || {
+                tx1.try_send_unsignaled(3).unwrap();
+                fence(Ordering::SeqCst);
+                let woke = flag.load(Ordering::Acquire) == 1;
+                (tx1, woke)
+            })
+        };
+        let mut output = Vec::with_capacity(3);
+        let parked = scan_then_park(&mut rx, &flag, &mut output, 1);
+        let (_tx1, woke) = sender.join().unwrap();
+        assert!(
+            !(parked && !woke && output.len() < 3),
+            "value stranded behind the limit"
+        );
+        while rx
+            .try_recv_scan_into_while(&mut output, 1, |_| true)
+            .is_ok()
+        {}
+        output.sort_unstable();
+        assert_eq!(output, [1, 2, 3]);
+        drop(tx0);
+    });
+}
+
+/// Signaled and unsignaled sends on one lane racing scans keep the lane
+/// queued once and lose nothing.
+#[test]
+fn mpsc_mixed_signaled_and_unsignaled_sends_on_one_lane_race_scans() {
+    use loom::sync::atomic::{AtomicU8, fence};
+    model(|| {
+        let (mut tx, mut rx) = channel::<usize>(2);
+        let flag = Arc::new(AtomicU8::new(0));
+        let sender = {
+            let flag = flag.clone();
+            thread::spawn(move || {
+                tx.try_send(1).unwrap();
+                tx.try_send_unsignaled(2).unwrap();
+                fence(Ordering::SeqCst);
+                let woke = flag.load(Ordering::Acquire) == 1;
+                (tx, woke)
+            })
+        };
+        let mut output = Vec::with_capacity(2);
+        let parked = scan_then_park(&mut rx, &flag, &mut output, 1);
+        let (_tx, woke) = sender.join().unwrap();
+        assert!(
+            !(parked && !woke && output.len() < 2),
+            "mixed-lane value stranded"
+        );
+        while rx
+            .try_recv_scan_into_while(&mut output, 1, |_| true)
+            .is_ok()
+        {}
+        assert_eq!(output, [1, 2], "per-lane FIFO, each value once");
+        assert_eq!(rx.try_recv_fair(), Err(TryRecvError::Empty));
+    });
+}
+
+/// A sender dropping right after an unsignaled send, racing a scan, keeps
+/// its value and then reports disconnection.
+#[test]
+fn mpsc_sender_drop_racing_scan_preserves_value_then_disconnects() {
+    model(|| {
+        let (mut tx, mut rx) = channel::<usize>(2);
+        let sender = thread::spawn(move || {
+            tx.try_send_unsignaled(1).unwrap();
+            drop(tx);
+        });
+        let mut output = Vec::with_capacity(1);
+        let _ = rx.try_recv_scan_into_while(&mut output, 1, |_| true);
+        sender.join().unwrap();
+        loop {
+            match rx.try_recv_scan_into_while(&mut output, 1, |_| true) {
+                Ok(_) => {}
+                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => panic!("dropped sender's lane never drained"),
+            }
+        }
+        assert_eq!(output, [1]);
+    });
+}

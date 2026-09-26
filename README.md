@@ -98,7 +98,12 @@ assert_eq!(tx0.send("closed").unwrap_err().into_inner(), "closed");
 
 `mpsc` preserves FIFO within each sender lane and relaxes order across senders.
 Single-value receives batch slot release: receiving a value may leave its slot
-unavailable to the sender until a later receive. Call `rx.release_consumed()`
+unavailable to the sender until a later receive. The credit batch is half a
+ring, with a minimum of 64 slots capped at capacity. Larger full rings resume
+at their half-full low watermark; rings up to 128 slots keep their existing
+batch size. A receive that observes a lane empty releases partial credits.
+This backpressure policy is independent of fair lane scheduling.
+Call `rx.release_consumed()`
 before returning application permits or issuing completions that allow more
 sends. This publishes freed slots across sender lanes and wakes blocked senders.
 
@@ -117,7 +122,49 @@ while rx.recv_batch_into(&mut batch, 32).is_ok() {
 value, and releases consumed slots before returning. It returns the number
 appended; a partial batch succeeds even after disconnect. Reserve enough spare
 vector capacity to avoid output reallocations. A zero limit receives nothing,
-releases consumed slots, and returns `Ok(0)`.
+releases consumed slots, and returns `Ok(0)`. `try_recv_batch_into` is the
+nonblocking form and reports `Empty` or `Disconnected` when nothing was
+appended.
+
+Bulk receives move whole prefetched windows out of sender rings instead of
+popping one value at a time, while keeping the lane rotation and per-sender
+FIFO order of repeated `try_recv` calls.
+
+`Sender::is_full` reports whether the sender's lane can take another value.
+Only the receiver frees slots, so a producer that drops on a full lane can
+skip building the value it would drop.
+
+`try_recv_batch_into_while` adds an admission predicate. It sees each value in
+place before the move and stops the batch at the first value it rejects, which
+stays queued for a later receive. This bounds a batch by a caller-defined
+measure, such as a byte budget, while accepted windows still move in bulk:
+
+```rust
+let mut budget = 64 * 1024;
+let admitted = rx.try_recv_batch_into_while(&mut batch, 256, |message: &Vec<u8>| {
+    if message.len() > budget {
+        return false;
+    }
+    budget -= message.len();
+    true
+});
+```
+
+A rejected first value returns `Ok(0)`; `Empty` and `Disconnected` mean no
+value was available.
+
+`Sender::try_send_unsignaled` publishes a value without marking its lane ready
+or waking the receiver. `try_send` does one atomic read-modify-write per send
+for that. With the default `Deferred` teardown this variant does none;
+`Coordinated` teardown still does one to track the in-flight send.
+`Receiver::try_recv_scan_into_while` finds such values by visiting every
+registered lane, at a cost proportional to the lane count. Other receives find
+an unsignaled value only after a later signaled send or `flush` on the same
+lane. The application then owns the wakeup. It needs a sequentially
+consistent fence between the send and reading its own wake flag, and the
+receiver needs one between clearing that flag and scanning. Otherwise both
+sides can read stale values, and the receiver parks with a value queued.
+Signaled and unsignaled sends may be mixed on one lane.
 
 ## MPMC
 
@@ -147,6 +194,27 @@ payloads when move bandwidth dominates.
 or another receiver moves work. `Disconnected` is final: all senders are gone,
 sender rings and staged queues are drained, and no work publication is in
 flight.
+
+## Blocking wait strategies
+
+Synchronous endpoints briefly retry before parking by default. Latency-sensitive
+threads pinned to distinct CPUs can opt into bounded active spinning:
+
+```rust
+use std::time::Duration;
+use fanring::{WaitStrategy, mpsc};
+
+let (_tx, mut rx) = mpsc::channel::<u64>(256);
+rx.set_wait_strategy(WaitStrategy::SpinFor(Duration::from_micros(50)));
+```
+
+The policy is endpoint-local, so applications can spend CPU only on the send or
+receive side that needs lower wake latency. Newly registered senders and cloned
+MPMC receivers inherit their source endpoint's policy. `SpinFor` uses
+`spin_loop`, never scheduler yields, then falls back to the same lost-wakeup-safe
+parking path. Measure the application's empty/full interval distribution and
+CPU budget when choosing a duration. Timeout and deadline operations stop
+spinning at their operation deadline. Async MPSC operations ignore this policy.
 
 ## Contract
 
@@ -195,6 +263,10 @@ Enable the optional `async` feature for runtime-independent `send_async`,
 is required. Successful sends publish immediately. Bulk receive waits only for
 the first value and releases consumed slots before returning. Reserve the output
 vector once to avoid per-value allocations. MPMC remains synchronous.
+
+`recv_async` and `poll_recv` likewise release consumed slots before returning
+each value. Use the nonblocking single-value receives for LWM credit batching,
+then `release_consumed` before handing off work or waiting outside fanring.
 
 Each sender has its own capacity waker; the receiver has one data waker.
 Registration is followed by a queue recheck. Canceling an incomplete send drops

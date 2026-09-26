@@ -19,6 +19,7 @@ const MUTED: RGBColor = RGBColor(0x7d, 0x85, 0x90);
 
 const MPSC_SERIES: &[Series] = &[
     Series::new("fanring", "fanring", RGBColor(0xf8, 0x71, 0x71)),
+    Series::new("fanring-spin", "fanring spin", RGBColor(0x34, 0xd3, 0x99)),
     Series::new(
         "crossbeam-channel",
         "crossbeam-channel 0.5.16",
@@ -32,6 +33,11 @@ const MPSC_SERIES: &[Series] = &[
 
 const MPMC_SERIES: &[Series] = &[
     Series::new("fanring-mpmc", "fanring", RGBColor(0xf8, 0x71, 0x71)),
+    Series::new(
+        "fanring-spin-mpmc",
+        "fanring spin",
+        RGBColor(0x34, 0xd3, 0x99),
+    ),
     Series::new(
         "crossbeam-channel",
         "crossbeam-channel 0.5.16",
@@ -95,6 +101,8 @@ struct LatencyRow {
     cpu: String,
     implementation: String,
     operation: String,
+    #[serde(default)]
+    spin_ns: Option<u64>,
     #[serde(default = "one")]
     capacity: usize,
     rounds: usize,
@@ -418,10 +426,25 @@ fn draw(rows: &[&LatencyRow], series: &[Series], topology: &str, output: &Path) 
         )?;
     }
 
-    draw_legend(&area, series, 82.0, 376.0)?;
+    draw_legend(&area, series, 40.0, 376.0)?;
+    let fanring_spin_ns = rows.iter().find_map(|row| {
+        row.implementation
+            .starts_with("fanring-spin")
+            .then_some(row.spin_ns)
+            .flatten()
+    });
+    let footnote = fanring_spin_ns.map_or_else(
+        || "* Kanal performs up to 256 sched_yield calls before parking".to_string(),
+        |spin_ns| {
+            format!(
+                "* fanring spin uses {}; Kanal performs up to 256 sched_yield calls before parking",
+                format_duration(spin_ns as f64)
+            )
+        },
+    );
     text(
         &area,
-        "* Kanal performs up to 256 sched_yield calls before parking",
+        footnote,
         i32::try_from(width / 2).expect("chart width fits i32"),
         425,
         9,
@@ -479,9 +502,9 @@ fn draw_y_grid(
 
 fn draw_legend(area: &Area<'_>, series: &[Series], x: f64, y: f64) -> ChartResult<()> {
     for (index, candidate) in series.iter().enumerate() {
-        let column = index % 3;
-        let row = index / 3;
-        let legend_x = x + column as f64 * 300.0;
+        let column = index % 4;
+        let row = index / 4;
+        let legend_x = x + column as f64 * 240.0;
         let legend_y = y + row as f64 * 20.0;
         rect(
             area,
@@ -663,6 +686,7 @@ mod tests {
             cpu: "cpu".to_string(),
             implementation: implementation.to_string(),
             operation: operation.to_string(),
+            spin_ns: implementation.contains("spin").then_some(50_000),
             capacity: 1,
             rounds: 100,
             settle_mode: "sleep".to_string(),

@@ -29,7 +29,7 @@ cast_precision_loss = "allow"
 
 [package]
 name = "fanring"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2024"
 rust-version = "1.93"
 autobins = false
@@ -71,7 +71,7 @@ all-features = true
 atomic-waker = { version = "1.1", optional = true }
 arc-swap = "1.7"
 concurrent-queue = { version = "2.5", features = ["loom"] }
-yring = { version = "0.3.16", path = "yring" }
+yring = { version = "0.3.18", path = "yring" }
 
 [target.'cfg(all(loom, target_pointer_width = "64"))'.dependencies]
 loom = "0.7"
@@ -89,17 +89,26 @@ serde_json = "1"
 thingbuf = "0.1"
 
 [[bench]]
-name = "comparison"
+name = "fanring_comparison"
+path = "benches/comparison.rs"
 harness = false
 test = false
 
 [[bench]]
-name = "wake_latency"
+name = "fanring_wake_latency"
+path = "benches/wake_latency.rs"
 harness = false
 test = false
 
 [[bench]]
-name = "mpmc"
+name = "fanring_mpmc"
+path = "benches/mpmc.rs"
+harness = false
+test = false
+
+[[bench]]
+name = "fanring_batch"
+path = "benches/batch.rs"
 harness = false
 test = false
 

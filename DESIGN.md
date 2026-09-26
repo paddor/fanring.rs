@@ -108,19 +108,59 @@ every rotation, capacity release, and readiness poll, including when callers
 alternate blocking and nonblocking receives.
 
 `yring::prefetch` caches all flushed items with one Acquire load. Pops are
-non-atomic. Consumed capacity is released after `min(64, lane capacity)` items
-or when the lane reaches visible empty. A full release batch can span several
-prefetch windows. Empty-lane release prevents a producer and receiver from
-parking while partial credits remain unpublished.
+non-atomic. The credit batch is half a ring, rounded up, with a minimum of 64
+items capped at the ring capacity. Rings up to 128 slots keep their existing
+batch size. Larger full rings resume at the half-full low watermark (LWM).
+Capacity one releases after one item. This is credit-based hysteresis, not a
+fresh occupancy load per pop. The minimum avoids increasing wake/park
+contention for small rings with multiple blocking producers.
+
+The release batch is independent of the 64-item fairness burst and readiness
+poll interval. A full release batch can span several prefetch windows and lane
+rotations. Large rings can therefore keep both endpoints working without
+publishing capacity or notifying a sender at every rotation. Each release
+retains the existing space-notification registration/recheck handshake; there
+is no new waiter flag, shared occupancy counter, or weakened memory ordering.
+
+Empty-lane handling publishes partial credits before clearing readiness and
+rechecking the ring. A receiver does not park with credits stranded on an empty
+lane. Senders using deferred publication must flush before waiting; a failed
+full deferred send also flushes. Disconnect notifications bypass the LWM.
 
 Single-value receives can therefore return before their slots become reusable
 by the sender. `Receiver::release_consumed` scans the receiver's lane slots,
 publishes each lane's pending consumed capacity, and notifies its space waiter.
 It preserves unread prefetched values and the scheduling counters.
-`recv_batch_into` appends a bounded number of values to a caller-owned vector,
-blocks only for the first value, and calls `release_consumed` before returning.
-Applications can use either API before issuing completions or returning permits
-that admit more sends.
+`recv_batch_into`, `try_recv_batch_into`, and `recv_batch_into_async` append a
+bounded number of values to a caller-owned vector and call `release_consumed`
+before returning. The blocking and async forms wait only when no value is
+published. Applications can use any of these before issuing completions or
+returning permits that admit more sends.
+
+Async single-value receives also release before returning, preserving their
+immediate-capacity contract. Applications wanting credit batching use repeated
+`try_recv` / `try_recv_fair` calls and flush at their processing or wait boundary.
+Fanring cannot detect an application waiting outside its own receive methods.
+
+Bulk receives share one nonblocking drain loop. Each step takes the front
+active lane, prefetches when its cached window is empty, and moves one
+contiguous chunk with `yring::Consumer::pop_into`, which reserves output
+capacity and copies at most two slot ranges. The chunk is bounded by the
+remaining limit, the cached window, the 64-item burst, the release batch, and
+the readiness-poll countdown. The step then applies the same slot release,
+rotation, and readiness poll that single receives perform after the value
+that reaches each boundary, so bulk and single receives produce the same
+delivery order. Empty windows use the same idle transition as `poll_lane`.
+Space wakeups are sent inline because the drain never holds a data-wait
+registration.
+
+`try_recv_batch_into_while` runs the same loop with an admission predicate.
+Each chunk moves through `yring::Consumer::pop_into_while`, which scans the
+chunk in place, counts the accepted prefix, and copies only that prefix. A
+rejection ends the drain without rotating the lane, so the rejected value
+stays at the front of its lane and the next receive resumes there. The plain
+bulk receives use a zero-cost always-accept admission, so their chunk moves
+are unchanged.
 
 ## MPMC Receive Path
 
@@ -132,7 +172,9 @@ so multiple producers naturally spread across receivers. Otherwise it rotates
 through the other receiver queues and steals a batch.
 
 After claiming a lane, a receiver prefetches and removes at most 64 values. The
-first value satisfies the current receive. With one live receiver, remaining
+first value satisfies the current receive. Their ring slots return to the
+sender after a full release batch or once the receiver has taken the lane's
+whole prefetched window, so an idle lane never withholds capacity. With one live receiver, remaining
 values move to its private deque. Cloning publishes that private work before
 registering the new receiver. With multiple receivers, remaining values move to
 the synchronized queue under one bounded critical section and become
@@ -194,6 +236,13 @@ registration is released. This prevents data-wait and space-wait lock-order
 inversion. With no waiter, notification is one atomic operation and no lock.
 
 Timeout variants use the same protocol with a deadline.
+
+Each endpoint has a synchronous wait strategy. `Park`, the default, retains the
+short retry phase above. `SpinFor(duration)` actively retries with `spin_loop`
+until its duration or the operation deadline expires, then enters the same
+registration and parking protocol. It never calls the OS scheduler's yield
+operation. The policy is endpoint-local; new senders and cloned MPMC receivers
+copy it from their source endpoint.
 
 ## Drop
 

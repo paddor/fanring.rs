@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "fanring"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "arc-swap",
  "atomic-waker",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.17"
+version = "0.3.18"
 dependencies = [
  "atomic-waker",
  "crossbeam-channel",

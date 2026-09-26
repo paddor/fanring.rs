@@ -54,3 +54,5 @@ mod ready;
 mod ring;
 pub mod teardown;
 mod wait;
+
+pub use config::WaitStrategy;

@@ -4,6 +4,52 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-09-26
+
+### Added
+
+- Add endpoint-local `WaitStrategy::SpinFor` for bounded active spinning before
+  synchronous send and receive operations park.
+- MPSC `Receiver::try_recv_batch_into` appends a bounded batch without
+  blocking, releases consumed slots before returning, and reports `Empty` or
+  `Disconnected` when nothing was appended.
+- MPSC `Sender::is_full` reports whether the sender's lane can take another
+  value, so lossy producers can skip building a value they would drop.
+- MPSC `Receiver::try_recv_batch_into_while` takes an admission predicate that
+  sees each value in place and stops the batch at the first rejected value,
+  which stays queued. Accepted windows still move in bulk. The predicate may
+  see a value again on a later call. Requires yring 0.3.18.
+- MPSC `Sender::try_send_unsignaled` publishes a value without marking its
+  lane ready or waking the receiver, which skips the per-send atomic
+  read-modify-write under `Deferred` teardown. The caller provides the wakeup
+  and the fences it needs. Signaled and unsignaled sends may share a lane.
+- MPSC `Receiver::try_recv_scan_into_while` visits every registered lane
+  instead of relying on readiness, so it finds unsignaled values. Each lane
+  stays queued at most once. When it returns fewer values than requested
+  without a rejection, every lane registered when the call started was
+  observed empty during the call.
+
+### Changed
+
+- MPSC single-value receive credits scale to half-ring batches, independent of
+  the 64-item fairness burst. Rings above 128 slots resume full producers at
+  the half-full low watermark; smaller rings retain their existing batch size.
+  Empty-lane handling and explicit, bulk, and async receive flushes still
+  release partial credits; capacity-one channels and teardown still wake
+  immediately when progress is possible.
+- MPSC `recv_batch_into` and `recv_batch_into_async` move whole prefetched
+  windows out of sender rings with `yring::Consumer::pop_into` instead of
+  popping one value at a time. Lane rotation, readiness polling, slot release,
+  and per-sender FIFO order match repeated `try_recv` calls. Requires yring
+  0.3.18.
+
+### Fixed
+
+- MPMC receivers return consumed ring slots once they take a lane's whole
+  prefetched window, not only after `min(64, capacity)` values. A lane whose
+  sender keeps few values outstanding no longer reports `Full` below its
+  capacity.
+
 ## [0.3.6] - 2026-09-19
 
 ### Added

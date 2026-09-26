@@ -15,7 +15,7 @@ use crate::teardown::{Deferred, Teardown};
 use std::fmt;
 
 use crate::compat::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock};
-use crate::config::validate_capacity;
+use crate::config::{WaitStrategy, validate_capacity};
 use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
 use crate::wait::WaitCell;
 
@@ -43,6 +43,12 @@ pub const MAX_CAPACITY_PER_SENDER: usize = 1usize << (usize::BITS - 2);
 
 const PREFETCH_LIMIT: usize = 64;
 const READY_POLL_INTERVAL: usize = 64;
+// Keep small rings' existing credit granularity. Smaller batches can turn
+// multi-producer traffic into repeated space-wait/notify contention.
+#[cfg(not(loom))]
+const MIN_RELEASE_BATCH: usize = 64;
+#[cfg(loom)]
+const MIN_RELEASE_BATCH: usize = 2;
 #[cfg(not(loom))]
 const PARK_SPINS: usize = 128;
 #[cfg(loom)]
@@ -157,6 +163,7 @@ fn build_channel<T, P: Teardown>(capacity_per_sender: usize) -> (Sender<T, P>, R
             producer,
             key,
             signal: signal.clone(),
+            wait_strategy: WaitStrategy::default(),
         },
         Receiver {
             shared,
@@ -168,6 +175,7 @@ fn build_channel<T, P: Teardown>(capacity_per_sender: usize) -> (Sender<T, P>, R
             seen_registry_generation: 0,
             items_until_ready_poll: READY_POLL_INTERVAL,
             capacity_per_sender: capacity_per_sender.next_power_of_two(),
+            wait_strategy: WaitStrategy::default(),
         },
     )
 }

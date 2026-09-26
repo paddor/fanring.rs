@@ -16,6 +16,7 @@ struct Row {
     cpu: String,
     implementation: &'static str,
     operation: &'static str,
+    spin_ns: Option<u64>,
     capacity: usize,
     rounds: usize,
     settle_mode: &'static str,
@@ -142,6 +143,7 @@ fn main() {
     let warmup = env_usize("FANRING_WAKE_WARMUP", 200);
     let settle = Duration::from_nanos(env_u64("FANRING_WAKE_SETTLE_NS", 50_000));
     let settle_mode = SettleMode::from_env();
+    let spin_ns = env_optional_u64("FANRING_WAKE_SPIN_NS");
     let mut mpsc_results = JsonlResults::new("latency-mpsc.jsonl");
     let mut mpmc_results = JsonlResults::new("latency-mpmc.jsonl");
     let filter = Filter::from_env("FANRING_BENCH_IMPLS");
@@ -165,6 +167,7 @@ fn main() {
             &run_id,
             &cpu,
             "fanring",
+            None,
             rounds,
             warmup,
             settle,
@@ -178,6 +181,7 @@ fn main() {
             &run_id,
             &cpu,
             "fanring-mpmc",
+            None,
             rounds,
             warmup,
             settle,
@@ -186,11 +190,53 @@ fn main() {
             || fanring::mpmc::channel(1),
         );
     }
+    if let Some(spin_ns) = spin_ns {
+        let strategy = fanring::WaitStrategy::SpinFor(Duration::from_nanos(spin_ns));
+        if filter.matches("fanring-spin") {
+            run_implementation(
+                &run_id,
+                &cpu,
+                "fanring-spin",
+                Some(spin_ns),
+                rounds,
+                warmup,
+                settle,
+                settle_mode,
+                &mut [&mut mpsc_results],
+                || {
+                    let (mut sender, mut receiver) = fanring::mpsc::channel(1);
+                    sender.set_wait_strategy(strategy);
+                    receiver.set_wait_strategy(strategy);
+                    (sender, receiver)
+                },
+            );
+        }
+        if filter.matches("fanring-spin-mpmc") {
+            run_implementation(
+                &run_id,
+                &cpu,
+                "fanring-spin-mpmc",
+                Some(spin_ns),
+                rounds,
+                warmup,
+                settle,
+                settle_mode,
+                &mut [&mut mpmc_results],
+                || {
+                    let (mut sender, mut receiver) = fanring::mpmc::channel(1);
+                    sender.set_wait_strategy(strategy);
+                    receiver.set_wait_strategy(strategy);
+                    (sender, receiver)
+                },
+            );
+        }
+    }
     if filter.matches("crossbeam-channel") {
         run_implementation(
             &run_id,
             &cpu,
             "crossbeam-channel",
+            None,
             rounds,
             warmup,
             settle,
@@ -204,6 +250,7 @@ fn main() {
             &run_id,
             &cpu,
             "crossfire",
+            None,
             rounds,
             warmup,
             settle,
@@ -217,6 +264,7 @@ fn main() {
             &run_id,
             &cpu,
             "crossfire-mpmc",
+            None,
             rounds,
             warmup,
             settle,
@@ -230,6 +278,7 @@ fn main() {
             &run_id,
             &cpu,
             "flume",
+            None,
             rounds,
             warmup,
             settle,
@@ -243,6 +292,7 @@ fn main() {
             &run_id,
             &cpu,
             "kanal",
+            None,
             rounds,
             warmup,
             settle,
@@ -256,6 +306,7 @@ fn main() {
             &run_id,
             &cpu,
             "thingbuf",
+            None,
             rounds,
             warmup,
             settle,
@@ -274,6 +325,7 @@ fn run_implementation<S, R, F>(
     run_id: &str,
     cpu: &str,
     implementation: &'static str,
+    spin_ns: Option<u64>,
     rounds: usize,
     warmup: usize,
     settle: Duration,
@@ -294,6 +346,7 @@ fn run_implementation<S, R, F>(
             cpu,
             implementation,
             "recv_wake",
+            spin_ns,
             settle,
             settle_mode,
             recv_samples,
@@ -309,6 +362,7 @@ fn run_implementation<S, R, F>(
             cpu,
             implementation,
             "send_wake",
+            spin_ns,
             settle,
             settle_mode,
             send_samples,
@@ -401,11 +455,13 @@ where
     samples
 }
 
+#[allow(clippy::too_many_arguments)]
 fn summarize(
     run_id: &str,
     cpu: &str,
     implementation: &'static str,
     operation: &'static str,
+    spin_ns: Option<u64>,
     settle: Duration,
     settle_mode: SettleMode,
     mut samples: Vec<u64>,
@@ -418,6 +474,7 @@ fn summarize(
         cpu: cpu.to_string(),
         implementation,
         operation,
+        spin_ns,
         capacity: 1,
         rounds: samples.len(),
         settle_mode: settle_mode.label(),
@@ -472,6 +529,12 @@ fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().map_or(default, |value| {
         value.parse().expect("invalid u64 environment value")
     })
+}
+
+fn env_optional_u64(name: &str) -> Option<u64> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.parse().expect("invalid u64 environment value"))
 }
 
 #[derive(Debug, Clone, Copy)]

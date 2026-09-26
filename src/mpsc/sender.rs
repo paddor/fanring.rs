@@ -3,6 +3,7 @@ use crate::teardown::{Deferred, Teardown};
 use std::time::{Duration, Instant};
 
 use crate::compat::{Arc, Ordering};
+use crate::config::{SpinWait, WaitStrategy};
 use crate::ready::LaneSignal;
 
 use super::{
@@ -20,9 +21,24 @@ pub struct Sender<T, P: Teardown = Deferred> {
     pub(super) producer: crate::ring::Producer<T, P>,
     pub(super) key: LaneKey,
     pub(super) signal: Arc<LaneSignal>,
+    pub(super) wait_strategy: WaitStrategy,
 }
 
 impl<T, P: Teardown> Sender<T, P> {
+    /// Set the policy used by synchronous blocking sends before parking.
+    ///
+    /// Newly registered senders inherit this sender's current policy. This
+    /// does not affect asynchronous operations.
+    pub fn set_wait_strategy(&mut self, strategy: WaitStrategy) {
+        self.wait_strategy = strategy;
+    }
+
+    /// Return this sender's synchronous blocking wait policy.
+    #[must_use]
+    pub const fn wait_strategy(&self) -> WaitStrategy {
+        self.wait_strategy
+    }
+
     /// Try to register another sender.
     ///
     /// Returns `None` when the receiver is gone.
@@ -49,8 +65,10 @@ impl<T, P: Teardown> Sender<T, P> {
 
     /// Register only if fewer than `max_lanes` rings are allocated.
     ///
-    /// Includes this sender and dropped senders with unread values. The
-    /// receiver must retire an old ring before its registration can be reused.
+    /// Includes this sender and dropped senders whose lanes the receiver has
+    /// not yet observed empty, whether or not values remain. The receiver
+    /// must retire an old ring before its registration can be reused; it
+    /// does so on a receive that finds the dropped sender's lane empty.
     /// Returns [`TryRegisterBoundedError::AtCapacity`] when the limit is reached.
     pub fn try_register_bounded(&self, max_lanes: usize) -> Result<Self, TryRegisterBoundedError> {
         let (key, signal, producer) = self.shared.register_sender(max_lanes)?;
@@ -59,6 +77,7 @@ impl<T, P: Teardown> Sender<T, P> {
             producer,
             key,
             signal,
+            wait_strategy: self.wait_strategy,
         })
     }
 
@@ -100,16 +119,54 @@ impl<T, P: Teardown> Sender<T, P> {
                 let wake_receiver = self.shared.mark_ready(&self.signal);
                 (Ok(()), wake_receiver)
             }
-            Err(value) => {
-                if !self.shared.receiver_alive.load(Ordering::Acquire)
-                    || self.producer.is_consumer_dropped()
-                {
-                    (Err(TrySendError::Disconnected(value)), false)
-                } else {
-                    (Err(TrySendError::Full(value)), false)
-                }
-            }
+            Err(value) => (Err(self.push_error(value)), false),
         }
+    }
+
+    #[inline]
+    fn push_error(&self, value: T) -> TrySendError<T> {
+        if !self.shared.receiver_alive.load(Ordering::Acquire)
+            || self.producer.is_consumer_dropped()
+        {
+            TrySendError::Disconnected(value)
+        } else {
+            TrySendError::Full(value)
+        }
+    }
+
+    /// Try to send one value without marking this lane ready.
+    ///
+    /// The value is pushed and published like [`try_send`](Self::try_send),
+    /// but the receiver is not told which lane has data and is not woken.
+    /// This skips the atomic read-modify-write that `try_send` performs on
+    /// every send (with [`Deferred`](crate::teardown::Deferred) teardown;
+    /// `Coordinated` teardown still does one to track the send).
+    ///
+    /// [`Receiver::try_recv_scan_into_while`](super::Receiver::try_recv_scan_into_while)
+    /// finds values sent this way because it visits every registered lane.
+    /// Other receives find them only after a later signaled send or
+    /// [`flush`](Self::flush) on the same
+    /// lane, which marks it ready. Signaled and unsignaled sends may be mixed
+    /// on one lane.
+    ///
+    /// The caller provides the wakeup. Between this send and reading its own
+    /// wake flag, the caller needs a sequentially consistent fence, and the
+    /// receiver needs one between clearing that flag and scanning. Without
+    /// both fences, a send can read a stale flag while the receiver reads a
+    /// stale ring and parks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrySendError::Full`] when this sender's lane is full, or
+    /// [`TrySendError::Disconnected`] when the receiver is gone.
+    #[inline]
+    pub fn try_send_unsignaled(&mut self, value: T) -> Result<(), TrySendError<T>> {
+        if !self.shared.receiver_alive.load(Ordering::Acquire) {
+            return Err(TrySendError::Disconnected(value));
+        }
+        self.producer
+            .push_and_flush(value)
+            .map_err(|value| self.push_error(value))
     }
 
     /// Send one value, blocking while this sender's ring is full.
@@ -129,7 +186,8 @@ impl<T, P: Teardown> Sender<T, P> {
     #[cold]
     #[inline(never)]
     fn send_slow(&mut self, mut value: T) -> Result<(), SendError<T>> {
-        for _ in 0..PARK_SPINS {
+        let mut spin = SpinWait::blocking(self.wait_strategy, PARK_SPINS);
+        while spin.step() {
             std::hint::spin_loop();
             match self.try_send(value) {
                 Ok(()) => return Ok(()),
@@ -196,6 +254,18 @@ impl<T, P: Teardown> Sender<T, P> {
         mut value: T,
         deadline: Instant,
     ) -> Result<(), SendTimeoutError<T>> {
+        let mut spin = SpinWait::deadline(self.wait_strategy, deadline);
+        while spin.step() {
+            std::hint::spin_loop();
+            match self.try_send(value) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Disconnected(value)) => {
+                    return Err(SendTimeoutError::Disconnected(value));
+                }
+                Err(TrySendError::Full(returned)) => value = returned,
+            }
+        }
+
         loop {
             match self.try_send(value) {
                 Ok(()) => return Ok(()),
@@ -254,6 +324,18 @@ impl<T, P: Teardown> Sender<T, P> {
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.producer.capacity()
+    }
+
+    /// Return whether this sender's lane cannot accept another value now.
+    ///
+    /// Only the receiver frees lane slots, so a full lane stays full until
+    /// the receiver consumes and releases values. Producers that drop on a
+    /// full lane can use this to skip building a value they would drop. A
+    /// `false` result does not reserve a slot.
+    #[inline]
+    #[must_use]
+    pub fn is_full(&mut self) -> bool {
+        self.producer.is_full()
     }
 
     /// Return whether the receiver has been dropped.
