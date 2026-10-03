@@ -967,3 +967,81 @@ fn pop_into_while_moves_accepted_prefix_of_concurrent_windows() {
         h.join().unwrap();
     });
 }
+
+#[test]
+fn release_with_full_does_not_miss_registration_beyond_cached_tail() {
+    for check_full in [false, true] {
+        for armed in [false, true] {
+            for wrap in [false, true] {
+                loom::model(move || {
+                    let (mut producer, mut consumer) = if wrap {
+                        yring::loom_spsc_with_cursors::<u32>(2, usize::MAX - 1)
+                    } else {
+                        yring::spsc::<u32>(2)
+                    };
+                    if armed {
+                        assert!(!consumer.release_with_full());
+                        producer.push(0).unwrap();
+                        producer.push_and_flush(0).unwrap();
+                        assert!(producer.is_full());
+                        assert_eq!(consumer.prefetch(), 2);
+                        assert_eq!(consumer.pop(), Some(0));
+                        assert_eq!(consumer.pop(), Some(0));
+                        assert!(consumer.release_with_full());
+                    }
+                    producer.push_and_flush(1).unwrap();
+                    assert_eq!(consumer.prefetch(), 1);
+                    let publisher = thread::spawn(move || {
+                        producer.push_and_flush(2).unwrap();
+                        let blocked = if check_full {
+                            producer.is_full()
+                        } else {
+                            producer.push(3).is_err()
+                        };
+                        (producer, blocked)
+                    });
+                    assert_eq!(consumer.pop(), Some(1));
+                    let wake = consumer.release_with_full();
+                    // The cached tail excludes item 2. This release is the
+                    // only wake; endpoints remain alive across the assertion.
+                    let (producer, blocked) = publisher.join().unwrap();
+                    if blocked {
+                        assert!(wake, "full producer lost its partial-release wake");
+                    }
+                    assert_eq!(consumer.prefetch(), 1);
+                    assert_eq!(consumer.pop(), Some(2));
+                    let _ = consumer.release_with_full();
+                    drop(producer);
+                });
+            }
+        }
+    }
+}
+
+#[test]
+fn release_with_full_reuses_only_popped_slots_across_cursor_wrap() {
+    loom::model(|| {
+        let (mut producer, mut consumer) = yring::loom_spsc_with_cursors::<u32>(4, usize::MAX - 1);
+        assert!(!consumer.release_with_full());
+        for value in 0..4 {
+            producer.push(value).unwrap();
+        }
+        producer.flush();
+        assert!(producer.is_full());
+        assert_eq!(consumer.prefetch(), 4);
+        assert_eq!(consumer.pop(), Some(0));
+        assert_eq!(consumer.pop(), Some(1));
+        assert!(consumer.release_with_full());
+        producer.push(4).unwrap();
+        producer.push(5).unwrap();
+        assert_eq!(producer.push(6), Err(6));
+        producer.flush();
+        assert_eq!(consumer.pop(), Some(2));
+        assert_eq!(consumer.pop(), Some(3));
+        assert!(consumer.release_with_full());
+        assert_eq!(consumer.prefetch(), 2);
+        assert_eq!(consumer.pop(), Some(4));
+        assert_eq!(consumer.pop(), Some(5));
+        assert!(!consumer.release_with_full());
+    });
+}

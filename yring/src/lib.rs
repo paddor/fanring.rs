@@ -784,6 +784,30 @@ impl<T> Consumer<T> {
         self.ring.release(self.head);
     }
 
+    /// Publish consumed slots and report whether the producer needs a wake.
+    ///
+    /// Like [`release`](Self::release), this releases only popped items. The
+    /// caller chooses when to release a batch; this method sets no watermark.
+    /// The hint includes observed fullness and registrations from
+    /// [`Producer::push`] or [`Producer::is_full`], including producers ahead
+    /// of the cached publication window. Signal whenever it returns true.
+    /// Register external waiters before the final full check.
+    ///
+    /// Hints remain conservative until the producer acknowledges activation.
+    /// No new credits returns false without clearing a producer registration.
+    #[inline]
+    #[must_use = "signal the producer whenever this hint is true"]
+    pub fn release_with_full(&mut self) -> bool {
+        self.ring.producer_waiting.0.enable();
+        let published_head = self.ring.head.0.load(Ordering::Relaxed);
+        if self.head == published_head {
+            return false;
+        }
+        let was_full = self.cached_tail.wrapping_sub(published_head) >= self.capacity();
+        self.ring.release(self.head);
+        self.ring.producer_waiting.0.take(was_full)
+    }
+
     /// Load all items flushed since the last prefetch.
     /// Returns the count of newly available items. When data hints are enabled,
     /// an empty window registers a waiter and rechecks before returning.
@@ -997,6 +1021,78 @@ mod tests {
         assert_eq!(c.prefetch_and_pop_with_full(), Some((10, true)));
         assert_eq!(c.prefetch_and_pop_with_full(), Some((20, false)));
         assert_eq!(c.prefetch_and_pop_with_full(), None);
+    }
+
+    #[test]
+    fn release_with_full_releases_batches_and_preserves_prefetched_items() {
+        let (mut producer, mut consumer) = spsc(4);
+        assert!(!consumer.release_with_full());
+        for item in 1..=4 {
+            producer.push(item).unwrap();
+        }
+        producer.flush();
+        assert!(producer.is_full());
+        assert_eq!(consumer.prefetch(), 4);
+        assert_eq!(consumer.pop(), Some(1));
+        assert_eq!(consumer.pop(), Some(2));
+        assert!(producer.is_full(), "pops alone must not publish credits");
+        assert!(consumer.release_with_full());
+        assert!(!consumer.release_with_full(), "no new credits need no wake");
+        producer.push(5).unwrap();
+        producer.push(6).unwrap();
+        producer.flush();
+        assert!(producer.is_full());
+        // The consumer still sees its old two-item window. Registration must
+        // cover the producer's full ring beyond that cached boundary.
+        assert_eq!(consumer.pop(), Some(3));
+        assert_eq!(consumer.pop(), Some(4));
+        assert!(consumer.release_with_full());
+        assert_eq!(consumer.prefetch(), 2);
+        assert_eq!(consumer.pop(), Some(5));
+        assert_eq!(consumer.pop(), Some(6));
+        assert!(!consumer.release_with_full());
+    }
+
+    #[test]
+    fn release_with_full_observes_unpublished_full_slots() {
+        let (mut producer, mut consumer) = spsc(2);
+        assert!(!consumer.release_with_full());
+        producer.push_and_flush(10).unwrap();
+        producer.push(20).unwrap();
+        assert_eq!(producer.push(30), Err(30));
+        assert_eq!(consumer.prefetch(), 1);
+        assert_eq!(consumer.pop(), Some(10));
+        assert!(consumer.release_with_full());
+        producer.push_and_flush(30).unwrap();
+        assert_eq!(consumer.prefetch(), 2);
+        assert_eq!(consumer.pop(), Some(20));
+        assert_eq!(consumer.pop(), Some(30));
+        assert!(consumer.release_with_full());
+    }
+
+    #[test]
+    fn release_with_full_without_pops_keeps_full_registration() {
+        let (mut producer, mut consumer) = spsc(1);
+        assert!(!consumer.release_with_full());
+        producer.push_and_flush(10).unwrap();
+        assert!(producer.is_full());
+        assert_eq!(consumer.prefetch(), 1);
+        assert!(!consumer.release_with_full());
+        assert_eq!(consumer.pop(), Some(10));
+        assert!(consumer.release_with_full());
+        producer.push_and_flush(20).unwrap();
+        assert_eq!(consumer.prefetch_and_pop(), Some(20));
+        assert!(!consumer.release_with_full());
+    }
+
+    #[test]
+    fn release_with_full_activation_is_conservative() {
+        let (mut producer, mut consumer) = spsc(4);
+        producer.push_and_flush(10).unwrap();
+        assert_eq!(consumer.prefetch(), 1);
+        assert_eq!(consumer.pop(), Some(10));
+        assert!(consumer.release_with_full());
+        assert!(!consumer.release_with_full());
     }
 
     #[test]
