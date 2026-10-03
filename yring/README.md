@@ -132,7 +132,9 @@ consumer wakes the producer on release.
 `AsyncConsumer`'s `Stream` implementation releases each item before returning
 it. Use `prefetch()`/`pop()`/`release()` directly for batched release.
 `push_async()` buffers without flushing; flush pending items before awaiting
-space in a full ring.
+space in a full ring. `AsyncProducer::poll_ready()` registers a capacity waker
+without taking a value; ready also covers consumer shutdown. Check
+`is_consumer_dropped()` before retrying admission.
 
 ## Wakeup hints
 

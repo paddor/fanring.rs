@@ -129,6 +129,39 @@ impl<T> AsyncProducer<T> {
         }
     }
 
+    /// Wait for capacity without taking ownership of a value.
+    ///
+    /// Registers the current waker when full and rechecks after registration.
+    /// Returns ready when a slot is available or the consumer has dropped;
+    /// use [`Self::is_consumer_dropped`] to distinguish shutdown. A ready
+    /// result does not publish buffered values; call [`Self::flush`] after
+    /// pushing. Flush pending values before waiting on a full ring.
+    #[inline]
+    pub fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        if self.is_consumer_dropped() || !self.is_full() {
+            return Poll::Ready(());
+        }
+        self.register_space_waker(cx);
+        if self.is_consumer_dropped() || !self.is_full() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+
+    #[inline]
+    fn register_space_waker(&self, cx: &mut Context<'_>) {
+        self.ring.producer_waker.0.register(cx.waker());
+        // Release acknowledges registration after publishing head, or this
+        // exchange acquires its already-freed slots.
+        self.ring
+            .ring
+            .producer_waiting
+            .0
+            .waiting
+            .swap(true, Ordering::AcqRel);
+    }
+
     #[inline]
     pub fn is_full(&mut self) -> bool {
         self.ring.ring.is_full(self.cursor, &mut self.cached_head)
@@ -193,16 +226,7 @@ impl<T> Future for PushFuture<'_, T> {
                 {
                     return Poll::Ready(Err(returned));
                 }
-                this.producer.ring.producer_waker.0.register(cx.waker());
-                // Release acknowledges this registration after publishing
-                // head, or this exchange acquires its already-freed slots.
-                this.producer
-                    .ring
-                    .ring
-                    .producer_waiting
-                    .0
-                    .waiting
-                    .swap(true, Ordering::AcqRel);
+                this.producer.register_space_waker(cx);
                 match this.producer.push(returned) {
                     Ok(()) => Poll::Ready(Ok(())),
                     Err(returned) => {
@@ -389,6 +413,38 @@ mod tests {
         p.flush();
         assert_eq!(c.prefetch_and_pop(), Some(1));
         assert_eq!(c.prefetch_and_pop(), Some(2));
+    }
+
+    #[test]
+    fn readiness_wakes_after_release_and_consumer_drop() {
+        use std::sync::atomic::AtomicUsize;
+        use std::task::{Wake, Waker};
+
+        struct CountWakes(AtomicUsize);
+        impl Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let notifications = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = Waker::from(notifications.clone());
+        let mut cx = Context::from_waker(&waker);
+        let (mut p, mut c) = async_spsc(1);
+        assert_eq!(p.poll_ready(&mut cx), Poll::Ready(()));
+        p.push_and_flush(10).unwrap();
+        assert_eq!(p.poll_ready(&mut cx), Poll::Pending);
+        c.prefetch();
+        assert_eq!(c.pop(), Some(10));
+        assert_eq!(notifications.0.load(Ordering::Relaxed), 0);
+        c.release();
+        assert_eq!(notifications.0.load(Ordering::Relaxed), 1);
+        assert_eq!(p.poll_ready(&mut cx), Poll::Ready(()));
+        p.push_and_flush(20).unwrap();
+        assert_eq!(p.poll_ready(&mut cx), Poll::Pending);
+        drop(c);
+        assert_eq!(notifications.0.load(Ordering::Relaxed), 2);
+        assert_eq!(p.poll_ready(&mut cx), Poll::Ready(()));
+        assert!(p.is_consumer_dropped());
     }
 
     #[test]

@@ -579,6 +579,51 @@ fn push_async_pending_receives_space_wake() {
     });
 }
 
+#[test]
+fn poll_ready_pending_receives_space_wake() {
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct CountWakes(AtomicUsize);
+
+    impl Wake for CountWakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    loom::model(|| {
+        let (mut p, mut c) = yring::async_spsc::<u32>(1);
+        p.push_and_flush(10).unwrap();
+        let notifications = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = Waker::from(notifications.clone());
+        let released = Arc::new(AtomicBool::new(false));
+        let released_for_producer = released.clone();
+        let h = thread::spawn(move || {
+            let mut cx = Context::from_waker(&waker);
+            let result = {
+                let result = p.poll_ready(&mut cx);
+                while !released_for_producer.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+                result
+            };
+            (p, result)
+        });
+
+        assert_eq!(c.prefetch_and_pop(), Some(10));
+        released.store(true, Ordering::Release);
+        let (mut producer, result) = h.join().unwrap();
+        // Never repoll an unwoken Pending future: that would hide a lost wake.
+        match result {
+            Poll::Pending => assert!(notifications.0.load(Ordering::Relaxed) > 0),
+            Poll::Ready(()) => assert!(!producer.is_full()),
+        }
+    });
+}
+
 /// Verify `push_async` detects consumer drop.
 #[test]
 fn push_async_consumer_dropped() {
@@ -662,6 +707,48 @@ fn push_async_consumer_drop_during_registration() {
         let mut future = producer.push_async(2);
 
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Ready(Err(2)));
+    });
+}
+
+#[test]
+fn poll_ready_consumer_drop_during_registration() {
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    use std::sync::{Arc, Mutex};
+
+    struct DropConsumerOnClone {
+        consumer: Mutex<Option<yring::AsyncConsumer<u32>>>,
+    }
+
+    fn clone(data: *const ()) -> RawWaker {
+        let hook = unsafe { Arc::from_raw(data.cast::<DropConsumerOnClone>()) };
+        hook.consumer.lock().unwrap().take();
+        let cloned = hook.clone();
+        std::mem::forget(hook);
+        RawWaker::new(Arc::into_raw(cloned).cast(), &VTABLE)
+    }
+
+    fn drop_waker(data: *const ()) {
+        unsafe { std::mem::drop(Arc::from_raw(data.cast::<DropConsumerOnClone>())) };
+    }
+
+    fn noop(_: *const ()) {}
+
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, drop_waker, noop, drop_waker);
+
+    loom::model(|| {
+        let (mut producer, consumer) = yring::async_spsc::<u32>(1);
+        producer.push(1).unwrap();
+        producer.flush();
+
+        let hook = Arc::new(DropConsumerOnClone {
+            consumer: Mutex::new(Some(consumer)),
+        });
+        let waker =
+            unsafe { Waker::from_raw(RawWaker::new(Arc::into_raw(hook.clone()).cast(), &VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        assert_eq!(producer.poll_ready(&mut cx), Poll::Ready(()));
+        assert!(producer.is_consumer_dropped());
     });
 }
 
