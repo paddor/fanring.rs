@@ -23,6 +23,9 @@ const DEADLINE_CHECK_INTERVAL: u64 = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Receive {
     TryRecv,
+    TryRecvFair,
+    TryRecvWithLaneIds,
+    TryRecvFairWithLaneIds,
     RecvBatchInto,
     TryRecvBatchInto,
     TryRecvBatchIntoWhile,
@@ -115,8 +118,14 @@ fn main() {
     let total_capacity = env_usize("FANRING_BENCH_CAPACITY", 8192);
     let producer_counts = env_list("FANRING_BENCH_PRODUCERS", &[1, 2, 4, 8]);
     let batch_limits = env_list("FANRING_BENCH_BATCH", &[64, 1024]);
-    let receives = Receive::ALL
-        .into_iter()
+    let receive_modes = if receive_filter.values.is_some() {
+        Receive::ALL.as_slice()
+    } else {
+        Receive::DEFAULT.as_slice()
+    };
+    let receives = receive_modes
+        .iter()
+        .copied()
         .filter(|receive| receive_filter.matches(receive.label()))
         .collect::<Vec<_>>();
     let profiles = Profile::ALL
@@ -446,31 +455,10 @@ fn receive_batch<T>(
     limit: usize,
 ) -> Batch {
     match receive {
-        Receive::TryRecv => {
-            let mut count = 0;
-            let mut disconnected = false;
-            while count < limit {
-                match rx.try_recv() {
-                    Ok(value) => {
-                        batch.push(value);
-                        count += 1;
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
-                    }
-                }
-            }
-            rx.release_consumed();
-            if count != 0 {
-                Batch::Items(count)
-            } else if disconnected {
-                Batch::Disconnected
-            } else {
-                Batch::Empty
-            }
-        }
+        Receive::TryRecv => receive_single::<T, false, false>(rx, batch, limit),
+        Receive::TryRecvFair => receive_single::<T, true, false>(rx, batch, limit),
+        Receive::TryRecvWithLaneIds => receive_single::<T, false, true>(rx, batch, limit),
+        Receive::TryRecvFairWithLaneIds => receive_single::<T, true, true>(rx, batch, limit),
         Receive::RecvBatchInto => match rx.recv_batch_into(batch, limit) {
             Ok(count) => Batch::Items(count),
             Err(_) => Batch::Disconnected,
@@ -498,6 +486,53 @@ fn receive_batch<T>(
                 Err(TryRecvError::Disconnected) => Batch::Disconnected,
             }
         }
+    }
+}
+
+// Keep each scalar loop independent of the dispatcher's other modes.
+#[inline(never)]
+fn receive_single<T, const FAIR: bool, const LANE_IDS: bool>(
+    rx: &mut Receiver<T>,
+    batch: &mut Vec<T>,
+    limit: usize,
+) -> Batch {
+    let mut count = 0;
+    let mut disconnected = false;
+    while count < limit {
+        let result = if LANE_IDS {
+            let result = if FAIR {
+                rx.with_lane_ids().try_recv_fair()
+            } else {
+                rx.with_lane_ids().try_recv()
+            };
+            result.map(|(lane, value)| {
+                black_box(lane);
+                value
+            })
+        } else if FAIR {
+            rx.try_recv_fair()
+        } else {
+            rx.try_recv()
+        };
+        match result {
+            Ok(value) => {
+                batch.push(value);
+                count += 1;
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                disconnected = true;
+                break;
+            }
+        }
+    }
+    rx.release_consumed();
+    if count != 0 {
+        Batch::Items(count)
+    } else if disconnected {
+        Batch::Disconnected
+    } else {
+        Batch::Empty
     }
 }
 
@@ -534,8 +569,19 @@ fn row<T>(
 }
 
 impl Receive {
-    const ALL: [Self; 4] = [
+    const DEFAULT: [Self; 5] = [
         Self::TryRecv,
+        Self::TryRecvFair,
+        Self::RecvBatchInto,
+        Self::TryRecvBatchInto,
+        Self::TryRecvBatchIntoWhile,
+    ];
+
+    const ALL: [Self; 7] = [
+        Self::TryRecv,
+        Self::TryRecvFair,
+        Self::TryRecvWithLaneIds,
+        Self::TryRecvFairWithLaneIds,
         Self::RecvBatchInto,
         Self::TryRecvBatchInto,
         Self::TryRecvBatchIntoWhile,
@@ -544,6 +590,9 @@ impl Receive {
     const fn label(self) -> &'static str {
         match self {
             Self::TryRecv => "try_recv",
+            Self::TryRecvFair => "try_recv_fair",
+            Self::TryRecvWithLaneIds => "try_recv_with_lane_ids",
+            Self::TryRecvFairWithLaneIds => "try_recv_fair_with_lane_ids",
             Self::RecvBatchInto => "recv_batch_into",
             Self::TryRecvBatchInto => "try_recv_batch_into",
             Self::TryRecvBatchIntoWhile => "try_recv_batch_into_while",

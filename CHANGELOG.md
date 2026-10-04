@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- MPSC `Sender::lane` returns an opaque, Copy, generation-safe `LaneId`.
+  Channel identities never wrap; exhausted lane generations are not reused.
+- MPSC `Receiver::with_lane_ids` borrows a receive view returning `(LaneId, T)`
+  from ordinary, fair, blocking, timed, and asynchronous single-value receives.
+  Plain receives share the drain implementation without constructing lane IDs.
+- MPSC receivers can pause/resume ordinary drainage, receive from one lane,
+  and close a lane independently. Paused lanes retain FIFO and backpressure;
+  targeted receives remain available and stale IDs cannot select reused slots.
+
 ## [0.3.8] - 2026-10-04
 
 ### Changed

@@ -169,15 +169,20 @@ Wake latency accepts `FANRING_WAKE_ROUNDS`, `FANRING_WAKE_WARMUP`,
 Set `FANRING_WAKE_SPIN_NS` to also measure `fanring-spin` and
 `fanring-spin-mpmc` with `WaitStrategy::SpinFor`. It measures both a blocked
 receiver woken by a send and a blocked sender woken by a receive on
-capacity-one channels. Results are appended to
+capacity-one channels. `FANRING_BENCH_AFFINITY` also applies here: the calling
+thread uses the first core and the waiting thread uses the next core, with
+the same CPU order throughout the run. Restrict CPUs with `taskset` to select
+a pair. Result rows record the affinity. Results are appended to
 `~/.cache/fanring/<implementation>/latency-{mpsc,mpmc}.jsonl`.
+Latency charts combine only runs with matching affinity; older rows with no
+affinity remain readable and are compared with other older rows.
 
 `FANRING_BENCH_CACHE_DIR` overrides the `~/.cache/fanring` result root for every
 benchmark and the chart generator. Result files are append-only.
 
-The batch receive bench compares repeated `try_recv` against `recv_batch_into`,
-`try_recv_batch_into`, and `try_recv_batch_into_while` (with a counting
-admission budget) on the MPSC channel:
+The batch receive bench compares repeated `try_recv` and `try_recv_fair`
+against `recv_batch_into`, `try_recv_batch_into`, and
+`try_recv_batch_into_while` (with a counting admission budget) on the MPSC channel:
 
 ```sh
 cargo bench -p fanring --bench fanring_batch
@@ -189,10 +194,16 @@ profile keeps producers sending and reports end-to-end throughput. It accepts
 `FANRING_BENCH_SECS`, `FANRING_BENCH_SAMPLES`, `FANRING_BENCH_WARMUP_SECS`,
 `FANRING_BENCH_PRODUCERS`, `FANRING_BENCH_CAPACITY`, `FANRING_BENCH_PAYLOADS`,
 `FANRING_BENCH_AFFINITY`, `FANRING_BENCH_BATCH` (batch limits, default
-`64,1024`), `FANRING_BENCH_RECEIVES` (`try_recv`, `recv_batch_into`,
+`64,1024`), `FANRING_BENCH_RECEIVES` (`try_recv`, `try_recv_fair`, `recv_batch_into`,
 `try_recv_batch_into`, `try_recv_batch_into_while`), and
 `FANRING_BENCH_PROFILE` (`prefilled`, `stream`).
 Rows are appended to `~/.cache/fanring/fanring/batch-mpsc.jsonl`.
+
+Select `try_recv_with_lane_ids` and `try_recv_fair_with_lane_ids` explicitly
+through `FANRING_BENCH_RECEIVES` to compare the tagged receive view with plain
+receives. These modes include constructing and passing each Copy lane ID. They
+are excluded from the default mode list. Use `prefilled` to isolate consumer
+cost and pin threads with `FANRING_BENCH_AFFINITY=auto`.
 
 Short smoke run:
 

@@ -78,6 +78,40 @@ that application code processes the message.
 
 ## MPSC
 
+`Sender::lane()` returns an opaque identity for one channel and registration.
+`Receiver::pause(&lane)` excludes it from ordinary, fair, bulk, scan, and
+iterator receives. The sender can still fill its bounded ring. Use
+`try_recv_from(&lane)` to drain that specific lane, even while paused, and
+`resume(&lane)` to return it to fair rotation. Targeted reads never resume a
+lane implicitly. `close_lane(&lane)` disconnects it and retires its slot;
+unread destruction follows the channel's teardown policy. Old and foreign IDs
+are rejected. The older numeric `lane_id()` reports only a reusable slot and
+must not be used as a connection-generation handle.
+
+`rx.with_lane_ids()` borrows a single-value receive view. Its `try_recv`,
+`try_recv_fair`, `recv`, and timed receives return `(LaneId, T)` without
+requiring the sender to attach an ID to each payload. With the `async` feature,
+the view also provides `recv_async` and `poll_recv`. The view shares scheduling
+and waiter state with the receiver. Plain receives do not create lane handles;
+tagged receives copy the source key and channel identity without refcounts.
+IDs retain no allocation, and exhausted generations are never reused.
+
+```rust
+let (lane, held) = rx.with_lane_ids().try_recv_fair()?;
+rx.pause(&lane)?;
+// Keep held outside fanring while processing other lanes.
+rx.resume(&lane)?;
+```
+
+The receiver records a paused flag. Applications keep any popped value in
+their own side slot. Resuming makes the lane eligible for drainage; subsequent
+receives publish consumed slots using the normal release batches.
+
+Pause/resume belong to the single receiver. A blocking ordinary receive waits
+while all remaining lanes are paused; arrange resumption before starting it.
+Targeted receives are nonblocking. An application sharing the receiver can
+provide its own source-specific wait and lifecycle signals.
+
 ```rust
 use fanring::mpsc::channel;
 

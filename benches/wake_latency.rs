@@ -8,12 +8,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use support::JsonlResults;
+use support::{Affinity, JsonlResults};
 
 #[derive(Debug, Serialize)]
 struct Row {
     run_id: String,
     cpu: String,
+    affinity: String,
     implementation: &'static str,
     operation: &'static str,
     spin_ns: Option<u64>,
@@ -153,17 +154,20 @@ fn main() {
         .as_nanos()
         .to_string();
     let cpu = cpu_name();
+    let affinity = Affinity::from_env();
 
     assert!(rounds > 0, "wake rounds must be > 0");
     println!(
-        "Wake latency ({rounds} samples, {warmup} warmup, {} ns {} settle, results {})\n",
+        "Wake latency ({rounds} samples, {warmup} warmup, {} ns {} settle, affinity {}, results {})\n",
         settle.as_nanos(),
         settle_mode.label(),
+        affinity.description(),
         mpsc_results.root().display()
     );
 
     if filter.matches("fanring") {
         run_implementation(
+            &affinity,
             &run_id,
             &cpu,
             "fanring",
@@ -178,6 +182,7 @@ fn main() {
     }
     if filter.matches("fanring-mpmc") {
         run_implementation(
+            &affinity,
             &run_id,
             &cpu,
             "fanring-mpmc",
@@ -194,6 +199,7 @@ fn main() {
         let strategy = fanring::WaitStrategy::SpinFor(Duration::from_nanos(spin_ns));
         if filter.matches("fanring-spin") {
             run_implementation(
+                &affinity,
                 &run_id,
                 &cpu,
                 "fanring-spin",
@@ -213,6 +219,7 @@ fn main() {
         }
         if filter.matches("fanring-spin-mpmc") {
             run_implementation(
+                &affinity,
                 &run_id,
                 &cpu,
                 "fanring-spin-mpmc",
@@ -233,6 +240,7 @@ fn main() {
     }
     if filter.matches("crossbeam-channel") {
         run_implementation(
+            &affinity,
             &run_id,
             &cpu,
             "crossbeam-channel",
@@ -247,6 +255,7 @@ fn main() {
     }
     if filter.matches("crossfire") {
         run_implementation(
+            &affinity,
             &run_id,
             &cpu,
             "crossfire",
@@ -261,6 +270,7 @@ fn main() {
     }
     if filter.matches("crossfire-mpmc") {
         run_implementation(
+            &affinity,
             &run_id,
             &cpu,
             "crossfire-mpmc",
@@ -275,6 +285,7 @@ fn main() {
     }
     if filter.matches("flume") {
         run_implementation(
+            &affinity,
             &run_id,
             &cpu,
             "flume",
@@ -289,6 +300,7 @@ fn main() {
     }
     if filter.matches("kanal") {
         run_implementation(
+            &affinity,
             &run_id,
             &cpu,
             "kanal",
@@ -303,6 +315,7 @@ fn main() {
     }
     if filter.matches("thingbuf") {
         run_implementation(
+            &affinity,
             &run_id,
             &cpu,
             "thingbuf",
@@ -322,6 +335,7 @@ fn main() {
 
 #[allow(clippy::too_many_arguments)]
 fn run_implementation<S, R, F>(
+    affinity: &Affinity,
     run_id: &str,
     cpu: &str,
     implementation: &'static str,
@@ -338,10 +352,19 @@ fn run_implementation<S, R, F>(
     F: Fn() -> (S, R),
 {
     let (sender, receiver) = make_channel();
-    let recv_samples = measure_recv_wake(sender, receiver, rounds, warmup, settle, settle_mode);
+    let recv_samples = measure_recv_wake(
+        affinity,
+        sender,
+        receiver,
+        rounds,
+        warmup,
+        settle,
+        settle_mode,
+    );
     write_row(
         outputs,
         &summarize(
+            affinity,
             run_id,
             cpu,
             implementation,
@@ -354,10 +377,19 @@ fn run_implementation<S, R, F>(
     );
 
     let (sender, receiver) = make_channel();
-    let send_samples = measure_send_wake(sender, receiver, rounds, warmup, settle, settle_mode);
+    let send_samples = measure_send_wake(
+        affinity,
+        sender,
+        receiver,
+        rounds,
+        warmup,
+        settle,
+        settle_mode,
+    );
     write_row(
         outputs,
         &summarize(
+            affinity,
             run_id,
             cpu,
             implementation,
@@ -372,6 +404,7 @@ fn run_implementation<S, R, F>(
 }
 
 fn measure_recv_wake<S, R>(
+    affinity: &Affinity,
     mut sender: S,
     mut receiver: R,
     rounds: usize,
@@ -384,10 +417,13 @@ where
     R: BlockingReceiver + 'static,
 {
     let total = rounds + warmup;
+    affinity.pin(0);
+    let affinity = affinity.clone();
     let clock = Instant::now();
     let (ready_tx, ready_rx) = sync_channel(0);
     let (sample_tx, sample_rx) = sync_channel(0);
     let receiver = thread::spawn(move || {
+        affinity.pin(1);
         for _ in 0..total {
             ready_tx.send(()).expect("signal receiver ready");
             let sent = receiver.recv().expect("receive wake payload");
@@ -413,6 +449,7 @@ where
 }
 
 fn measure_send_wake<S, R>(
+    affinity: &Affinity,
     mut sender: S,
     mut receiver: R,
     rounds: usize,
@@ -425,11 +462,14 @@ where
     R: BlockingReceiver,
 {
     let total = rounds + warmup;
+    affinity.pin(0);
+    let affinity = affinity.clone();
     let clock = Instant::now();
     assert!(sender.send(0), "receiver disconnected");
     let (ready_tx, ready_rx) = sync_channel(0);
     let (sample_tx, sample_rx) = sync_channel(0);
     let sender = thread::spawn(move || {
+        affinity.pin(1);
         for value in 1..=total as u64 {
             ready_tx.send(()).expect("signal sender ready");
             assert!(sender.send(value), "receiver disconnected");
@@ -457,6 +497,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 fn summarize(
+    affinity: &Affinity,
     run_id: &str,
     cpu: &str,
     implementation: &'static str,
@@ -472,6 +513,7 @@ fn summarize(
     let row = Row {
         run_id: run_id.to_string(),
         cpu: cpu.to_string(),
+        affinity: affinity.description().to_string(),
         implementation,
         operation,
         spin_ns,

@@ -20,6 +20,112 @@ fn model(check: impl Fn() + Sync + Send + 'static) {
     builder.check(check);
 }
 
+#[test]
+fn tagged_receive_racing_send_identifies_the_paused_lane() {
+    model(|| {
+        let (mut tx, mut rx) = channel(2);
+        let expected = tx.lane();
+        let sender = thread::spawn(move || {
+            tx.try_send(1).unwrap();
+            tx.try_send(2).unwrap();
+        });
+        let (lane, value) = rx.with_lane_ids().recv().unwrap();
+        assert_eq!(lane, expected);
+        assert_eq!(value, 1);
+        rx.pause(&lane).unwrap();
+        assert_eq!(rx.with_lane_ids().try_recv_fair(), Err(TryRecvError::Empty));
+        sender.join().unwrap();
+        assert_eq!(rx.try_recv_from(&lane), Ok(2));
+        assert_eq!(rx.try_recv_from(&lane), Err(TryRecvError::Disconnected));
+        assert_eq!(rx.with_lane_ids().recv(), Err(RecvError));
+    });
+}
+
+#[test]
+fn paused_lane_control_rejects_concurrently_created_foreign_channel() {
+    model(|| {
+        let creator = thread::spawn(|| {
+            let (tx, _rx) = channel::<usize>(1);
+            tx.lane()
+        });
+        let (mut tx, mut rx) = channel(1);
+        tx.try_send(1).unwrap();
+        let own = tx.lane();
+        let foreign = creator.join().unwrap();
+        assert_ne!(own, foreign);
+        assert_eq!(rx.pause(&foreign), Err(RecvError));
+        assert_eq!(rx.with_lane_ids().try_recv(), Ok((own, 1)));
+    });
+}
+
+#[test]
+fn paused_lane_publication_resumes_without_lost_values() {
+    model(|| {
+        let (mut tx, mut rx) = channel(2);
+        let lane = tx.lane();
+        rx.pause(&lane).unwrap();
+        let sender = thread::spawn(move || {
+            tx.try_send(1).unwrap();
+            tx.try_send(2).unwrap();
+            tx
+        });
+        assert_eq!(rx.try_recv_fair(), Err(TryRecvError::Empty));
+        rx.resume(&lane).unwrap();
+        let tx = sender.join().unwrap();
+        assert_eq!(rx.try_recv_fair(), Ok(1));
+        rx.pause(&lane).unwrap();
+        assert_eq!(rx.try_recv_fair(), Err(TryRecvError::Empty));
+        assert_eq!(rx.try_recv_from(&lane), Ok(2));
+        drop(tx);
+        assert_eq!(rx.try_recv_from(&lane), Err(TryRecvError::Disconnected));
+    });
+}
+
+#[test]
+fn paused_lane_close_racing_send_cannot_select_replacement() {
+    model(|| {
+        let (mut tx, mut rx) =
+            fanring::mpsc::channel_with_policy::<_, fanring::teardown::Coordinated>(2);
+        let lane = tx.lane();
+        rx.pause(&lane).unwrap();
+        let sender = thread::spawn(move || {
+            let result = tx.try_send(1);
+            assert!(matches!(
+                result,
+                Ok(()) | Err(TrySendError::Disconnected(1))
+            ));
+            tx
+        });
+        rx.close_lane(&lane).unwrap();
+        let tx = sender.join().unwrap();
+        assert!(tx.is_disconnected());
+        let mut replacement = tx.try_register_bounded(1).unwrap();
+        replacement.try_send(2).unwrap();
+        assert_eq!(rx.try_recv_from(&lane), Err(TryRecvError::Disconnected));
+        assert_eq!(rx.resume(&lane), Err(RecvError));
+        assert_eq!(rx.try_recv_fair(), Ok(2));
+    });
+}
+
+#[test]
+fn empty_paused_lane_racing_final_sender_drop_reports_disconnect() {
+    model(|| {
+        let (mut tx, mut rx) = channel(2);
+        let lane = tx.lane();
+        tx.try_send(1).unwrap();
+        assert_eq!(rx.try_recv(), Ok(1));
+        rx.pause(&lane).unwrap();
+        assert_eq!(rx.try_recv_fair(), Err(TryRecvError::Empty));
+        let sender = thread::spawn(move || drop(tx));
+        assert!(matches!(
+            rx.try_recv_fair(),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected)
+        ));
+        sender.join().unwrap();
+        assert_eq!(rx.try_recv_fair(), Err(TryRecvError::Disconnected));
+    });
+}
+
 #[derive(Debug)]
 struct DropCount(Arc<loom::sync::atomic::AtomicUsize>);
 

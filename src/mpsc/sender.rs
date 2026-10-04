@@ -7,7 +7,7 @@ use crate::config::{SpinWait, WaitStrategy};
 use crate::ready::LaneSignal;
 
 use super::{
-    LaneKey, PARK_SPINS, SendError, SendTimeoutError, Shared, TryRegisterBoundedError,
+    LaneId, LaneKey, PARK_SPINS, SendError, SendTimeoutError, Shared, TryRegisterBoundedError,
     TryRegisterError, TrySendError,
 };
 
@@ -25,6 +25,16 @@ pub struct Sender<T, P: Teardown = Deferred> {
 }
 
 impl<T, P: Teardown> Sender<T, P> {
+    /// Return this sender's lane identity for targeted receive and drainage
+    /// control. Registered senders, including clones, have distinct identities.
+    #[must_use]
+    pub fn lane(&self) -> LaneId {
+        LaneId {
+            key: self.key,
+            channel_id: self.shared.channel_id,
+        }
+    }
+
     /// Set the policy used by synchronous blocking sends before parking.
     ///
     /// Newly registered senders inherit this sender's current policy. This
@@ -63,12 +73,14 @@ impl<T, P: Teardown> Sender<T, P> {
             })
     }
 
-    /// Register only if fewer than `max_lanes` rings are allocated.
+    /// Register only if fewer than `max_lanes` receive lanes are registered.
     ///
     /// Includes this sender and dropped senders whose lanes the receiver has
     /// not yet observed empty, whether or not values remain. The receiver
     /// must retire an old ring before its registration can be reused; it
     /// does so on a receive that finds the dropped sender's lane empty.
+    /// Explicitly closed lanes stop counting immediately; `Deferred` teardown
+    /// can still retain their unread storage until those senders drop.
     /// Returns [`TryRegisterBoundedError::AtCapacity`] when the limit is reached.
     pub fn try_register_bounded(&self, max_lanes: usize) -> Result<Self, TryRegisterBoundedError> {
         let (key, signal, producer) = self.shared.register_sender(max_lanes)?;
@@ -81,7 +93,7 @@ impl<T, P: Teardown> Sender<T, P> {
         })
     }
 
-    /// Number of allocated rings, including dropped senders awaiting drain.
+    /// Number of receive lanes, including dropped senders awaiting drain.
     pub fn registered_lanes(&self) -> usize {
         self.shared.registered_lanes.load(Ordering::Acquire)
     }
@@ -338,11 +350,11 @@ impl<T, P: Teardown> Sender<T, P> {
         self.producer.is_full()
     }
 
-    /// Return whether the receiver has been dropped.
+    /// Return whether the receiver has been dropped or this lane was closed.
     #[inline]
     #[must_use]
     pub fn is_disconnected(&self) -> bool {
-        !self.shared.receiver_alive.load(Ordering::Acquire)
+        !self.shared.receiver_alive.load(Ordering::Acquire) || self.producer.is_consumer_dropped()
     }
 
     /// Return a snapshot of the number of live senders.
