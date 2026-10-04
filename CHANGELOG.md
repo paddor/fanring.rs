@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-10-04
+
+### Changed
+
+- Require yring 0.3.19 with caller-controlled consumer batch release hints
+  and asynchronous producer capacity polling.
+
 ## [0.3.7] - 2026-09-26
 
 ### Added
