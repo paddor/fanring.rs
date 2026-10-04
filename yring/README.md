@@ -132,11 +132,14 @@ consumer wakes the producer on release.
 `AsyncConsumer`'s `Stream` implementation releases each item before returning
 it. Use `prefetch()`/`pop()`/`release()` directly for batched release.
 `push_async()` buffers without flushing; flush pending items before awaiting
-space in a full ring.
+space in a full ring. `AsyncProducer::poll_ready()` registers a capacity waker
+without taking a value; ready also covers consumer shutdown. Check
+`is_consumer_dropped()` before retrying admission.
 
 ## Wakeup hints
 
-`flush_and_check()` and `prefetch_and_pop_with_full()` provide conservative
+`flush_and_check()`, `prefetch_and_pop_with_full()`, and
+`release_with_full()` provide conservative
 wakeup hints. Their booleans include registered waiters, so they are not
 exact empty/full snapshots. Signal whenever the returned hint is true.
 Calling either helper enables registration on the opposite endpoint. Hints
@@ -154,6 +157,13 @@ Exhausting the cached `pop()` window alone does not register a waiter.
 Ordinary `flush()` and `release()` still use one Release store. Use these
 when a separate signaling protocol handles wakeups.
 
+For batched consumers, `release_with_full()` publishes only popped slots and
+returns whether the producer needs a wake. Call it at the batch boundaries
+chosen by your transport, and signal whenever it returns true. A call with no
+newly consumed slots returns false without clearing a producer registration.
+The queue sets no release watermark. Hints include producer registrations
+beyond the consumer's cached tail, including unpublished full slots.
+
 ## Correctness checks
 
 The unsafe ring core is checked with Miri:
@@ -168,6 +178,10 @@ The Loom suite models SPSC cursor ordering, wraparound, producer drop,
 ```sh
 RUSTFLAGS="--cfg loom" cargo test -p yring --features async --test loom
 ```
+
+Loom builds model `AtomicWaker`'s documented registration/wake ordering with
+a Loom mutex. Production builds use `atomic-waker` directly. The models cover
+ring ordering and wake delivery while assuming that dependency's contract.
 
 ## Benchmarks
 

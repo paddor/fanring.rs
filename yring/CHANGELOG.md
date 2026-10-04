@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `AsyncProducer::poll_ready()` registers capacity wakes without owning a
+  value. It becomes ready when capacity is available or the consumer drops.
+
+- `Consumer::release_with_full()` publishes batched consumed credits and
+  reports whether a full or registered producer needs a wake. It preserves
+  unread prefetched slots and leaves release watermarks to the caller.
+
 ## [0.3.18] - 2026-09-26
 
 ### Added
