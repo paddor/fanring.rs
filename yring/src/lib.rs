@@ -1054,6 +1054,29 @@ mod tests {
     }
 
     #[test]
+    fn release_with_full_preserves_owned_values_after_slot_reuse() {
+        let (mut producer, mut consumer) = spsc(2);
+        assert!(!consumer.release_with_full());
+        producer.push(Box::new(10)).unwrap();
+        producer.push_and_flush(Box::new(20)).unwrap();
+        assert!(producer.is_full());
+        assert_eq!(consumer.prefetch(), 2);
+
+        let first = consumer.pop().unwrap();
+        assert!(consumer.release_with_full());
+        producer.push_and_flush(Box::new(30)).unwrap();
+        assert!(producer.push(Box::new(40)).is_err());
+        let second = consumer.pop().unwrap();
+        assert!(consumer.release_with_full());
+
+        assert_eq!(consumer.prefetch(), 1);
+        let third = consumer.pop().unwrap();
+        assert!(!consumer.release_with_full());
+        // Popped allocations and the unread cached slot survive ring reuse.
+        assert_eq!((*first, *second, *third), (10, 20, 30));
+    }
+
+    #[test]
     fn release_with_full_observes_unpublished_full_slots() {
         let (mut producer, mut consumer) = spsc(2);
         assert!(!consumer.release_with_full());

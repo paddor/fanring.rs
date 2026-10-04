@@ -179,6 +179,10 @@ The Loom suite models SPSC cursor ordering, wraparound, producer drop,
 RUSTFLAGS="--cfg loom" cargo test -p yring --features async --test loom
 ```
 
+Loom builds model `AtomicWaker`'s documented registration/wake ordering with
+a Loom mutex. Production builds use `atomic-waker` directly. The models cover
+ring ordering and wake delivery while assuming that dependency's contract.
+
 ## Benchmarks
 
 Cross-thread throughput (M items/s), 2 seconds per configuration,

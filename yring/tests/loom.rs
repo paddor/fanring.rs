@@ -624,6 +624,94 @@ fn poll_ready_pending_receives_space_wake() {
     });
 }
 
+#[test]
+fn poll_ready_replaces_cancelled_waiter_without_losing_space_wake() {
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct CountWakes(AtomicUsize);
+
+    impl Wake for CountWakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    loom::model(|| {
+        let (mut producer, mut consumer) = yring::async_spsc::<u32>(1);
+        producer.push_and_flush(10).unwrap();
+        let old_notifications = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let old_waker = Waker::from(old_notifications.clone());
+        assert_eq!(
+            producer.poll_ready(&mut Context::from_waker(&old_waker)),
+            Poll::Pending
+        );
+        // Cancel the first wait. The next wait supplies a different waker.
+        let notifications = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = Waker::from(notifications.clone());
+        let released = Arc::new(AtomicBool::new(false));
+        let released_for_producer = released.clone();
+        let sender = thread::spawn(move || {
+            let result = producer.poll_ready(&mut Context::from_waker(&waker));
+            while !released_for_producer.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+            (producer, result)
+        });
+
+        assert_eq!(consumer.prefetch_and_pop(), Some(10));
+        released.store(true, Ordering::Release);
+        let (mut producer, result) = sender.join().unwrap();
+        // An old wake or endpoint drop must not rescue an unwoken new waiter.
+        match result {
+            Poll::Pending => assert!(notifications.0.load(Ordering::Relaxed) > 0),
+            Poll::Ready(()) => assert!(!producer.is_full()),
+        }
+    });
+}
+
+#[test]
+fn poll_ready_pending_receives_concurrent_shutdown_wake() {
+    use std::sync::Arc;
+    use std::task::{Context, Wake, Waker};
+
+    use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct CountWakes(AtomicUsize);
+
+    impl Wake for CountWakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    loom::model(|| {
+        let (mut producer, consumer) = yring::async_spsc::<u32>(1);
+        producer.push_and_flush(10).unwrap();
+        let notifications = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = Waker::from(notifications.clone());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_for_producer = dropped.clone();
+        let sender = thread::spawn(move || {
+            let result = producer.poll_ready(&mut Context::from_waker(&waker));
+            while !dropped_for_producer.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+            (producer, result)
+        });
+
+        drop(consumer);
+        dropped.store(true, Ordering::Release);
+        let (producer, result) = sender.join().unwrap();
+        assert!(producer.is_consumer_dropped());
+        if result.is_pending() {
+            assert!(notifications.0.load(Ordering::Relaxed) > 0);
+        }
+    });
+}
+
 /// Verify `push_async` detects consumer drop.
 #[test]
 fn push_async_consumer_dropped() {
@@ -928,7 +1016,7 @@ fn pop_into_moves_concurrently_published_windows_in_order() {
             if c.prefetch() > 0 {
                 let before = out.len();
                 let moved = c.pop_into(&mut out, 2);
-                assert!(moved >= 1 && moved <= 2);
+                assert!((1..=2).contains(&moved));
                 assert_eq!(out.len(), before + moved);
                 assert_eq!(c.pop_into(&mut out, 2), 0);
                 c.release();
@@ -1057,7 +1145,7 @@ fn pop_into_while_moves_accepted_prefix_of_concurrent_windows() {
 
 #[test]
 fn release_with_full_does_not_miss_registration_beyond_cached_tail() {
-    for check_full in [false, true] {
+    for (check_full, publish) in [(false, false), (false, true), (true, false), (true, true)] {
         for armed in [false, true] {
             for wrap in [false, true] {
                 loom::model(move || {
@@ -1079,7 +1167,10 @@ fn release_with_full_does_not_miss_registration_beyond_cached_tail() {
                     producer.push_and_flush(1).unwrap();
                     assert_eq!(consumer.prefetch(), 1);
                     let publisher = thread::spawn(move || {
-                        producer.push_and_flush(2).unwrap();
+                        producer.push(2).unwrap();
+                        if publish {
+                            producer.flush();
+                        }
                         let blocked = if check_full {
                             producer.is_full()
                         } else {
@@ -1091,12 +1182,17 @@ fn release_with_full_does_not_miss_registration_beyond_cached_tail() {
                     let wake = consumer.release_with_full();
                     // The cached tail excludes item 2. This release is the
                     // only wake; endpoints remain alive across the assertion.
-                    let (producer, blocked) = publisher.join().unwrap();
+                    let (mut producer, blocked) = publisher.join().unwrap();
                     if blocked {
                         assert!(wake, "full producer lost its partial-release wake");
                     }
-                    assert_eq!(consumer.prefetch(), 1);
+                    producer.flush();
+                    let expected = if !check_full && !blocked { 2 } else { 1 };
+                    assert_eq!(consumer.prefetch(), expected);
                     assert_eq!(consumer.pop(), Some(2));
+                    if expected == 2 {
+                        assert_eq!(consumer.pop(), Some(3));
+                    }
                     let _ = consumer.release_with_full();
                     drop(producer);
                 });
