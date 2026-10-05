@@ -21,6 +21,84 @@ fn model(check: impl Fn() + Sync + Send + 'static) {
 }
 
 #[test]
+fn mixed_capacity_lanes_release_and_resume_independently() {
+    model(|| {
+        let (mut small, mut rx) = channel(1);
+        let mut large = small.try_register_with_capacity(4).unwrap();
+        let lane = large.lane();
+        rx.pause(&lane).unwrap();
+        let sender = thread::spawn(move || {
+            for value in 0..4 {
+                large.try_send(value).unwrap();
+            }
+            large
+        });
+        small.try_send(99).unwrap();
+        // The concurrent publisher may have claimed an empty ready page but
+        // not published its group bit yet. Retry that transient empty probe.
+        loop {
+            match rx.try_recv_fair() {
+                Ok(value) => {
+                    assert_eq!(value, 99);
+                    break;
+                }
+                Err(TryRecvError::Empty) => thread::yield_now(),
+                Err(TryRecvError::Disconnected) => panic!("live lanes disconnected"),
+            }
+        }
+        assert_eq!(rx.try_recv_fair(), Err(TryRecvError::Empty));
+        let mut large = sender.join().unwrap();
+        assert_eq!(large.capacity(), 4);
+        assert!(large.is_full());
+        assert_eq!(rx.try_recv_from(&lane), Ok(0));
+        rx.resume(&lane).unwrap();
+        for value in 1..4 {
+            assert_eq!(rx.try_recv_fair(), Ok(value));
+        }
+        rx.release_consumed();
+        large.try_send(4).unwrap();
+        assert_eq!(rx.try_recv_fair(), Ok(4));
+    });
+}
+
+#[test]
+fn externally_signaled_tagged_poll_cannot_strand_an_unpaused_lane() {
+    use loom::sync::atomic::fence;
+    model(|| {
+        let (mut paused, mut rx) = channel(2);
+        let mut live = paused.try_register().unwrap();
+        let lane = live.lane();
+        rx.pause(&paused.lane()).unwrap();
+        paused.try_send_unsignaled(9).unwrap();
+        let sleeping = Arc::new(AtomicBool::new(false));
+        let sender = {
+            let sleeping = sleeping.clone();
+            thread::spawn(move || {
+                live.try_send_unsignaled(1).unwrap();
+                fence(Ordering::SeqCst);
+                let woke = sleeping.load(Ordering::Acquire);
+                (live, woke)
+            })
+        };
+        rx.poll_all_lanes();
+        let mut received = rx.with_lane_ids().try_recv_fair().ok();
+        if received.is_none() {
+            sleeping.store(true, Ordering::Release);
+            fence(Ordering::SeqCst);
+            rx.poll_all_lanes();
+            received = rx.with_lane_ids().try_recv_fair().ok();
+        }
+        let (_live, woke) = sender.join().unwrap();
+        assert!(received.is_some() || woke, "unsignaled value stranded");
+        rx.poll_all_lanes();
+        let received = received.or_else(|| rx.with_lane_ids().try_recv_fair().ok());
+        assert_eq!(received, Some((lane, 1)));
+        assert_eq!(rx.try_recv_fair(), Err(TryRecvError::Empty));
+        assert_eq!(rx.try_recv_from(&paused.lane()), Ok(9));
+    });
+}
+
+#[test]
 fn tagged_receive_racing_send_identifies_the_paused_lane() {
     model(|| {
         let (mut tx, mut rx) = channel(2);

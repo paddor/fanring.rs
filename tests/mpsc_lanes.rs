@@ -3,6 +3,92 @@
 use fanring::mpsc::{RecvError, TryRecvError, TrySendError, channel};
 
 #[test]
+fn readiness_poll_finds_unsignaled_values_without_resuming_paused_lanes() {
+    let (mut a, mut rx) = channel(4);
+    let mut b = a.try_register().unwrap();
+    a.try_send_unsignaled(1).unwrap();
+    a.try_send_unsignaled(2).unwrap();
+    b.try_send_unsignaled(11).unwrap();
+    b.try_send_unsignaled(12).unwrap();
+    rx.poll_all_lanes();
+    assert_eq!(rx.with_lane_ids().try_recv_fair(), Ok((a.lane(), 1)));
+    rx.pause(&a.lane()).unwrap();
+    // Repeated polling queues each active source only once.
+    rx.poll_all_lanes();
+    rx.poll_all_lanes();
+    assert_eq!(rx.with_lane_ids().try_recv_fair(), Ok((b.lane(), 11)));
+    assert_eq!(rx.with_lane_ids().try_recv_fair(), Ok((b.lane(), 12)));
+    assert_eq!(rx.try_recv_fair(), Err(TryRecvError::Empty));
+    assert_eq!(rx.try_recv_from(&a.lane()), Ok(2));
+    a.try_send_unsignaled(3).unwrap();
+    rx.poll_all_lanes();
+    assert_eq!(rx.try_recv_fair(), Err(TryRecvError::Empty));
+    rx.resume(&a.lane()).unwrap();
+    assert_eq!(rx.with_lane_ids().try_recv_fair(), Ok((a.lane(), 3)));
+}
+
+#[test]
+fn mixed_capacity_lanes_keep_independent_bounds_and_pause_state() {
+    fn check<P: fanring::teardown::Teardown>() {
+        let (mut small, mut rx) = fanring::mpsc::channel_with_policy::<_, P>(2);
+        let mut large = small.try_register_with_capacity(5).unwrap();
+        let mut ordinary = large.try_register().unwrap();
+        assert_eq!(small.capacity(), 2);
+        assert_eq!(large.capacity(), 8);
+        assert_eq!(ordinary.capacity(), 2);
+        for value in 0..8 {
+            large.try_send(value).unwrap();
+        }
+        assert!(matches!(large.try_send(8), Err(TrySendError::Full(8))));
+        small.try_send(20).unwrap();
+        ordinary.try_send(30).unwrap();
+        rx.pause(&large.lane()).unwrap();
+        assert_eq!(rx.try_recv_fair(), Ok(20));
+        assert_eq!(rx.try_recv_fair(), Ok(30));
+        assert_eq!(rx.try_recv_fair(), Err(TryRecvError::Empty));
+        assert_eq!(rx.try_recv_from(&large.lane()), Ok(0));
+        rx.resume(&large.lane()).unwrap();
+        for value in 1..8 {
+            assert_eq!(rx.try_recv(), Ok(value));
+        }
+        rx.release_consumed();
+        for value in 0..8 {
+            large.try_send(value).unwrap();
+        }
+        assert!(large.is_full());
+        let old = large.lane();
+        rx.close_lane(&old).unwrap();
+        let mut replacement = small.try_register_with_capacity(3).unwrap();
+        assert_eq!(replacement.capacity(), 4);
+        assert_ne!(replacement.lane(), old);
+        assert_eq!(rx.try_recv_from(&old), Err(TryRecvError::Disconnected));
+        replacement.try_send(99).unwrap();
+        assert_eq!(rx.try_recv(), Ok(99));
+    }
+    check::<fanring::teardown::Deferred>();
+    check::<fanring::teardown::Coordinated>();
+}
+
+#[test]
+fn custom_capacity_registration_validates_before_allocation_and_reports_disconnect() {
+    let (sender, receiver) = channel::<u8>(2);
+    for capacity in [0, fanring::mpsc::MAX_CAPACITY_PER_SENDER + 1] {
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sender.try_register_with_capacity(capacity)
+            }))
+            .is_err()
+        );
+        assert_eq!(sender.registered_lanes(), 1);
+    }
+    drop(receiver);
+    assert!(matches!(
+        sender.try_register_with_capacity(8),
+        Err(fanring::mpsc::TryRegisterError::Disconnected)
+    ));
+}
+
+#[test]
 fn returned_ids_distinguish_identical_values_and_control_the_popped_lane() {
     let (mut tx0, mut rx) = channel(4);
     let mut tx1 = tx0.try_clone().unwrap();

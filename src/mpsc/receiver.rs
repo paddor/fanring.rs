@@ -779,13 +779,19 @@ impl<T, P: Teardown> Receiver<T, P> {
         limit: usize,
         mut admit: impl FnMut(&T) -> bool,
     ) -> Result<usize, TryRecvError> {
-        self.activate_all_lanes();
+        self.poll_all_lanes();
         self.try_recv_batch_into_while(output, limit, &mut admit)
     }
 
-    /// Put every unpaused registered lane in the rotation, keeping the current order
-    /// of lanes that are already queued.
-    fn activate_all_lanes(&mut self) {
+    /// Check every unpaused registered lane on subsequent receives, including
+    /// values sent with [`Sender::try_send_unsignaled`](super::Sender::try_send_unsignaled).
+    ///
+    /// Keeps the order of already active lanes and adds each other lane once.
+    /// Does not consume values, resume paused lanes, or wake a blocked receiver.
+    /// Call before a scalar or tagged receive when providing an external
+    /// wake protocol. That protocol still needs the fences documented on the
+    /// unsignaled send method before allowing the consumer to sleep.
+    pub fn poll_all_lanes(&mut self) {
         self.refresh_registry();
         for (slot, lane) in self.lanes.iter_mut().enumerate() {
             let Some(lane) = lane else { continue };

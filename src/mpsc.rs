@@ -223,6 +223,7 @@ impl<T, P: Teardown> Shared<T, P> {
     fn register_sender(
         &self,
         max_lanes: usize,
+        capacity: usize,
     ) -> Result<(LaneKey, Arc<LaneSignal>, crate::ring::Producer<T, P>), TryRegisterBoundedError>
     {
         if !self.receiver_alive.load(Ordering::Acquire) {
@@ -239,7 +240,7 @@ impl<T, P: Teardown> Shared<T, P> {
         }
         let (key, page) = registry.allocate_lane();
         let signal = Arc::new(LaneSignal::new(page, key.slot));
-        let (producer, consumer) = crate::ring::spsc(self.capacity_per_sender);
+        let (producer, consumer) = crate::ring::spsc(capacity);
         registry.pending.push(PendingLane {
             key,
             signal: signal.clone(),

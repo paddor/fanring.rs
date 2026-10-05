@@ -78,6 +78,16 @@ that application code processes the message.
 
 ## MPSC
 
+`Sender::try_register_with_capacity(capacity)` creates a lane with its own
+bounded ring, rounded up to a power of two. Cloning or ordinarily registering
+from that sender still uses the channel's original capacity. Teardown and wait
+policy are shared as for ordinary registration.
+
+For an external wake protocol, `try_send_unsignaled` avoids duplicate readiness
+signaling. `Receiver::poll_all_lanes()` adds all unpaused lanes to the existing
+receive rotation before ordinary or tagged receives. Follow the unsignaled
+method's fence requirements before letting the consumer sleep.
+
 `Sender::lane()` returns an opaque identity for one channel and registration.
 `Receiver::pause(&lane)` excludes it from ordinary, fair, bulk, scan, and
 iterator receives. The sender can still fill its bounded ring. Use

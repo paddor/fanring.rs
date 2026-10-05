@@ -73,6 +73,29 @@ impl<T, P: Teardown> Sender<T, P> {
             })
     }
 
+    /// Register another sender with an independent ring capacity.
+    ///
+    /// Capacity is rounded up to a power of two. Ordinary registrations still
+    /// use the channel's original capacity, including clones of this sender.
+    /// Wait strategy and teardown policy follow this sender as usual.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TryRegisterError::Disconnected`] when the receiver is gone.
+    ///
+    /// # Panics
+    ///
+    /// Panics when capacity is zero or exceeds [`super::MAX_CAPACITY_PER_SENDER`].
+    pub fn try_register_with_capacity(&self, capacity: usize) -> Result<Self, TryRegisterError> {
+        crate::config::validate_capacity(capacity, super::MAX_CAPACITY_PER_SENDER)
+            .unwrap_or_else(|error| panic!("{error}"));
+        self.register_with_capacity(usize::MAX, capacity)
+            .map_err(|error| match error {
+                TryRegisterBoundedError::Disconnected => TryRegisterError::Disconnected,
+                TryRegisterBoundedError::AtCapacity => unreachable!("unbounded registration"),
+            })
+    }
+
     /// Register only if fewer than `max_lanes` receive lanes are registered.
     ///
     /// Includes this sender and dropped senders whose lanes the receiver has
@@ -83,7 +106,15 @@ impl<T, P: Teardown> Sender<T, P> {
     /// can still retain their unread storage until those senders drop.
     /// Returns [`TryRegisterBoundedError::AtCapacity`] when the limit is reached.
     pub fn try_register_bounded(&self, max_lanes: usize) -> Result<Self, TryRegisterBoundedError> {
-        let (key, signal, producer) = self.shared.register_sender(max_lanes)?;
+        self.register_with_capacity(max_lanes, self.shared.capacity_per_sender)
+    }
+
+    fn register_with_capacity(
+        &self,
+        max_lanes: usize,
+        capacity: usize,
+    ) -> Result<Self, TryRegisterBoundedError> {
+        let (key, signal, producer) = self.shared.register_sender(max_lanes, capacity)?;
         Ok(Self {
             shared: self.shared.clone(),
             producer,
@@ -156,10 +187,10 @@ impl<T, P: Teardown> Sender<T, P> {
     ///
     /// [`Receiver::try_recv_scan_into_while`](super::Receiver::try_recv_scan_into_while)
     /// finds values sent this way because it visits every registered lane.
-    /// Other receives find them only after a later signaled send or
-    /// [`flush`](Self::flush) on the same
-    /// lane, which marks it ready. Signaled and unsignaled sends may be mixed
-    /// on one lane.
+    /// [`Receiver::poll_all_lanes`](super::Receiver::poll_all_lanes) also makes
+    /// them discoverable through ordinary and tagged receives. Otherwise those
+    /// receives need a later signaled send or [`flush`](Self::flush) on the same
+    /// lane. Signaled and unsignaled sends may be mixed on one lane.
     ///
     /// The caller provides the wakeup. Between this send and reading its own
     /// wake flag, the caller needs a sequentially consistent fence, and the
