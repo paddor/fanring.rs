@@ -3,6 +3,57 @@
 use fanring::mpsc::{RecvError, TryRecvError, TrySendError, channel};
 
 #[test]
+fn closed_lane_rejects_sends_with_cached_space() {
+    fn check<P: fanring::teardown::Teardown>() {
+        use fanring::mpsc::{SendError, SendTimeoutError};
+        use std::time::{Duration, Instant};
+
+        let (mut tx, mut rx) = fanring::mpsc::channel_with_policy::<_, P>(4);
+        tx.try_send(0).unwrap();
+        assert_eq!(rx.try_recv(), Ok(0));
+        let old = tx.lane();
+        rx.pause(&old).unwrap();
+        rx.close_lane(&old).unwrap();
+        let mut replacement = tx.try_register_bounded(1).unwrap();
+
+        assert!(tx.is_disconnected());
+        assert_eq!(tx.try_send(1), Err(TrySendError::Disconnected(1)));
+        assert_eq!(
+            tx.try_send_unsignaled(2),
+            Err(TrySendError::Disconnected(2))
+        );
+        assert_eq!(tx.send(3), Err(SendError(3)));
+        assert_eq!(
+            tx.send_timeout(4, Duration::ZERO),
+            Err(SendTimeoutError::Disconnected(4))
+        );
+        assert_eq!(
+            tx.send_deadline(5, Instant::now()),
+            Err(SendTimeoutError::Disconnected(5))
+        );
+        #[cfg(feature = "async")]
+        assert_eq!(
+            futures_lite::future::block_on(tx.send_async(6)),
+            Err(SendError(6))
+        );
+        replacement.try_send(7).unwrap();
+        assert_eq!(rx.with_lane_ids().try_recv(), Ok((replacement.lane(), 7)));
+    }
+    check::<fanring::teardown::Deferred>();
+    check::<fanring::teardown::Coordinated>();
+}
+
+#[test]
+fn closed_lane_rejects_deferred_sends() {
+    let (mut tx, mut rx) = channel(4);
+    tx.try_send_deferred(1).unwrap();
+    rx.close_lane(&tx.lane()).unwrap();
+    assert_eq!(tx.try_send_deferred(2), Err(TrySendError::Disconnected(2)));
+    tx.flush();
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[test]
 fn readiness_poll_finds_unsignaled_values_without_resuming_paused_lanes() {
     let (mut a, mut rx) = channel(4);
     let mut b = a.try_register().unwrap();

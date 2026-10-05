@@ -1,7 +1,7 @@
 #![cfg(all(feature = "async", loom, target_pointer_width = "64"))]
 
+use loom::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 use fanring::mpsc;

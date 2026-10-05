@@ -19,6 +19,12 @@ All notable changes to this project are documented here.
   and close a lane independently. Paused lanes retain FIFO and backpressure;
   targeted receives remain available and stale IDs cannot select reused slots.
 
+### Fixed
+
+- Closing a deferred MPSC lane rejects subsequent sends even when the producer
+  still has cached space. Signaled, unsignaled, and deferred sends check the
+  lane's own disconnect state.
+
 ## [0.3.8] - 2026-10-04
 
 ### Changed

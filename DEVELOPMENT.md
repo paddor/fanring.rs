@@ -6,7 +6,7 @@
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-RUSTFLAGS="--cfg loom" cargo test -p fanring --features async --lib --test loom --test async_loom --test credit_loom -- --test-threads=1
+RUSTFLAGS="--cfg loom" cargo test -p fanring --features async --lib --test loom --test async_loom --test credit_loom --test lane_loom -- --test-threads=1
 cargo +nightly miri test -p fanring --all-features -- --test-threads=1
 MIRIFLAGS="-Zmiri-tree-borrows" \
   cargo +nightly miri test -p fanring --all-features -- --test-threads=1
@@ -51,7 +51,9 @@ blocking and async registration races, repeated half-ring releases, partial
 flushes, bulk/admission boundaries, cancellation, waker replacement, timeout,
 disconnect, and deferred publication. Endpoints stay alive across joins so
 drop notifications cannot hide a missed capacity wake. Async wake counters
-are Loom atomics. The dependency's `AtomicWaker` internals are not instrumented;
+are Loom atomics. `lane_loom` covers pause/resume, targeted drainage, mixed
+capacities, stale IDs, closure, and tagged receive cancellation with both
+teardown policies. The dependency's `AtomicWaker` internals are not instrumented;
 these models check fanring's publication/registration protocol, assuming that
 dependency's register/wake contract. They are bounded exploration, not a proof
 of all schedules or arbitrary queue sizes.
