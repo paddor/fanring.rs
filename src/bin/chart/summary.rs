@@ -27,7 +27,7 @@ const SERIES: &[Series] = &[
         mpsc_key: "fanring-coordinated",
         mpmc_key: Some("fanring-coordinated-mpmc"),
         label: "fanring Coordinated",
-        color: RGBColor(0xfb, 0xbf, 0x24),
+        color: RGBColor(0xc9, 0x4b, 0x4b),
     },
     Series {
         mpsc_key: "crossbeam-channel",

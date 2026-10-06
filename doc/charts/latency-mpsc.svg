@@ -28,7 +28,7 @@ Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off; capacity 
 </text>
 <polyline fill="none" opacity="1" stroke="#30363D" stroke-width="2" points="70,296 1000,296 "/>
 <rect x="82" y="141" width="27" height="155" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="112" y="288" width="27" height="8" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="112" y="288" width="27" height="8" opacity="1" fill="#C94B4B" stroke="none"/>
 <rect x="142" y="144" width="28" height="152" opacity="1" fill="#60A5FA" stroke="none"/>
 <rect x="173" y="126" width="27" height="170" opacity="1" fill="#22D3EE" stroke="none"/>
 <rect x="203" y="148" width="27" height="148" opacity="1" fill="#A78BFA" stroke="none"/>
@@ -38,7 +38,7 @@ Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off; capacity 
 p50
 </text>
 <rect x="315" y="111" width="27" height="185" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="345" y="286" width="27" height="10" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="345" y="286" width="27" height="10" opacity="1" fill="#C94B4B" stroke="none"/>
 <rect x="375" y="116" width="27" height="180" opacity="1" fill="#60A5FA" stroke="none"/>
 <rect x="405" y="97" width="27" height="199" opacity="1" fill="#22D3EE" stroke="none"/>
 <rect x="435" y="119" width="28" height="177" opacity="1" fill="#A78BFA" stroke="none"/>
@@ -48,7 +48,7 @@ p50
 p99
 </text>
 <rect x="547" y="149" width="27" height="147" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="577" y="291" width="27" height="5" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="577" y="291" width="27" height="5" opacity="1" fill="#C94B4B" stroke="none"/>
 <rect x="607" y="145" width="28" height="151" opacity="1" fill="#60A5FA" stroke="none"/>
 <rect x="638" y="123" width="27" height="173" opacity="1" fill="#22D3EE" stroke="none"/>
 <rect x="668" y="123" width="27" height="173" opacity="1" fill="#A78BFA" stroke="none"/>
@@ -58,7 +58,7 @@ p99
 p50
 </text>
 <rect x="780" y="116" width="27" height="180" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="810" y="290" width="27" height="6" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="810" y="290" width="27" height="6" opacity="1" fill="#C94B4B" stroke="none"/>
 <rect x="840" y="117" width="27" height="179" opacity="1" fill="#60A5FA" stroke="none"/>
 <rect x="870" y="93" width="27" height="203" opacity="1" fill="#22D3EE" stroke="none"/>
 <rect x="900" y="93" width="28" height="203" opacity="1" fill="#A78BFA" stroke="none"/>
@@ -77,7 +77,7 @@ blocked sender
 <text x="58" y="376" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
 fanring
 </text>
-<rect x="280" y="370" width="12" height="12" opacity="1" fill="#34D399" stroke="none"/>
+<rect x="280" y="370" width="12" height="12" opacity="1" fill="#C94B4B" stroke="none"/>
 <text x="298" y="376" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
 fanring spin
 </text>

@@ -19,7 +19,7 @@ const MUTED: RGBColor = RGBColor(0x7d, 0x85, 0x90);
 
 const MPSC_SERIES: &[Series] = &[
     Series::new("fanring", "fanring", RGBColor(0xf8, 0x71, 0x71)),
-    Series::new("fanring-spin", "fanring spin", RGBColor(0x34, 0xd3, 0x99)),
+    Series::new("fanring-spin", "fanring spin", RGBColor(0xc9, 0x4b, 0x4b)),
     Series::new(
         "crossbeam-channel",
         "crossbeam-channel 0.5.16",
@@ -36,7 +36,7 @@ const MPMC_SERIES: &[Series] = &[
     Series::new(
         "fanring-spin-mpmc",
         "fanring spin",
-        RGBColor(0x34, 0xd3, 0x99),
+        RGBColor(0xc9, 0x4b, 0x4b),
     ),
     Series::new(
         "crossbeam-channel",
