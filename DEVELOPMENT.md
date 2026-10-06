@@ -248,6 +248,10 @@ sent/received counts. Implementations rotate order between samples. Raw rows
 are appended to `~/.cache/yring/comparison.jsonl`; the chart selects the latest
 complete compatible run and plots medians.
 
+All consumers read each payload through `std::hint::black_box`, including
+each value in `rtrb` read chunks. Receive loops check time once per 1024
+iterations. Result rows record both settings; the chart rejects mixed workloads.
+
 `YRING_BENCH_SECS`, `YRING_BENCH_SAMPLES`, `YRING_BENCH_WARMUP_SECS`,
 `YRING_BENCH_CPUS` (producer,consumer CPU IDs), `YRING_BENCH_RESULTS`, and
 `YRING_BENCH_SOURCE_REVISION` override defaults. Outside a Git checkout, provide

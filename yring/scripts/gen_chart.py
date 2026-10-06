@@ -32,10 +32,10 @@ COLORS = {
 LABELS = {
     "yring (batch=1)":    "yring (flush every item)",
     "yring (batch=64)":   "yring (batch=64)",
-    "rtrb per-item":      "rtrb v0.3 (per-item)",
-    "rtrb chunked":       "rtrb v0.3 (chunk API, batch=64)",
-    "crossbeam bounded":  "crossbeam-channel v0.5 (bounded MPMC)",
-    "flume bounded":      "flume v0.12 (bounded MPMC)",
+    "rtrb per-item":      "rtrb 0.4.0 (per-item)",
+    "rtrb chunked":       "rtrb 0.4.0 (chunk API, batch=64)",
+    "crossbeam bounded":  "crossbeam-channel 0.5.17 (bounded MPMC)",
+    "flume bounded":      "flume 0.12.0 (bounded MPMC)",
 }
 
 def load_results(path):
@@ -53,8 +53,9 @@ def load_results(path):
                 or samples <= 0 or first["producer_cpu"] == first["consumer_cpu"]):
             continue
         fields = ("expected_rows", "samples", "capacity", "duration_secs",
-                  "warmup_secs", "producer_cpu", "consumer_cpu", "source_revision")
-        if any(any(row[field] != first[field] for field in fields) for row in rows):
+                  "warmup_secs", "producer_cpu", "consumer_cpu", "source_revision",
+                  "payload_handling", "time_check_interval")
+        if any(any(row.get(field) != first.get(field) for field in fields) for row in rows):
             continue
         groups = {}
         valid = True
@@ -260,6 +261,8 @@ def main():
     subtitle = (f"cap={row['capacity']}, median of {row['samples']} x "
                 f"{row['duration_secs']:g}s, producer CPU {row['producer_cpu']}, "
                 f"consumer CPU {row['consumer_cpu']}")
+    if row.get("payload_handling") == "read_each_value":
+        subtitle += "; each payload read"
     svg = generate_chart(results, subtitle, hardware_label())
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(svg)

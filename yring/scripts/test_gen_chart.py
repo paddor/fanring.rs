@@ -24,6 +24,8 @@ def measured_run(run_id="1"):
             "warmup_secs": 0.25,
             "producer_cpu": 0,
             "consumer_cpu": 1,
+            "payload_handling": "read_each_value",
+            "time_check_interval": 1024,
             "throughput_items_per_sec": (sample + 1) * 1_000_000,
         }
         for payload in ("u64", "[u8; 32]", "[u8; 64]", "[u8; 128]")
@@ -57,6 +59,8 @@ class ChartInputTests(unittest.TestCase):
     def test_rejects_duplicate_samples_and_mixed_configuration(self):
         for field, value in (("sample", 1), ("consumer_cpu", 2),
                              ("source_revision", "another-source"),
+                             ("payload_handling", "count_only"),
+                             ("time_check_interval", 1),
                              ("batch_size", 64)):
             with self.subTest(field=field):
                 rows = measured_run()

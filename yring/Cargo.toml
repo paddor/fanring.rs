@@ -26,8 +26,8 @@ loom = "0.7"
 core_affinity = "0.8.3"
 serde_json = "1"
 futures-lite = "2"
-rtrb = "0.3"
-crossbeam-channel = "0.5"
+rtrb = "0.4"
+crossbeam-channel = "0.5.17"
 flume = "0.12"
 
 [target.'cfg(all(loom, target_pointer_width = "64"))'.dev-dependencies]
