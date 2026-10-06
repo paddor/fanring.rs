@@ -5,6 +5,7 @@
 ```sh
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+python3 -m unittest discover -s yring/scripts -p 'test_*.py'
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 RUSTFLAGS="--cfg loom" cargo test -p fanring --features async --lib --test loom --test async_loom --test credit_loom --test lane_loom -- --test-threads=1
 cargo +nightly miri test -p fanring --all-features -- --test-threads=1
@@ -233,6 +234,27 @@ FANRING_BENCH_PROFILE=saturated cargo bench -p fanring --bench fanring_compariso
 
 ## Charts
 
+### SPSC comparison
+
+```sh
+cargo bench -p yring --bench yring_comparison
+python3 yring/scripts/gen_chart.py
+```
+
+The SPSC comparison runs five two-second samples per case after a 250 ms
+warmup. Producer and consumer threads are pinned to distinct physical cores
+when topology is available. Each sample drains accepted values and checks
+sent/received counts. Implementations rotate order between samples. Raw rows
+are appended to `~/.cache/yring/comparison.jsonl`; the chart selects the latest
+complete compatible run and plots medians.
+
+`YRING_BENCH_SECS`, `YRING_BENCH_SAMPLES`, `YRING_BENCH_WARMUP_SECS`,
+`YRING_BENCH_CPUS` (producer,consumer CPU IDs), `YRING_BENCH_RESULTS`, and
+`YRING_BENCH_SOURCE_REVISION` override defaults. Outside a Git checkout, provide
+the source revision explicitly. The generator accepts `--results` and `--output`.
+
+### MPSC and MPMC
+
 Generate an SVG from the latest benchmark run:
 
 ```sh
@@ -262,6 +284,9 @@ cargo run --example fanring-chart -- --summary
 Default output: `doc/charts/throughput-summary.svg`.
 
 Generate blocking wake-latency charts from the latest complete run:
+
+These charts include `fanring-spin`; collect that series with
+`FANRING_WAKE_SPIN_NS=50000` using the wake-latency command above.
 
 ```sh
 cargo run --example fanring-chart -- --latency mpsc
@@ -357,5 +382,6 @@ cargo run --locked --example teardown
 The last command checks owned-payload destruction separately from throughput.
 It prints destructor counts before and after dropping senders for the dependency
 versions in `Cargo.lock`. These sequential observations do not establish a
-competitor's behavior during concurrent publication. See [the teardown comparison](doc/teardown.md)
-for the policy contract and upstream issue references.
+competitor's behavior during concurrent publication. See
+[teardown ownership](DESIGN.md#teardown-policies) for the policy contract and
+[benchmark results](BENCHMARKS.md) for recorded charts.

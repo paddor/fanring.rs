@@ -50,6 +50,8 @@ jobs:
         run: cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
       - name: Check default features
         run: cargo +stable clippy --workspace --all-targets -- -D warnings
+      - name: Test SPSC chart inputs
+        run: python3 -m unittest discover -s yring/scripts -p 'test_*.py'
       - name: Build documentation
         env:
           RUSTDOCFLAGS: -D warnings

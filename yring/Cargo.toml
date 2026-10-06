@@ -23,6 +23,8 @@ futures-core = { version = "0.3", optional = true, default-features = false }
 loom = "0.7"
 
 [dev-dependencies]
+core_affinity = "0.8.3"
+serde_json = "1"
 futures-lite = "2"
 rtrb = "0.3"
 crossbeam-channel = "0.5"

@@ -48,7 +48,8 @@ include = [
     "LICENSE",
     "CHANGELOG.md",
     "DESIGN.md",
-    "doc/teardown.md",
+    "GETTING_STARTED.md",
+    "BENCHMARKS.md",
 ]
 
 [lints.rust]
