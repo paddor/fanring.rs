@@ -1,10 +1,19 @@
 use std::fs::{self, OpenOptions};
+use std::hint::black_box;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const TIME_CHECK_INTERVAL: u64 = 1024;
+
+fn before_deadline(deadline: Instant, polls: &mut u64) -> bool {
+    let check_time = *polls & (TIME_CHECK_INTERVAL - 1) == 0;
+    *polls += 1;
+    !check_time || Instant::now() < deadline
+}
 
 #[derive(Clone, Copy)]
 struct Config {
@@ -109,9 +118,12 @@ fn yring_bench<T: Copy + Send + 'static>(
     barrier.wait();
     let start = Instant::now();
     let mut received = 0u64;
-    while start.elapsed() < config.duration {
+    let deadline = start + config.duration;
+    let mut polls = 0;
+    while before_deadline(deadline, &mut polls) {
         if consumer.prefetch() > 0 {
-            while consumer.pop().is_some() {
+            while let Some(value) = consumer.pop() {
+                black_box(value);
                 received += 1;
             }
             consumer.release();
@@ -122,7 +134,8 @@ fn yring_bench<T: Copy + Send + 'static>(
     stop.store(true, Ordering::Relaxed);
     let sent = sender.join().unwrap();
     while consumer.prefetch() > 0 {
-        while consumer.pop().is_some() {
+        while let Some(value) = consumer.pop() {
+            black_box(value);
             received += 1;
         }
         consumer.release();
@@ -160,15 +173,21 @@ fn rtrb_per_item<T: Copy + Send + 'static>(
     barrier.wait();
     let start = Instant::now();
     let mut received = 0u64;
-    while start.elapsed() < config.duration {
+    let deadline = start + config.duration;
+    let mut polls = 0;
+    while before_deadline(deadline, &mut polls) {
         match consumer.pop() {
-            Ok(_) => received += 1,
+            Ok(value) => {
+                black_box(value);
+                received += 1;
+            }
             Err(_) => thread::yield_now(),
         }
     }
     stop.store(true, Ordering::Relaxed);
     let sent = sender.join().unwrap();
-    while consumer.pop().is_ok() {
+    while let Ok(value) = consumer.pop() {
+        black_box(value);
         received += 1;
     }
     rate(received, sent, start)
@@ -206,10 +225,16 @@ fn rtrb_chunked<T: Copy + Send + 'static>(
     barrier.wait();
     let start = Instant::now();
     let mut received = 0u64;
-    while start.elapsed() < config.duration {
+    let deadline = start + config.duration;
+    let mut polls = 0;
+    while before_deadline(deadline, &mut polls) {
         let avail = consumer.slots();
         if avail > 0 {
             if let Ok(chunk) = consumer.read_chunk(avail) {
+                let (first, second) = chunk.as_slices();
+                for &value in first.iter().chain(second) {
+                    black_box(value);
+                }
                 received += chunk.len() as u64;
                 chunk.commit_all();
             }
@@ -221,6 +246,10 @@ fn rtrb_chunked<T: Copy + Send + 'static>(
     let sent = sender.join().unwrap();
     while consumer.slots() > 0 {
         let chunk = consumer.read_chunk(consumer.slots()).unwrap();
+        let (first, second) = chunk.as_slices();
+        for &value in first.iter().chain(second) {
+            black_box(value);
+        }
         received += chunk.len() as u64;
         chunk.commit_all();
     }
@@ -257,15 +286,21 @@ fn crossbeam_bounded<T: Copy + Send + 'static>(
     barrier.wait();
     let start = Instant::now();
     let mut received = 0u64;
-    while start.elapsed() < config.duration {
+    let deadline = start + config.duration;
+    let mut polls = 0;
+    while before_deadline(deadline, &mut polls) {
         match rx.try_recv() {
-            Ok(_) => received += 1,
+            Ok(value) => {
+                black_box(value);
+                received += 1;
+            }
             Err(_) => thread::yield_now(),
         }
     }
     stop.store(true, Ordering::Relaxed);
     let sent = sender.join().unwrap();
-    while rx.try_recv().is_ok() {
+    while let Ok(value) = rx.try_recv() {
+        black_box(value);
         received += 1;
     }
     rate(received, sent, start)
@@ -301,15 +336,21 @@ fn flume_bounded<T: Copy + Send + 'static>(
     barrier.wait();
     let start = Instant::now();
     let mut received = 0u64;
-    while start.elapsed() < config.duration {
+    let deadline = start + config.duration;
+    let mut polls = 0;
+    while before_deadline(deadline, &mut polls) {
         match rx.try_recv() {
-            Ok(_) => received += 1,
+            Ok(value) => {
+                black_box(value);
+                received += 1;
+            }
             Err(_) => thread::yield_now(),
         }
     }
     stop.store(true, Ordering::Relaxed);
     let sent = sender.join().unwrap();
-    while rx.try_recv().is_ok() {
+    while let Ok(value) = rx.try_recv() {
+        black_box(value);
         received += 1;
     }
     rate(received, sent, start)
@@ -374,6 +415,8 @@ fn run_suite<T: Copy + Send + 'static>(run: &mut Run, payload: &str, val: T) {
                 "warmup_secs": run.warmup.as_secs_f64(),
                 "producer_cpu": run.config.cpus[0].id,
                 "consumer_cpu": run.config.cpus[1].id,
+                "payload_handling": "read_each_value",
+                "time_check_interval": TIME_CHECK_INTERVAL,
                 "throughput_items_per_sec": throughput,
             });
             serde_json::to_writer(&mut run.results, &row).expect("write benchmark row");

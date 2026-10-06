@@ -22,10 +22,10 @@ const MPSC_SERIES: &[Series] = &[
     Series::new("fanring-spin", "fanring spin", RGBColor(0xc9, 0x4b, 0x4b)),
     Series::new(
         "crossbeam-channel",
-        "crossbeam-channel 0.5.16",
+        "crossbeam-channel 0.5.17",
         RGBColor(0x60, 0xa5, 0xfa),
     ),
-    Series::new("crossfire", "crossfire 3.1.19", RGBColor(0x22, 0xd3, 0xee)),
+    Series::new("crossfire", "crossfire 3.1.20", RGBColor(0x22, 0xd3, 0xee)),
     Series::new("thingbuf", "thingbuf 0.1.6", RGBColor(0xa7, 0x8b, 0xfa)),
     Series::new("flume", "flume 0.12.0", RGBColor(0xf4, 0x72, 0xb6)),
     Series::new("kanal", "kanal 0.1.1*", RGBColor(0xf5, 0x9e, 0x0b)),
@@ -40,23 +40,21 @@ const MPMC_SERIES: &[Series] = &[
     ),
     Series::new(
         "crossbeam-channel",
-        "crossbeam-channel 0.5.16",
+        "crossbeam-channel 0.5.17",
         RGBColor(0x60, 0xa5, 0xfa),
     ),
     Series::new(
         "crossfire-mpmc",
-        "crossfire 3.1.19",
+        "crossfire 3.1.20",
         RGBColor(0x22, 0xd3, 0xee),
     ),
     Series::new("flume", "flume 0.12.0", RGBColor(0xf4, 0x72, 0xb6)),
     Series::new("kanal", "kanal 0.1.1*", RGBColor(0xf5, 0x9e, 0x0b)),
 ];
 
-const METRICS: &[Metric] = &[
-    Metric::new("recv_wake", "p50"),
-    Metric::new("recv_wake", "p99"),
-    Metric::new("send_wake", "p50"),
-    Metric::new("send_wake", "p99"),
+const OPERATIONS: &[(&str, &str)] = &[
+    ("recv_wake", "blocked receiver"),
+    ("send_wake", "blocked sender"),
 ];
 
 #[derive(Clone, Copy)]
@@ -69,29 +67,6 @@ struct Series {
 impl Series {
     const fn new(key: &'static str, label: &'static str, color: RGBColor) -> Self {
         Self { key, label, color }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Metric {
-    operation: &'static str,
-    percentile: &'static str,
-}
-
-impl Metric {
-    const fn new(operation: &'static str, percentile: &'static str) -> Self {
-        Self {
-            operation,
-            percentile,
-        }
-    }
-
-    fn value(self, row: &LatencyRow) -> u64 {
-        match self.percentile {
-            "p50" => row.p50_ns,
-            "p99" => row.p99_ns,
-            _ => unreachable!("known latency percentile"),
-        }
     }
 }
 
@@ -255,13 +230,13 @@ fn combine_latest_runs<'a>(
 
 fn complete_implementation(rows: &[&LatencyRow]) -> Option<LatencyShape> {
     let first = *rows.first()?;
-    if rows.len() != 2
+    if rows.len() != OPERATIONS.len()
         || rows
             .iter()
             .any(|row| latency_shape(row) != latency_shape(first))
-        || !["recv_wake", "send_wake"]
+        || !OPERATIONS
             .iter()
-            .all(|operation| rows.iter().any(|row| row.operation == *operation))
+            .all(|(operation, _)| rows.iter().any(|row| row.operation == *operation))
     {
         return None;
     }
@@ -299,9 +274,9 @@ fn complete_rows<'a>(rows: &[&'a LatencyRow], series: &[Series]) -> Option<Vec<&
             || row.capacity != first.capacity
             || row.settle_mode != first.settle_mode
             || row.settle_ns != first.settle_ns
-            || !METRICS
+            || !OPERATIONS
                 .iter()
-                .any(|metric| metric.operation == row.operation)
+                .any(|(operation, _)| *operation == row.operation)
         {
             return None;
         }
@@ -313,9 +288,9 @@ fn complete_rows<'a>(rows: &[&'a LatencyRow], series: &[Series]) -> Option<Vec<&
         }
     }
     let complete = series.iter().all(|candidate| {
-        METRICS
+        OPERATIONS
             .iter()
-            .all(|metric| selected.contains_key(&(candidate.key, metric.operation)))
+            .all(|(operation, _)| selected.contains_key(&(candidate.key, *operation)))
     });
     complete.then(|| selected.into_values().collect())
 }
@@ -366,35 +341,29 @@ fn draw(rows: &[&LatencyRow], series: &[Series], topology: &str, output: &Path) 
         .iter()
         .map(|row| ((row.implementation.as_str(), row.operation.as_str()), *row))
         .collect::<BTreeMap<_, _>>();
-    let max_value = METRICS
+    let max_value = rows
         .iter()
-        .flat_map(|metric| {
-            series.iter().filter_map(|candidate| {
-                values
-                    .get(&(candidate.key, metric.operation))
-                    .map(|row| metric.value(row) as f64)
-            })
-        })
+        .map(|row| row.p99_ns as f64)
         .fold(0.0_f64, f64::max);
     let y_max = (max_value * 1.15).max(1.0);
     draw_y_grid(&area, plot_left, plot_right, plot_top, plot_bottom, y_max)?;
 
-    let group_width = (plot_right - plot_left) / METRICS.len() as f64;
-    let bar_gap = 3.0;
-    let minimum_group_gap = 24.0;
-    let preferred_bar_width: f64 = if series.len() == 5 { 30.0 } else { 36.0 };
+    let group_width = (plot_right - plot_left) / OPERATIONS.len() as f64;
+    let bar_gap = 8.0;
+    let minimum_group_gap = 36.0;
+    let preferred_bar_width: f64 = 44.0;
     let available_bar_width =
         (group_width - minimum_group_gap - series.len().saturating_sub(1) as f64 * bar_gap)
             / series.len() as f64;
     let bar_width = preferred_bar_width.min(available_bar_width);
     let cluster_width =
         series.len() as f64 * bar_width + series.len().saturating_sub(1) as f64 * bar_gap;
-    for (metric_index, metric) in METRICS.iter().enumerate() {
+    for (operation_index, (operation, label)) in OPERATIONS.iter().enumerate() {
         let cluster_x =
-            plot_left + metric_index as f64 * group_width + (group_width - cluster_width) / 2.0;
+            plot_left + operation_index as f64 * group_width + (group_width - cluster_width) / 2.0;
         for (series_index, candidate) in series.iter().enumerate() {
             let row = values
-                .get(&(candidate.key, metric.operation))
+                .get(&(candidate.key, *operation))
                 .ok_or(ChartError::NoRenderableRows)?;
             draw_bar(
                 &area,
@@ -403,60 +372,44 @@ fn draw(rows: &[&LatencyRow], series: &[Series], topology: &str, output: &Path) 
                 plot_top,
                 plot_bottom,
                 y_max,
-                metric.value(row) as f64,
+                row.p50_ns as f64,
+                row.p99_ns as f64,
                 candidate.color,
             )?;
         }
         text(
             &area,
-            metric.percentile,
+            *label,
             px(cluster_x + cluster_width / 2.0),
-            px(plot_bottom + 40.0),
-            11,
+            px(plot_bottom + 22.0),
+            12,
             TEXT,
             HPos::Center,
             true,
         )?;
     }
-    for (label, first_metric) in [("blocked receiver", 0), ("blocked sender", 2)] {
+    draw_legend(&area, series, rows, 40.0, 350.0)?;
+    for (footnote, y) in [
+        (
+            "Solid bars reach p50; translucent extensions reach p99.",
+            400,
+        ),
+        (
+            "* Kanal performs up to 256 sched_yield calls before parking",
+            420,
+        ),
+    ] {
         text(
             &area,
-            label,
-            px(plot_left + (first_metric as f64 + 1.0) * group_width),
-            px(plot_bottom + 20.0),
-            11,
+            footnote,
+            i32::try_from(width / 2).expect("chart width fits i32"),
+            y,
+            9,
             MUTED,
             HPos::Center,
             false,
         )?;
     }
-
-    draw_legend(&area, series, 40.0, 376.0)?;
-    let fanring_spin_ns = rows.iter().find_map(|row| {
-        row.implementation
-            .starts_with("fanring-spin")
-            .then_some(row.spin_ns)
-            .flatten()
-    });
-    let footnote = fanring_spin_ns.map_or_else(
-        || "* Kanal performs up to 256 sched_yield calls before parking".to_string(),
-        |spin_ns| {
-            format!(
-                "* fanring spin uses {}; Kanal performs up to 256 sched_yield calls before parking",
-                format_duration(spin_ns as f64)
-            )
-        },
-    );
-    text(
-        &area,
-        footnote,
-        i32::try_from(width / 2).expect("chart width fits i32"),
-        425,
-        9,
-        MUTED,
-        HPos::Center,
-        false,
-    )?;
     area.present().chart()?;
     drop(area);
     finish_svg(output, width, height)
@@ -470,11 +423,29 @@ fn draw_bar(
     plot_top: f64,
     plot_bottom: f64,
     y_max: f64,
-    value: f64,
+    p50: f64,
+    p99: f64,
     color: RGBColor,
 ) -> ChartResult<()> {
-    let y = plot_bottom - value / y_max * (plot_bottom - plot_top);
-    rect(area, x, y, x + width, plot_bottom, color)
+    let p99_y = plot_bottom - p99 / y_max * (plot_bottom - plot_top);
+    translucent_rect(area, x, p99_y, x + width, plot_bottom, color)?;
+    let p50_y = plot_bottom - p50 / y_max * (plot_bottom - plot_top);
+    rect(area, x, p50_y, x + width, plot_bottom, color)
+}
+
+fn translucent_rect(
+    area: &Area<'_>,
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    color: RGBColor,
+) -> ChartResult<()> {
+    let corners = [(px(x1), px(y1)), (px(x2), px(y2))];
+    area.draw(&Rectangle::new(corners, color.mix(0.3).filled()))
+        .chart()?;
+    area.draw(&Rectangle::new(corners, color.mix(0.7).stroke_width(1)))
+        .chart()
 }
 
 fn draw_y_grid(
@@ -505,7 +476,13 @@ fn draw_y_grid(
     line(area, x_left, plot_bottom, x_right, plot_bottom, AXIS, 2)
 }
 
-fn draw_legend(area: &Area<'_>, series: &[Series], x: f64, y: f64) -> ChartResult<()> {
+fn draw_legend(
+    area: &Area<'_>,
+    series: &[Series],
+    rows: &[&LatencyRow],
+    x: f64,
+    y: f64,
+) -> ChartResult<()> {
     for (index, candidate) in series.iter().enumerate() {
         let column = index % 4;
         let row = index / 4;
@@ -519,9 +496,25 @@ fn draw_legend(area: &Area<'_>, series: &[Series], x: f64, y: f64) -> ChartResul
             legend_y + 6.0,
             candidate.color,
         )?;
+        let label = rows
+            .iter()
+            .find(|row| {
+                row.implementation == candidate.key
+                    && row.implementation.starts_with("fanring-spin")
+            })
+            .and_then(|row| row.spin_ns)
+            .map_or_else(
+                || candidate.label.to_string(),
+                |spin_ns| {
+                    let duration = format_duration(spin_ns as f64)
+                        .replace('\u{b5}', "\u{3bc}")
+                        .replace(' ', "");
+                    format!("{} ({duration})", candidate.label)
+                },
+            );
         text(
             area,
-            candidate.label,
+            label,
             px(legend_x + 18.0),
             px(legend_y),
             10,

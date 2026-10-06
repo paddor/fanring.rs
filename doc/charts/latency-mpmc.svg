@@ -6,94 +6,89 @@ MPMC blocking wake latency (lower is better)
 <text x="512" y="40" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
 Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off; capacity 1; 10000 rounds; 25 µs spin settle
 </text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,256 1000,256 "/>
-<text x="62" y="256" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
-2 µs
-</text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,216 1000,216 "/>
-<text x="62" y="216" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
-4 µs
-</text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,175 1000,175 "/>
-<text x="62" y="175" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
-6 µs
-</text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,135 1000,135 "/>
-<text x="62" y="135" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
-8 µs
-</text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,95 1000,95 "/>
-<text x="62" y="95" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,225 1000,225 "/>
+<text x="62" y="225" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
 10 µs
 </text>
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,155 1000,155 "/>
+<text x="62" y="155" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
+20 µs
+</text>
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,84 1000,84 "/>
+<text x="62" y="84" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
+30 µs
+</text>
 <polyline fill="none" opacity="1" stroke="#30363D" stroke-width="2" points="70,296 1000,296 "/>
-<rect x="82" y="141" width="32" height="155" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="117" y="286" width="33" height="10" opacity="1" fill="#C94B4B" stroke="none"/>
-<rect x="153" y="143" width="32" height="153" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="188" y="145" width="32" height="151" opacity="1" fill="#22D3EE" stroke="none"/>
-<rect x="223" y="145" width="32" height="151" opacity="1" fill="#F472B6" stroke="none"/>
-<rect x="258" y="277" width="33" height="19" opacity="1" fill="#F59E0B" stroke="none"/>
-<text x="186" y="336" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
-p50
-</text>
-<rect x="315" y="112" width="32" height="184" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="350" y="284" width="32" height="12" opacity="1" fill="#C94B4B" stroke="none"/>
-<rect x="385" y="114" width="32" height="182" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="420" y="115" width="33" height="181" opacity="1" fill="#22D3EE" stroke="none"/>
-<rect x="456" y="115" width="32" height="181" opacity="1" fill="#F472B6" stroke="none"/>
-<rect x="491" y="272" width="32" height="24" opacity="1" fill="#F59E0B" stroke="none"/>
-<text x="419" y="336" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
-p99
-</text>
-<rect x="547" y="141" width="32" height="155" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="582" y="285" width="33" height="11" opacity="1" fill="#C94B4B" stroke="none"/>
-<rect x="618" y="144" width="32" height="152" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="653" y="123" width="32" height="173" opacity="1" fill="#22D3EE" stroke="none"/>
-<rect x="688" y="147" width="32" height="149" opacity="1" fill="#F472B6" stroke="none"/>
-<rect x="723" y="278" width="33" height="18" opacity="1" fill="#F59E0B" stroke="none"/>
-<text x="651" y="336" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
-p50
-</text>
-<rect x="780" y="111" width="32" height="185" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="815" y="283" width="32" height="13" opacity="1" fill="#C94B4B" stroke="none"/>
-<rect x="850" y="115" width="32" height="181" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="885" y="93" width="33" height="203" opacity="1" fill="#22D3EE" stroke="none"/>
-<rect x="921" y="115" width="32" height="181" opacity="1" fill="#F472B6" stroke="none"/>
-<rect x="956" y="272" width="32" height="24" opacity="1" fill="#F59E0B" stroke="none"/>
-<text x="884" y="336" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
-p99
-</text>
-<text x="303" y="316" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+<rect x="151" y="230" width="44" height="66" opacity="0.3" fill="#F87171" stroke="none"/>
+<rect x="151" y="230" width="44" height="66" opacity="0.7" fill="none" stroke="#F87171"/>
+<rect x="151" y="241" width="44" height="55" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="203" y="292" width="44" height="4" opacity="0.3" fill="#C94B4B" stroke="none"/>
+<rect x="203" y="292" width="44" height="4" opacity="0.7" fill="none" stroke="#C94B4B"/>
+<rect x="203" y="292" width="44" height="4" opacity="1" fill="#C94B4B" stroke="none"/>
+<rect x="255" y="93" width="44" height="203" opacity="0.3" fill="#60A5FA" stroke="none"/>
+<rect x="255" y="93" width="44" height="203" opacity="0.7" fill="none" stroke="#60A5FA"/>
+<rect x="255" y="242" width="44" height="54" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="307" y="232" width="44" height="64" opacity="0.3" fill="#22D3EE" stroke="none"/>
+<rect x="307" y="232" width="44" height="64" opacity="0.7" fill="none" stroke="#22D3EE"/>
+<rect x="307" y="242" width="44" height="54" opacity="1" fill="#22D3EE" stroke="none"/>
+<rect x="359" y="232" width="44" height="64" opacity="0.3" fill="#F472B6" stroke="none"/>
+<rect x="359" y="232" width="44" height="64" opacity="0.7" fill="none" stroke="#F472B6"/>
+<rect x="359" y="243" width="44" height="53" opacity="1" fill="#F472B6" stroke="none"/>
+<rect x="411" y="287" width="44" height="9" opacity="0.3" fill="#F59E0B" stroke="none"/>
+<rect x="411" y="287" width="44" height="9" opacity="0.7" fill="none" stroke="#F59E0B"/>
+<rect x="411" y="289" width="44" height="7" opacity="1" fill="#F59E0B" stroke="none"/>
+<text x="303" y="318" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E6EDF3" font-weight="bold">
 blocked receiver
 </text>
-<text x="768" y="316" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+<rect x="616" y="224" width="44" height="72" opacity="0.3" fill="#F87171" stroke="none"/>
+<rect x="616" y="224" width="44" height="72" opacity="0.7" fill="none" stroke="#F87171"/>
+<rect x="616" y="241" width="44" height="55" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="668" y="292" width="44" height="4" opacity="0.3" fill="#C94B4B" stroke="none"/>
+<rect x="668" y="292" width="44" height="4" opacity="0.7" fill="none" stroke="#C94B4B"/>
+<rect x="668" y="292" width="44" height="4" opacity="1" fill="#C94B4B" stroke="none"/>
+<rect x="720" y="231" width="44" height="65" opacity="0.3" fill="#60A5FA" stroke="none"/>
+<rect x="720" y="231" width="44" height="65" opacity="0.7" fill="none" stroke="#60A5FA"/>
+<rect x="720" y="242" width="44" height="54" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="772" y="224" width="44" height="72" opacity="0.3" fill="#22D3EE" stroke="none"/>
+<rect x="772" y="224" width="44" height="72" opacity="0.7" fill="none" stroke="#22D3EE"/>
+<rect x="772" y="235" width="44" height="61" opacity="1" fill="#22D3EE" stroke="none"/>
+<rect x="824" y="232" width="44" height="64" opacity="0.3" fill="#F472B6" stroke="none"/>
+<rect x="824" y="232" width="44" height="64" opacity="0.7" fill="none" stroke="#F472B6"/>
+<rect x="824" y="243" width="44" height="53" opacity="1" fill="#F472B6" stroke="none"/>
+<rect x="876" y="287" width="44" height="9" opacity="0.3" fill="#F59E0B" stroke="none"/>
+<rect x="876" y="287" width="44" height="9" opacity="0.7" fill="none" stroke="#F59E0B"/>
+<rect x="876" y="290" width="44" height="6" opacity="1" fill="#F59E0B" stroke="none"/>
+<text x="768" y="318" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E6EDF3" font-weight="bold">
 blocked sender
 </text>
-<rect x="40" y="370" width="12" height="12" opacity="1" fill="#F87171" stroke="none"/>
-<text x="58" y="376" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
+<rect x="40" y="344" width="12" height="12" opacity="1" fill="#F87171" stroke="none"/>
+<text x="58" y="350" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
 fanring
 </text>
-<rect x="280" y="370" width="12" height="12" opacity="1" fill="#C94B4B" stroke="none"/>
-<text x="298" y="376" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
-fanring spin
+<rect x="280" y="344" width="12" height="12" opacity="1" fill="#C94B4B" stroke="none"/>
+<text x="298" y="350" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
+fanring spin (50μs)
 </text>
-<rect x="520" y="370" width="12" height="12" opacity="1" fill="#60A5FA" stroke="none"/>
-<text x="538" y="376" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
-crossbeam-channel 0.5.16
+<rect x="520" y="344" width="12" height="12" opacity="1" fill="#60A5FA" stroke="none"/>
+<text x="538" y="350" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
+crossbeam-channel 0.5.17
 </text>
-<rect x="760" y="370" width="12" height="12" opacity="1" fill="#22D3EE" stroke="none"/>
-<text x="778" y="376" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
-crossfire 3.1.19
+<rect x="760" y="344" width="12" height="12" opacity="1" fill="#22D3EE" stroke="none"/>
+<text x="778" y="350" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
+crossfire 3.1.20
 </text>
-<rect x="40" y="390" width="12" height="12" opacity="1" fill="#F472B6" stroke="none"/>
-<text x="58" y="396" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
+<rect x="40" y="364" width="12" height="12" opacity="1" fill="#F472B6" stroke="none"/>
+<text x="58" y="370" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
 flume 0.12.0
 </text>
-<rect x="280" y="390" width="12" height="12" opacity="1" fill="#F59E0B" stroke="none"/>
-<text x="298" y="396" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
+<rect x="280" y="364" width="12" height="12" opacity="1" fill="#F59E0B" stroke="none"/>
+<text x="298" y="370" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
 kanal 0.1.1*
 </text>
-<text x="512" y="425" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="7.258064516129032" opacity="1" fill="#7D8590">
-* fanring spin uses 50 µs; Kanal performs up to 256 sched_yield calls before parking
+<text x="512" y="400" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="7.258064516129032" opacity="1" fill="#7D8590">
+Solid bars reach p50; translucent extensions reach p99.
+</text>
+<text x="512" y="420" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="7.258064516129032" opacity="1" fill="#7D8590">
+* Kanal performs up to 256 sched_yield calls before parking
 </text>
 </svg>

@@ -1,8 +1,8 @@
 # Benchmarks
 
-Measurements collected on 2026-10-06 from library sources at
-`7861646`, including the
-MPSC lane-control additions. The charted values are medians of repeated samples.
+Measurements collected on 2026-10-06 from library sources at `31a8c5c`.
+Dependency versions and benchmark source hashes are recorded in run provenance.
+The charted values are medians of repeated samples.
 Hardware and affinity are shown in each chart.
 
 ## Throughput
@@ -22,6 +22,8 @@ Implementation order rotates between samples. Every sample drains accepted
 values and checks sent/received counts. Fanring capacity is per sender ring;
 MPMC staging adds storage outside those bounds. The comparison channels use a
 shared queue bound. Details are in [DEVELOPMENT.md](DEVELOPMENT.md#benchmarks).
+Some MPMC cases have high sample variability; detail charts show their relative
+median absolute deviation alongside median throughput.
 
 ### Summary
 
@@ -42,6 +44,8 @@ sender woken by receive. Each direction has 10,000 rounds after 200 warmup
 rounds, with a 25 microsecond active settling interval. Communicating threads
 use distinct physical cores. The `fanring spin` series uses
 `WaitStrategy::SpinFor` with a 50 microsecond budget.
+Each channel has one bar per direction: solid fill reaches p50, with a
+translucent extension to p99.
 
 ![MPSC wake latency](doc/charts/latency-mpsc.svg)
 
@@ -70,6 +74,13 @@ are pinned to CPUs 0 and 1. Every sample checks the complete sent/received count
 Implementation order rotates between samples. The chart includes all four
 payload sizes and plots medians from cached JSONL rows.
 
+Every consumer reads each payload through `std::hint::black_box`, including
+both slices of each `rtrb` read chunk. Receive loops check the deadline once
+per 1024 iterations. `yring` uses per-item pushes and pops; `rtrb chunked` writes
+64 values at once and reads all available chunk values before releasing them.
+The JSONL rows record payload handling and clock-check cadence so samples from
+different workloads cannot be combined.
+
 ![SPSC throughput comparison](yring/doc/spsc_comparison.svg)
 
 The harness appends raw rows to `~/.cache/yring/comparison.jsonl`. The generator
@@ -80,7 +91,8 @@ and chart; `--results` selects a different result file.
 ## Run records
 
 This refresh's raw rows and source hashes are under
-`~/.cache/fanring/chart-refresh-20261006-0109/`. `provenance.json` records the
-library sources, benchmark harness, and configuration. The SPSC data is in
+`/mnt/bench/tmp/fanring-refresh-20261006-1630/`. `provenance.json` records the
+library sources, benchmark harness, dependency versions, and configuration.
+The SPSC data is in
 `spsc-comparison.jsonl`; throughput and latency data retain the usual
 per-implementation JSONL layout.

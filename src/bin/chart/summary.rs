@@ -32,13 +32,13 @@ const SERIES: &[Series] = &[
     Series {
         mpsc_key: "crossbeam-channel",
         mpmc_key: Some("crossbeam-channel"),
-        label: "crossbeam-channel 0.5.16",
+        label: "crossbeam-channel 0.5.17",
         color: RGBColor(0x60, 0xa5, 0xfa),
     },
     Series {
         mpsc_key: "crossfire",
         mpmc_key: Some("crossfire-mpmc"),
-        label: "crossfire 3.1.19",
+        label: "crossfire 3.1.20",
         color: RGBColor(0x22, 0xd3, 0xee),
     },
     Series {
