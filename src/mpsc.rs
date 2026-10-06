@@ -14,7 +14,7 @@ use crate::teardown::{Deferred, Teardown};
 
 use std::fmt;
 
-use crate::compat::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock};
+use crate::compat::{Arc, AtomicBool, AtomicU64, AtomicUsize, Mutex, Ordering, lock};
 use crate::config::{WaitStrategy, validate_capacity};
 use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
 use crate::wait::WaitCell;
@@ -27,13 +27,34 @@ mod sender;
 #[cfg(feature = "async")]
 pub use asynchronous::SendFuture;
 use receiver::Lane;
-pub use receiver::{IntoIter, Iter, Receiver, TryIter};
+pub use receiver::{IntoIter, Iter, LaneReceiver, Receiver, TryIter};
 pub use sender::Sender;
 
 pub use crate::error::{
     ChannelError, RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError,
     TryRegisterBoundedError, TryRegisterError, TrySendError,
 };
+
+#[cfg(not(all(loom, target_pointer_width = "64")))]
+static NEXT_CHANNEL_ID: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(loom, target_pointer_width = "64"))]
+loom::lazy_static! {
+    static ref NEXT_CHANNEL_ID: AtomicU64 = AtomicU64::new(0);
+}
+
+// IDs outlive channels, so allocation addresses cannot establish identity.
+// This counter is touched only at channel construction and never wraps.
+fn allocate_channel_id(counter: &AtomicU64) -> u64 {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let next = current.checked_add(1).expect("MPSC channel IDs exhausted");
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return current,
+            Err(observed) => current = observed,
+        }
+    }
+}
 
 /// Maximum per-sender capacity accepted by [`channel`] and [`try_channel`].
 ///
@@ -155,6 +176,7 @@ fn build_channel<T, P: Teardown>(capacity_per_sender: usize) -> (Sender<T, P>, R
         receiver_alive: AtomicBool::new(true),
         data_waiter: WaitCell::new(),
         capacity_per_sender,
+        channel_id: allocate_channel_id(&NEXT_CHANNEL_ID),
     });
 
     (
@@ -171,6 +193,7 @@ fn build_channel<T, P: Teardown>(capacity_per_sender: usize) -> (Sender<T, P>, R
             groups: vec![group],
             pages: vec![page],
             active: std::collections::VecDeque::with_capacity(1),
+            paused: vec![false],
             ready_group_cursor: 0,
             seen_registry_generation: 0,
             items_until_ready_poll: READY_POLL_INTERVAL,
@@ -188,6 +211,7 @@ struct Shared<T, P: Teardown> {
     receiver_alive: AtomicBool,
     data_waiter: WaitCell,
     capacity_per_sender: usize,
+    channel_id: u64,
 }
 
 impl<T, P: Teardown> Shared<T, P> {
@@ -199,6 +223,7 @@ impl<T, P: Teardown> Shared<T, P> {
     fn register_sender(
         &self,
         max_lanes: usize,
+        capacity: usize,
     ) -> Result<(LaneKey, Arc<LaneSignal>, crate::ring::Producer<T, P>), TryRegisterBoundedError>
     {
         if !self.receiver_alive.load(Ordering::Acquire) {
@@ -215,7 +240,7 @@ impl<T, P: Teardown> Shared<T, P> {
         }
         let (key, page) = registry.allocate_lane();
         let signal = Arc::new(LaneSignal::new(page, key.slot));
-        let (producer, consumer) = crate::ring::spsc(self.capacity_per_sender);
+        let (producer, consumer) = crate::ring::spsc(capacity);
         registry.pending.push(PendingLane {
             key,
             signal: signal.clone(),
@@ -251,10 +276,20 @@ impl<T, P: Teardown> fmt::Debug for Shared<T, P> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct LaneKey {
     slot: usize,
     generation: usize,
+}
+
+/// Opaque identity of one sender's lane in one channel.
+///
+/// Copying this ID retains no allocation. Channel identity and slot generation
+/// never wrap, so old IDs cannot select a replacement lane or channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LaneId {
+    key: LaneKey,
+    channel_id: u64,
 }
 
 struct PendingLane<T, P: Teardown> {
@@ -296,9 +331,54 @@ impl<T, P: Teardown> Registry<T, P> {
     }
 
     fn retire_lane(&mut self, key: LaneKey) {
-        self.free.push(LaneKey {
-            slot: key.slot,
-            generation: key.generation.wrapping_add(1),
+        // Permanently retire an exhausted slot instead of aliasing an old ID.
+        if let Some(generation) = key.generation.checked_add(1) {
+            self.free.push(LaneKey {
+                slot: key.slot,
+                generation,
+            });
+        }
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_ids_never_wrap_after_exhaustion() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(allocate_channel_id(&counter), u64::MAX - 1);
+        for _ in 0..2 {
+            assert!(std::panic::catch_unwind(|| allocate_channel_id(&counter)).is_err());
+            assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+        }
+    }
+
+    #[test]
+    fn exhausted_lane_generation_is_not_reused() {
+        let (_tx, rx) = channel::<()>(1);
+        let mut registry = lock(&rx.shared.registry);
+        registry.retire_lane(LaneKey {
+            slot: 0,
+            generation: usize::MAX - 1,
         });
+        let (last, _) = registry.allocate_lane();
+        assert_eq!(
+            last,
+            LaneKey {
+                slot: 0,
+                generation: usize::MAX
+            }
+        );
+        registry.retire_lane(last);
+        let (next, _) = registry.allocate_lane();
+        assert_eq!(
+            next,
+            LaneKey {
+                slot: 1,
+                generation: 0
+            }
+        );
     }
 }

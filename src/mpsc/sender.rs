@@ -7,7 +7,7 @@ use crate::config::{SpinWait, WaitStrategy};
 use crate::ready::LaneSignal;
 
 use super::{
-    LaneKey, PARK_SPINS, SendError, SendTimeoutError, Shared, TryRegisterBoundedError,
+    LaneId, LaneKey, PARK_SPINS, SendError, SendTimeoutError, Shared, TryRegisterBoundedError,
     TryRegisterError, TrySendError,
 };
 
@@ -25,6 +25,16 @@ pub struct Sender<T, P: Teardown = Deferred> {
 }
 
 impl<T, P: Teardown> Sender<T, P> {
+    /// Return this sender's lane identity for targeted receive and drainage
+    /// control. Registered senders, including clones, have distinct identities.
+    #[must_use]
+    pub fn lane(&self) -> LaneId {
+        LaneId {
+            key: self.key,
+            channel_id: self.shared.channel_id,
+        }
+    }
+
     /// Set the policy used by synchronous blocking sends before parking.
     ///
     /// Newly registered senders inherit this sender's current policy. This
@@ -63,15 +73,48 @@ impl<T, P: Teardown> Sender<T, P> {
             })
     }
 
-    /// Register only if fewer than `max_lanes` rings are allocated.
+    /// Register another sender with an independent ring capacity.
+    ///
+    /// Capacity is rounded up to a power of two. Ordinary registrations still
+    /// use the channel's original capacity, including clones of this sender.
+    /// Wait strategy and teardown policy follow this sender as usual.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TryRegisterError::Disconnected`] when the receiver is gone.
+    ///
+    /// # Panics
+    ///
+    /// Panics when capacity is zero or exceeds [`super::MAX_CAPACITY_PER_SENDER`].
+    pub fn try_register_with_capacity(&self, capacity: usize) -> Result<Self, TryRegisterError> {
+        crate::config::validate_capacity(capacity, super::MAX_CAPACITY_PER_SENDER)
+            .unwrap_or_else(|error| panic!("{error}"));
+        self.register_with_capacity(usize::MAX, capacity)
+            .map_err(|error| match error {
+                TryRegisterBoundedError::Disconnected => TryRegisterError::Disconnected,
+                TryRegisterBoundedError::AtCapacity => unreachable!("unbounded registration"),
+            })
+    }
+
+    /// Register only if fewer than `max_lanes` receive lanes are registered.
     ///
     /// Includes this sender and dropped senders whose lanes the receiver has
     /// not yet observed empty, whether or not values remain. The receiver
     /// must retire an old ring before its registration can be reused; it
     /// does so on a receive that finds the dropped sender's lane empty.
+    /// Explicitly closed lanes stop counting immediately; `Deferred` teardown
+    /// can still retain their unread storage until those senders drop.
     /// Returns [`TryRegisterBoundedError::AtCapacity`] when the limit is reached.
     pub fn try_register_bounded(&self, max_lanes: usize) -> Result<Self, TryRegisterBoundedError> {
-        let (key, signal, producer) = self.shared.register_sender(max_lanes)?;
+        self.register_with_capacity(max_lanes, self.shared.capacity_per_sender)
+    }
+
+    fn register_with_capacity(
+        &self,
+        max_lanes: usize,
+        capacity: usize,
+    ) -> Result<Self, TryRegisterBoundedError> {
+        let (key, signal, producer) = self.shared.register_sender(max_lanes, capacity)?;
         Ok(Self {
             shared: self.shared.clone(),
             producer,
@@ -81,7 +124,7 @@ impl<T, P: Teardown> Sender<T, P> {
         })
     }
 
-    /// Number of allocated rings, including dropped senders awaiting drain.
+    /// Number of receive lanes, including dropped senders awaiting drain.
     pub fn registered_lanes(&self) -> usize {
         self.shared.registered_lanes.load(Ordering::Acquire)
     }
@@ -98,7 +141,8 @@ impl<T, P: Teardown> Sender<T, P> {
     /// # Errors
     ///
     /// Returns [`TrySendError::Full`] when this sender's lane is full, or
-    /// [`TrySendError::Disconnected`] when the receiver is gone.
+    /// [`TrySendError::Disconnected`] when the receiver is gone or this lane
+    /// was closed.
     #[inline]
     pub fn try_send(&mut self, value: T) -> Result<(), TrySendError<T>> {
         let (result, wake_receiver) = self.try_send_inner(value);
@@ -110,7 +154,9 @@ impl<T, P: Teardown> Sender<T, P> {
 
     #[inline]
     fn try_send_inner(&mut self, value: T) -> (Result<(), TrySendError<T>>, bool) {
-        if !self.shared.receiver_alive.load(Ordering::Acquire) {
+        // The ring also closes when only this lane is retired. Receiver drop
+        // closes every ring, including registrations still pending adoption.
+        if self.producer.is_consumer_dropped() {
             return (Err(TrySendError::Disconnected(value)), false);
         }
 
@@ -144,10 +190,10 @@ impl<T, P: Teardown> Sender<T, P> {
     ///
     /// [`Receiver::try_recv_scan_into_while`](super::Receiver::try_recv_scan_into_while)
     /// finds values sent this way because it visits every registered lane.
-    /// Other receives find them only after a later signaled send or
-    /// [`flush`](Self::flush) on the same
-    /// lane, which marks it ready. Signaled and unsignaled sends may be mixed
-    /// on one lane.
+    /// [`Receiver::poll_all_lanes`](super::Receiver::poll_all_lanes) also makes
+    /// them discoverable through ordinary and tagged receives. Otherwise those
+    /// receives need a later signaled send or [`flush`](Self::flush) on the same
+    /// lane. Signaled and unsignaled sends may be mixed on one lane.
     ///
     /// The caller provides the wakeup. Between this send and reading its own
     /// wake flag, the caller needs a sequentially consistent fence, and the
@@ -158,10 +204,11 @@ impl<T, P: Teardown> Sender<T, P> {
     /// # Errors
     ///
     /// Returns [`TrySendError::Full`] when this sender's lane is full, or
-    /// [`TrySendError::Disconnected`] when the receiver is gone.
+    /// [`TrySendError::Disconnected`] when the receiver is gone or this lane
+    /// was closed.
     #[inline]
     pub fn try_send_unsignaled(&mut self, value: T) -> Result<(), TrySendError<T>> {
-        if !self.shared.receiver_alive.load(Ordering::Acquire) {
+        if self.producer.is_consumer_dropped() {
             return Err(TrySendError::Disconnected(value));
         }
         self.producer
@@ -173,7 +220,8 @@ impl<T, P: Teardown> Sender<T, P> {
     ///
     /// # Errors
     ///
-    /// Returns [`SendError`] with the unsent value when the receiver disconnects.
+    /// Returns [`SendError`] with the unsent value when the receiver disconnects
+    /// or this lane was closed.
     #[inline]
     pub fn send(&mut self, value: T) -> Result<(), SendError<T>> {
         match self.try_send(value) {
@@ -312,7 +360,9 @@ impl<T, P: Teardown> Sender<T, P> {
         }
     }
 
-    /// Return this sender's current lane slot.
+    /// Return this sender's current numeric lane slot.
+    ///
+    /// Slots can be reused. Use [`lane`](Self::lane) for a generation-safe ID.
     #[inline]
     #[must_use]
     pub const fn lane_id(&self) -> usize {
@@ -338,11 +388,11 @@ impl<T, P: Teardown> Sender<T, P> {
         self.producer.is_full()
     }
 
-    /// Return whether the receiver has been dropped.
+    /// Return whether the receiver has been dropped or this lane was closed.
     #[inline]
     #[must_use]
     pub fn is_disconnected(&self) -> bool {
-        !self.shared.receiver_alive.load(Ordering::Acquire)
+        !self.shared.receiver_alive.load(Ordering::Acquire) || self.producer.is_consumer_dropped()
     }
 
     /// Return a snapshot of the number of live senders.
@@ -377,11 +427,12 @@ impl<T> Sender<T, Deferred> {
     /// # Errors
     ///
     /// Returns [`TrySendError::Full`] when this sender's lane is full or
-    /// [`TrySendError::Disconnected`] when the receiver is gone. A full result
-    /// publishes earlier values so the receiver can free capacity.
+    /// [`TrySendError::Disconnected`] when the receiver is gone or this lane
+    /// was closed. A full result publishes earlier values so the receiver can
+    /// free capacity.
     #[inline]
     pub fn try_send_deferred(&mut self, value: T) -> Result<(), TrySendError<T>> {
-        if !self.shared.receiver_alive.load(Ordering::Acquire) {
+        if self.producer.is_consumer_dropped() {
             return Err(TrySendError::Disconnected(value));
         }
         self.producer.push_deferred(value).map_err(|value| {

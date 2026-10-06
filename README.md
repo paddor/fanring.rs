@@ -1,283 +1,78 @@
 # fanring
 
-Fast typed MPSC and MPMC channels built from one SPSC `yring` per producer.
+Typed MPSC and MPMC channels with one bounded SPSC ring per producer.
+Each sender writes to its own ring; the receive side batches work across lanes.
+Senders can register dynamically.
 
-Sender registration is dynamic. Each sender writes to its own ring, so
-producers do not contend on a shared queue tail. MPSC drains those rings
-directly; MPMC stages prefetched batches in stealable receiver-local queues.
+Requires Rust 1.93 or newer. The workspace also contains
+[`yring`](yring/README.md), published independently.
 
-`Deferred` teardown is the default and avoids cleanup coordination on sends.
-Choose `Coordinated` to reclaim unread payloads independently of idle sender
-lifetimes.
-
-Requires Rust 1.93 or newer.
-
-This workspace maintains two independently published crates:
-
-- `fanring`: typed MPSC and MPMC channels.
-- [`yring`](yring/README.md): bounded SPSC rings with batched publication.
-
-Each crate has its own version and changelog.
-
-| | Nonblocking | Blocking | Timeout | Deadline |
-| --- | --- | --- | --- | --- |
-| Send | `try_send` | `send` | `send_timeout` | `send_deadline` |
-| Receive | `try_recv` | `recv` | `recv_timeout` | `recv_deadline` |
-
-## Performance
-
-Median throughput and blocking wake latency on the system named in each
-chart, measured with the `performance` governor and CPU turbo disabled.
-Detailed throughput heatmaps cover thread counts and payload sizes.
-
-![Common MPSC and MPMC benchmark cases](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/throughput-summary.svg)
-
-#### Detailed MPSC
-
-![MPSC benchmark chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/throughput-mpsc.svg)
-
-#### Detailed MPMC
-
-![MPMC benchmark chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/throughput-mpmc.svg)
-
-#### MPSC wake latency
-
-![MPSC wake-latency chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/latency-mpsc.svg)
-
-#### MPMC wake latency
-
-![MPMC wake-latency chart](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/latency-mpmc.svg)
-
-## Teardown policies
-
-`Deferred` is the default teardown policy: unread ring payloads may remain
-alive until their sender drops. Choose `Coordinated` when queued replies,
-permits, or buffers must be released independently of idle sender lifetimes:
+## Quick start
 
 ```rust
-use fanring::{mpsc, teardown::Coordinated};
-let (tx, rx) = mpsc::channel_with_policy::<String, Coordinated>(256);
-```
+use fanring::mpsc;
 
-The policy is part of the endpoint types and inherited by cloned handles.
-`Coordinated` teardown drains unread values; overlapping sends clean up late
-publications when they resume. Receiver drop does not wait for paused producers.
-The additional send coordination has a measurable cost:
+let (mut tx, mut rx) = mpsc::channel(256);
+let mut other = tx.try_clone().expect("receiver alive");
 
-![MPSC teardown policy throughput](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/teardown-mpsc.svg)
+tx.send("first lane").unwrap();
+other.send("second lane").unwrap();
+drop(tx);
+drop(other);
 
-![MPMC teardown policy throughput](https://raw.githubusercontent.com/paddor/fanring.rs/main/doc/charts/teardown-mpmc.svg)
-
-The general comparison and wake-latency charts above use `Deferred` for fanring.
-These policy charts compare `u64` traffic under both policies on the same system.
-See [teardown contracts, reproduction, and observed behavior in other channels](doc/teardown.md).
-The pinned bounded Crossbeam, Crossfire, Flume, Kanal, and Thingbuf versions all
-retain unread payloads in our receiver-drop probe while senders remain alive.
-This is a payload-lifetime distinction; successful send still does not guarantee
-that application code processes the message.
-
-## MPSC
-
-```rust
-use fanring::mpsc::channel;
-
-let (mut tx0, mut rx) = channel(8);
-let mut tx1 = tx0.try_clone().expect("receiver alive");
-
-tx0.send("from sender 0").unwrap();
-tx1.send("from sender 1").unwrap();
-
-for _ in 0..2 {
-    println!("{}", rx.recv().unwrap());
-}
-
-assert_eq!(tx0.send("still open"), Ok(()));
-drop(rx);
-assert_eq!(tx0.send("closed").unwrap_err().into_inner(), "closed");
-```
-
-`mpsc` preserves FIFO within each sender lane and relaxes order across senders.
-Single-value receives batch slot release: receiving a value may leave its slot
-unavailable to the sender until a later receive. The credit batch is half a
-ring, with a minimum of 64 slots capped at capacity. Larger full rings resume
-at their half-full low watermark; rings up to 128 slots keep their existing
-batch size. A receive that observes a lane empty releases partial credits.
-This backpressure policy is independent of fair lane scheduling.
-Call `rx.release_consumed()`
-before returning application permits or issuing completions that allow more
-sends. This publishes freed slots across sender lanes and wakes blocked senders.
-
-To receive a bounded batch into reusable storage:
-
-```rust
-let mut batch = Vec::with_capacity(32);
-while rx.recv_batch_into(&mut batch, 32).is_ok() {
-    for value in batch.drain(..) {
-        // Process value. Its ring slot is already reusable.
+let mut messages = Vec::with_capacity(32);
+while rx.recv_batch_into(&mut messages, 32).is_ok() {
+    for message in messages.drain(..) {
+        println!("{message}");
     }
 }
 ```
 
-`recv_batch_into` appends at most the requested limit, waits only for the first
-value, and releases consumed slots before returning. It returns the number
-appended; a partial batch succeeds even after disconnect. Reserve enough spare
-vector capacity to avoid output reallocations. A zero limit receives nothing,
-releases consumed slots, and returns `Ok(0)`. `try_recv_batch_into` is the
-nonblocking form and reports `Empty` or `Disconnected` when nothing was
-appended.
+Use `mpmc::channel` when multiple receivers need to share work.
+Enable the optional `async` feature for runtime-independent MPSC futures.
 
-Bulk receives move whole prefetched windows out of sender rings instead of
-popping one value at a time, while keeping the lane rotation and per-sender
-FIFO order of repeated `try_recv` calls.
+## Channel contract
 
-`Sender::is_full` reports whether the sender's lane can take another value.
-Only the receiver frees slots, so a producer that drops on a full lane can
-skip building the value it would drop.
+| | MPSC | MPMC |
+| --- | --- | --- |
+| Receivers | One | Cloneable |
+| Ordering | FIFO within each sender lane | Relaxed |
+| Capacity | Per sender, rounded up to a power of two | Per sender, plus receiver staging |
+| Receive scheduling | Bounded bursts; optional one-value rotation | Lane claims and batch stealing |
+| Per-lane pause/resume | Yes; optional source IDs on receive | No |
+| Async | Optional `async` feature | Synchronous |
 
-`try_recv_batch_into_while` adds an admission predicate. It sees each value in
-place before the move and stops the batch at the first value it rejects, which
-stays queued for a later receive. This bounds a batch by a caller-defined
-measure, such as a byte budget, while accepted windows still move in bulk:
+Both channels support nonblocking, blocking, timeout, and deadline operations.
+Blocking endpoints briefly retry before parking and have configurable wait
+strategies. Sender registration and topology maintenance use locks; MPMC also
+synchronizes receiver staging.
 
-```rust
-let mut budget = 64 * 1024;
-let admitted = rx.try_recv_batch_into_while(&mut batch, 256, |message: &Vec<u8>| {
-    if message.len() > budget {
-        return false;
-    }
-    budget -= message.len();
-    true
-});
-```
+Dropping the last sender lets receivers drain buffered values. Dropping the
+last receiver disconnects senders. The default `Deferred` teardown can retain
+unread ring values until their sender drops. Choose `Coordinated` when payload
+cleanup must be independent of idle sender lifetimes.
 
-A rejected first value returns `Ok(0)`; `Empty` and `Disconnected` mean no
-value was available.
+These channels suit per-producer backpressure and batched processing. They do
+not provide global FIFO, strict round robin by default, or one exact capacity
+shared across all producers.
 
-`Sender::try_send_unsignaled` publishes a value without marking its lane ready
-or waking the receiver. `try_send` does one atomic read-modify-write per send
-for that. With the default `Deferred` teardown this variant does none;
-`Coordinated` teardown still does one to track the in-flight send.
-`Receiver::try_recv_scan_into_while` finds such values by visiting every
-registered lane, at a cost proportional to the lane count. Other receives find
-an unsignaled value only after a later signaled send or `flush` on the same
-lane. The application then owns the wakeup. It needs a sequentially
-consistent fence between the send and reading its own wake flag, and the
-receiver needs one between clearing that flag and scanning. Otherwise both
-sides can read stale values, and the receiver parks with a value queued.
-Signaled and unsignaled sends may be mixed on one lane.
+## Benchmarks
 
-## MPMC
+![Common MPSC and MPMC benchmark cases](doc/charts/throughput-summary.svg)
 
-```rust
-use fanring::mpmc::channel;
+[Benchmark results](BENCHMARKS.md) include detailed throughput, wake latency,
+and teardown-policy charts. [DEVELOPMENT.md](DEVELOPMENT.md#benchmarks)
+describes the measurement harness and reproduction commands.
 
-let (mut tx, mut rx0) = channel(256);
-let mut rx1 = rx0.clone();
+## Documentation
 
-tx.send("work 0").unwrap();
-tx.send("work 1").unwrap();
-
-let a = rx0.recv().unwrap();
-let b = rx1.recv().unwrap();
-assert_ne!(a, b);
-```
-
-`mpmc` drains up to 64 values from a ready sender ring. With one receiver, the
-remaining values stay in a private deque. Cloning publishes that deque before
-the new receiver becomes visible. With multiple receivers, remaining values
-enter bounded synchronized work queues, and competitors steal up to eight at a
-time. Receiver drop republishes its buffered work. Ordering is relaxed. Moving
-values into that second-stage queue costs more for large inline types; box large
-payloads when move bandwidth dominates.
-
-`mpmc::try_recv` may return a transient `Empty` while bounded lane maintenance
-or another receiver moves work. `Disconnected` is final: all senders are gone,
-sender rings and staged queues are drained, and no work publication is in
-flight.
-
-## Blocking wait strategies
-
-Synchronous endpoints briefly retry before parking by default. Latency-sensitive
-threads pinned to distinct CPUs can opt into bounded active spinning:
-
-```rust
-use std::time::Duration;
-use fanring::{WaitStrategy, mpsc};
-
-let (_tx, mut rx) = mpsc::channel::<u64>(256);
-rx.set_wait_strategy(WaitStrategy::SpinFor(Duration::from_micros(50)));
-```
-
-The policy is endpoint-local, so applications can spend CPU only on the send or
-receive side that needs lower wake latency. Newly registered senders and cloned
-MPMC receivers inherit their source endpoint's policy. `SpinFor` uses
-`spin_loop`, never scheduler yields, then falls back to the same lost-wakeup-safe
-parking path. Measure the application's empty/full interval distribution and
-CPU budget when choosing a duration. Timeout and deadline operations stop
-spinning at their operation deadline. Async MPSC operations ignore this policy.
-
-## Contract
-
-- One bounded ring per dynamic sender; capacity is a per-sender HWM rounded up
-  to a power of two.
-- MPSC preserves FIFO within each sender lane. MPMC ordering is relaxed and its
-  receiver staging can temporarily exceed sender-ring capacity.
-- Nonblocking, blocking, timeout, and deadline operations are available.
-  Blocking operations spin briefly before parking.
-- Dropping the last sender preserves buffered values for receivers to drain.
-  Last-receiver drop follows the chosen teardown policy. MPMC `Empty` may be
-  transient while receivers move internal work; `Disconnected` is final.
-- Sender hot paths and MPSC batching avoid a shared queue lock. MPMC work
-  distribution and topology maintenance use mutexes; blocking operations may
-  park.
-
-## Good Fit
-
-- Many long-lived or frequently changing producers feeding one or more
-  consumers.
-- MPSC callers need only per-producer FIFO; MPMC callers accept relaxed order.
-- Per-producer HWM matches the desired backpressure model.
-- Callers can use built-in parking or own the backoff policy around `try_*`.
-
-## Bad Fit
-
-- Need global FIFO or strict one-item round robin.
-- Need one exact capacity shared across all producers.
-- Need an exact total MPMC bound that includes receiver staging.
-- Need async MPMC wakeups.
-
-## Further reading
-
-* More detail: [DESIGN.md](DESIGN.md)
-* Development and benchmark reproduction: [DEVELOPMENT.md](DEVELOPMENT.md)
-* Release history: [CHANGELOG.md](CHANGELOG.md)
+- [Getting started](GETTING_STARTED.md): registration, batching, lane control,
+  async operations, and teardown choices.
+- [Design](DESIGN.md): ownership, publication, scheduling, and teardown.
+- [API reference](https://docs.rs/fanring): published API.
+- [Development](DEVELOPMENT.md): checks, benchmarks, and releases.
+- [Changelog](CHANGELOG.md): release history.
 
 ## License
 
 [ISC](LICENSE)
-
-## Async MPSC
-
-Enable the optional `async` feature for runtime-independent `send_async`,
-`recv_async`, and `recv_batch_into_async`. No Tokio dependency or blocking wait
-is required. Successful sends publish immediately. Bulk receive waits only for
-the first value and releases consumed slots before returning. Reserve the output
-vector once to avoid per-value allocations. MPMC remains synchronous.
-
-`recv_async` and `poll_recv` likewise release consumed slots before returning
-each value. Use the nonblocking single-value receives for LWM credit batching,
-then `release_consumed` before handing off work or waiting outside fanring.
-
-Each sender has its own capacity waker; the receiver has one data waker.
-Registration is followed by a queue recheck. Canceling an incomplete send drops
-its unsent value without reserving capacity. Canceling an incomplete receive
-consumes nothing. Both remove retained wakers. Manual `poll_ready` and `poll_recv`
-users must cancel abandoned registrations explicitly. Synchronous methods and
-both teardown policies retain their existing contracts.
-
-`Sender::try_register_bounded(max_lanes)` limits allocated rings, including
-retired senders awaiting receiver drain. The ordinary registration API remains
-unbounded. `registered_lanes()` reports allocated rings, rather than live senders.
-
-Both workspace crates remain independently consumable. Fanring's versioned
-yring path dependency resolves to the published yring version when packaged.

@@ -806,12 +806,14 @@ name = "yring"
 version = "0.3.19"
 dependencies = [
  "atomic-waker",
+ "core_affinity",
  "crossbeam-channel",
  "flume",
  "futures-core",
  "futures-lite",
  "loom",
  "rtrb",
+ "serde_json",
 ]
 
 [[package]]

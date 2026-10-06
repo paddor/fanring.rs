@@ -7,8 +7,8 @@ use std::task::{Context, Poll};
 use crate::teardown::{Deferred, Teardown};
 use crate::wait::WaitCell;
 
-use super::receiver::AdmitAll;
-use super::{Receiver, RecvError, SendError, Sender, TryRecvError};
+use super::receiver::{AdmitAll, ItemOnly, ReceiveOutput, WithLaneIds};
+use super::{LaneId, LaneReceiver, Receiver, RecvError, SendError, Sender, TryRecvError};
 
 impl<T, P: Teardown> Sender<T, P> {
     /// Wait asynchronously for capacity and publish one value.
@@ -105,9 +105,13 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// Cancellation before completion consumes no value and removes the
     /// receiver's waker. Final disconnect is reported only after all rings drain.
     pub async fn recv_async(&mut self) -> Result<T, RecvError> {
+        self.recv_async_output::<ItemOnly>().await
+    }
+
+    async fn recv_async_output<O: ReceiveOutput<T, P>>(&mut self) -> Result<O::Item, RecvError> {
         let shared = self.shared.clone();
         let _registration = Registration(&shared.data_waiter);
-        poll_fn(|cx| self.poll_recv(cx)).await
+        poll_fn(|cx| self.poll_recv_output::<O>(cx)).await
     }
 
     /// Poll a receive, registering the channel's single receiver waker.
@@ -115,11 +119,18 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// Releases consumed slots before returning or waiting. When abandoning
     /// a manual poll, call [`cancel_recv_wait`](Self::cancel_recv_wait).
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<T, RecvError>> {
-        let mut result = self.try_recv();
+        self.poll_recv_output::<ItemOnly>(cx)
+    }
+
+    fn poll_recv_output<O: ReceiveOutput<T, P>>(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<O::Item, RecvError>> {
+        let mut result = self.try_recv_output::<O>();
         if matches!(result, Err(TryRecvError::Empty)) {
             self.release_consumed();
             self.shared.data_waiter.register_async(cx.waker());
-            result = self.try_recv();
+            result = self.try_recv_output::<O>();
         }
         self.release_consumed();
         match result {
@@ -172,5 +183,24 @@ impl<T, P: Teardown> Receiver<T, P> {
         }
         self.release_consumed();
         Ok(received)
+    }
+}
+
+impl<T, P: Teardown> LaneReceiver<'_, T, P> {
+    /// Receive a value and its source lane asynchronously.
+    /// See [`Receiver::recv_async`] for capacity release and cancellation.
+    pub async fn recv_async(&mut self) -> Result<(LaneId, T), RecvError> {
+        self.receiver.recv_async_output::<WithLaneIds>().await
+    }
+
+    /// Poll a value and its source lane, using the receiver's single waker.
+    /// See [`Receiver::poll_recv`] for capacity release and cancellation.
+    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<(LaneId, T), RecvError>> {
+        self.receiver.poll_recv_output::<WithLaneIds>(cx)
+    }
+
+    /// Cancel the waker retained by a pending manual [`poll_recv`](Self::poll_recv).
+    pub fn cancel_recv_wait(&mut self) {
+        self.receiver.cancel_recv_wait();
     }
 }

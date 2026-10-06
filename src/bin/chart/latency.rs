@@ -19,7 +19,7 @@ const MUTED: RGBColor = RGBColor(0x7d, 0x85, 0x90);
 
 const MPSC_SERIES: &[Series] = &[
     Series::new("fanring", "fanring", RGBColor(0xf8, 0x71, 0x71)),
-    Series::new("fanring-spin", "fanring spin", RGBColor(0x34, 0xd3, 0x99)),
+    Series::new("fanring-spin", "fanring spin", RGBColor(0xc9, 0x4b, 0x4b)),
     Series::new(
         "crossbeam-channel",
         "crossbeam-channel 0.5.16",
@@ -36,7 +36,7 @@ const MPMC_SERIES: &[Series] = &[
     Series::new(
         "fanring-spin-mpmc",
         "fanring spin",
-        RGBColor(0x34, 0xd3, 0x99),
+        RGBColor(0xc9, 0x4b, 0x4b),
     ),
     Series::new(
         "crossbeam-channel",
@@ -99,6 +99,8 @@ impl Metric {
 struct LatencyRow {
     run_id: String,
     cpu: String,
+    #[serde(default)]
+    affinity: String,
     implementation: String,
     operation: String,
     #[serde(default)]
@@ -115,6 +117,7 @@ struct LatencyRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LatencyShape {
     cpu: String,
+    affinity: String,
     capacity: usize,
     rounds: usize,
     settle_mode: String,
@@ -268,6 +271,7 @@ fn complete_implementation(rows: &[&LatencyRow]) -> Option<LatencyShape> {
 fn latency_shape(row: &LatencyRow) -> LatencyShape {
     LatencyShape {
         cpu: row.cpu.clone(),
+        affinity: row.affinity.clone(),
         capacity: row.capacity,
         rounds: row.rounds,
         settle_mode: row.settle_mode.clone(),
@@ -290,6 +294,7 @@ fn complete_rows<'a>(rows: &[&'a LatencyRow], series: &[Series]) -> Option<Vec<&
             continue;
         }
         if row.cpu != first.cpu
+            || row.affinity != first.affinity
             || row.rounds != first.rounds
             || row.capacity != first.capacity
             || row.settle_mode != first.settle_mode
@@ -671,6 +676,25 @@ mod tests {
         assert!(error.to_string().contains("incomplete"));
     }
 
+    #[test]
+    fn different_affinity_runs_are_not_combined() {
+        let mut rows = complete_run("1");
+        let mut pinned = [
+            row("2", "crossfire", "recv_wake"),
+            row("2", "crossfire", "send_wake"),
+        ];
+        for row in &mut pinned {
+            row.affinity = "physical-first:0,1".to_string();
+        }
+        rows.extend(pinned);
+
+        let selected = select_run(&rows, MPSC_SERIES, None).unwrap();
+        assert!(selected.iter().all(|row| row.run_id == "1"));
+
+        rows[0].affinity = "physical-first:0,1".to_string();
+        assert!(select_run(&rows, MPSC_SERIES, Some("1".to_string())).is_err());
+    }
+
     fn complete_run(run_id: &str) -> Vec<LatencyRow> {
         MPSC_SERIES
             .iter()
@@ -684,6 +708,7 @@ mod tests {
         LatencyRow {
             run_id: run_id.to_string(),
             cpu: "cpu".to_string(),
+            affinity: String::new(),
             implementation: implementation.to_string(),
             operation: operation.to_string(),
             spin_ns: implementation.contains("spin").then_some(50_000),

@@ -10,7 +10,7 @@ use crate::config::{SpinWait, WaitStrategy};
 use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
 
 use super::{
-    LaneKey, MIN_RELEASE_BATCH, PARK_SPINS, PREFETCH_LIMIT, READY_POLL_INTERVAL, RecvError,
+    LaneId, LaneKey, MIN_RELEASE_BATCH, PARK_SPINS, PREFETCH_LIMIT, READY_POLL_INTERVAL, RecvError,
     RecvTimeoutError, Shared, TryRecvError,
 };
 
@@ -75,6 +75,9 @@ pub struct Receiver<T, P: Teardown = Deferred> {
     /// Lanes in receive rotation. Each lane appears at most once; its
     /// `queued` flag mirrors membership.
     pub(super) active: VecDeque<LaneKey>,
+    /// Receive control stays separate from the lane's cached hot-path data.
+    /// Registration resets the slot before exposing a replacement lane.
+    pub(super) paused: Vec<bool>,
     pub(super) ready_group_cursor: usize,
     pub(super) seen_registry_generation: usize,
     pub(super) items_until_ready_poll: usize,
@@ -82,7 +85,221 @@ pub struct Receiver<T, P: Teardown = Deferred> {
     pub(super) wait_strategy: WaitStrategy,
 }
 
+/// Borrowed single-value receive view that includes each value's source lane.
+///
+/// Created by [`Receiver::with_lane_ids`]. Scheduling, FIFO, slot release, and
+/// disconnect behavior match the corresponding [`Receiver`] methods. Each
+/// successful receive creates a [`Copy`] [`LaneId`]; plain receives do not.
+pub struct LaneReceiver<'a, T, P: Teardown = Deferred> {
+    pub(super) receiver: &'a mut Receiver<T, P>,
+}
+
+impl<T, P: Teardown> fmt::Debug for LaneReceiver<'_, T, P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LaneReceiver")
+            .field("receiver", &self.receiver)
+            .finish()
+    }
+}
+
+impl<T, P: Teardown> LaneReceiver<'_, T, P> {
+    /// Receive a value and its source lane with bounded per-sender bursts.
+    /// See [`Receiver::try_recv`] for slot release and errors.
+    #[inline]
+    pub fn try_recv(&mut self) -> Result<(LaneId, T), TryRecvError> {
+        self.receiver.try_recv_output::<WithLaneIds>()
+    }
+
+    /// Receive a value and its source lane, rotating after every value.
+    /// See [`Receiver::try_recv_fair`] for scheduling and errors.
+    #[inline]
+    pub fn try_recv_fair(&mut self) -> Result<(LaneId, T), TryRecvError> {
+        self.receiver.try_recv_fair_output::<WithLaneIds>()
+    }
+
+    /// Wait for a value and return it with its source lane.
+    /// See [`Receiver::recv`] for slot release and errors.
+    #[inline]
+    pub fn recv(&mut self) -> Result<(LaneId, T), RecvError> {
+        self.receiver.recv_output::<WithLaneIds>()
+    }
+
+    /// Wait up to `timeout` for a value and return it with its source lane.
+    /// See [`Receiver::recv_timeout`] for errors.
+    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<(LaneId, T), RecvTimeoutError> {
+        self.receiver.recv_timeout_output::<WithLaneIds>(timeout)
+    }
+
+    /// Wait until `deadline` for a value and return it with its source lane.
+    /// See [`Receiver::recv_deadline`] for errors.
+    pub fn recv_deadline(&mut self, deadline: Instant) -> Result<(LaneId, T), RecvTimeoutError> {
+        self.receiver.recv_deadline_output::<WithLaneIds>(deadline)
+    }
+}
+
+// Specialize the output construction without adding a runtime mode branch.
+// Both modes use the same receive and waiter protocols.
+pub(super) trait ReceiveOutput<T, P: Teardown> {
+    type Item;
+    fn item(receiver: &Receiver<T, P>, key: LaneKey, value: T) -> Self::Item;
+}
+
+pub(super) struct ItemOnly;
+pub(super) struct WithLaneIds;
+
+impl<T, P: Teardown> ReceiveOutput<T, P> for ItemOnly {
+    type Item = T;
+
+    #[inline(always)]
+    fn item(_receiver: &Receiver<T, P>, _key: LaneKey, value: T) -> T {
+        value
+    }
+}
+
+impl<T, P: Teardown> ReceiveOutput<T, P> for WithLaneIds {
+    type Item = (LaneId, T);
+
+    #[inline(always)]
+    fn item(receiver: &Receiver<T, P>, key: LaneKey, value: T) -> (LaneId, T) {
+        (
+            LaneId {
+                key,
+                channel_id: receiver.shared.channel_id,
+            },
+            value,
+        )
+    }
+}
+
 impl<T, P: Teardown> Receiver<T, P> {
+    /// Include the source [`LaneId`] in single-value receive results.
+    ///
+    /// The view borrows this receiver and uses its existing scheduling and
+    /// waiter state. It adds no runtime output-mode switch. Plain receives
+    /// create no lane IDs; tagged receives copy the channel identity and lane
+    /// key. Return to this receiver to pause, resume, or drain that lane.
+    ///
+    /// ```
+    /// use fanring::mpsc::channel;
+    /// let (mut tx, mut rx) = channel(4);
+    /// tx.try_send(7).unwrap();
+    /// let (lane, value) = rx.with_lane_ids().try_recv_fair().unwrap();
+    /// assert_eq!(value, 7);
+    /// rx.pause(&lane).unwrap();
+    /// assert_eq!(rx.try_recv_from(&lane), Err(fanring::mpsc::TryRecvError::Empty));
+    /// rx.resume(&lane).unwrap();
+    /// ```
+    #[inline]
+    pub fn with_lane_ids(&mut self) -> LaneReceiver<'_, T, P> {
+        LaneReceiver { receiver: self }
+    }
+
+    /// Exclude a lane from all ordinary receives, including bulk and scan
+    /// receives. Targeted receives remain available. Does not release unread
+    /// slots or change the sender's capacity. Repeated pauses are harmless.
+    ///
+    /// Returns `RecvError` for a retired lane or an ID from another channel.
+    pub fn pause(&mut self, id: &LaneId) -> Result<(), RecvError> {
+        let lane = self.lane_mut(id).ok_or(RecvError)?;
+        lane.queued = false;
+        if self.paused[id.key.slot] {
+            return Ok(());
+        }
+        self.paused[id.key.slot] = true;
+        self.active.retain(|key| *key != id.key);
+        Ok(())
+    }
+
+    /// Restore a paused lane to ordinary receive rotation. Checks the ring on
+    /// the next receive even if publications occurred while it was paused.
+    /// Repeated resumes are harmless.
+    ///
+    /// Returns `RecvError` for a retired lane or an ID from another channel.
+    pub fn resume(&mut self, id: &LaneId) -> Result<(), RecvError> {
+        self.lane_mut(id).ok_or(RecvError)?;
+        if !self.paused[id.key.slot] {
+            return Ok(());
+        }
+        self.paused[id.key.slot] = false;
+        let lane = self.lanes[id.key.slot].as_mut().expect("validated lane");
+        lane.signal.mark();
+        lane.queued = true;
+        self.active.push_back(id.key);
+        self.shared.data_waiter.notify();
+        Ok(())
+    }
+
+    /// Receive only from this lane, including while it is paused. Never
+    /// resumes it or consumes another lane's value. Finds published values
+    /// even when sent without a readiness signal. Slot release is batched as
+    /// for ordinary receives.
+    ///
+    /// Returns `Empty` when this lane is empty and its sender is alive, or
+    /// `Disconnected` for an empty disconnected lane, a retired lane, or an
+    /// ID from another channel. Buffered values precede disconnect.
+    pub fn try_recv_from(&mut self, id: &LaneId) -> Result<T, TryRecvError> {
+        let lane = self.lane_mut(id).ok_or(TryRecvError::Disconnected)?;
+        if lane.cached_available == 0 {
+            lane.cached_available = lane.consumer.prefetch();
+            if lane.cached_available == 0 {
+                let empty = lane.settle_empty();
+                let released = match empty {
+                    EmptyLane::Keep { released } | EmptyLane::Idle { released, .. } => released,
+                };
+                if released {
+                    lane.signal.notify_space();
+                }
+                if let EmptyLane::Idle { disconnected, .. } = empty {
+                    self.active.retain(|key| *key != id.key);
+                    if disconnected {
+                        self.retire_lane(id.key);
+                        return Err(TryRecvError::Disconnected);
+                    }
+                    return Err(TryRecvError::Empty);
+                }
+            }
+        }
+        let lane = self.lanes[id.key.slot].as_mut().expect("validated lane");
+        let value = lane.consumer.pop().expect("prefetched value");
+        lane.cached_available -= 1;
+        lane.unreleased += 1;
+        // A targeted receive does not change the ordinary lane rotation.
+        if lane.unreleased == lane.release_batch && lane.release_pending() {
+            lane.signal.notify_space();
+        }
+        if !self.paused[id.key.slot] && !lane.queued {
+            lane.signal.mark();
+            lane.queued = true;
+            self.active.push_back(id.key);
+        }
+        Ok(value)
+    }
+
+    /// Disconnect and retire one lane, including a paused lane with unread
+    /// values. Future sends fail and registration can reuse the slot.
+    /// Payload destruction follows the channel's teardown policy.
+    ///
+    /// Returns `RecvError` for a retired lane or an ID from another channel.
+    pub fn close_lane(&mut self, id: &LaneId) -> Result<(), RecvError> {
+        let lane = self.lane_mut(id).ok_or(RecvError)?;
+        lane.consumer.close();
+        lane.signal.notify_space();
+        self.active.retain(|key| *key != id.key);
+        self.retire_lane(id.key);
+        Ok(())
+    }
+
+    fn lane_mut(&mut self, id: &LaneId) -> Option<&mut Lane<T, P>> {
+        if self.shared.channel_id != id.channel_id {
+            return None;
+        }
+        self.refresh_registry();
+        self.lanes
+            .get_mut(id.key.slot)?
+            .as_mut()
+            .filter(|lane| lane.key == id.key)
+    }
+
     /// Set the policy used by synchronous blocking receives before parking.
     ///
     /// This does not affect asynchronous operations.
@@ -106,8 +323,15 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// Returns [`TryRecvError::Empty`] when no value is currently available, or
     /// [`TryRecvError::Disconnected`] after all senders and buffered values are
     /// gone.
-    #[inline]
+    #[inline(always)]
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        self.try_recv_output::<ItemOnly>()
+    }
+
+    #[inline]
+    pub(super) fn try_recv_output<O: ReceiveOutput<T, P>>(
+        &mut self,
+    ) -> Result<O::Item, TryRecvError> {
         // Keep the front lane in place between release, rotation, and readiness
         // boundaries. Refresh short prefetch windows here as well: they do not
         // require lane scheduling or a wakeup.
@@ -129,14 +353,15 @@ impl<T, P: Teardown> Receiver<T, P> {
                 lane.unreleased += 1;
                 lane.burst += 1;
                 self.items_until_ready_poll -= 1;
-                return Ok(lane
+                let value = lane
                     .consumer
                     .pop()
-                    .expect("cached_available guarantees prefetched data"));
+                    .expect("cached_available guarantees prefetched data");
+                return Ok(O::item(self, key, value));
             }
         }
         loop {
-            let (result, released) = self.try_recv_inner::<false>();
+            let (result, released) = self.try_recv_inner::<false, O>();
             let retry = released.is_some() && matches!(result, Err(TryRecvError::Empty));
             self.notify_released(released);
             if !retry {
@@ -159,8 +384,15 @@ impl<T, P: Teardown> Receiver<T, P> {
     ///
     /// Returns [`TryRecvError::Empty`] when no value is ready, or
     /// [`TryRecvError::Disconnected`] after all senders and buffered values are gone.
-    #[inline]
+    #[inline(always)]
     pub fn try_recv_fair(&mut self) -> Result<T, TryRecvError> {
+        self.try_recv_fair_output::<ItemOnly>()
+    }
+
+    #[inline]
+    pub(super) fn try_recv_fair_output<O: ReceiveOutput<T, P>>(
+        &mut self,
+    ) -> Result<O::Item, TryRecvError> {
         if self.shared.registry_generation.load(Ordering::Acquire) != self.seen_registry_generation
             || self.groups.iter().any(|group| group.has_ready())
         {
@@ -182,14 +414,15 @@ impl<T, P: Teardown> Receiver<T, P> {
                 lane.unreleased += 1;
                 lane.burst = 0;
                 self.items_until_ready_poll -= 1;
-                return Ok(lane
+                let value = lane
                     .consumer
                     .pop()
-                    .expect("cached_available guarantees prefetched data"));
+                    .expect("cached_available guarantees prefetched data");
+                return Ok(O::item(self, key, value));
             }
         }
         loop {
-            let (result, released) = self.try_recv_inner::<true>();
+            let (result, released) = self.try_recv_inner::<true, O>();
             let retry = released.is_some() && matches!(result, Err(TryRecvError::Empty));
             self.notify_released(released);
             if !retry {
@@ -200,7 +433,9 @@ impl<T, P: Teardown> Receiver<T, P> {
 
     // Fold the intermediate result into each caller's return buffer.
     #[inline(always)]
-    fn try_recv_inner<const FAIR: bool>(&mut self) -> (Result<T, TryRecvError>, Option<LaneKey>) {
+    fn try_recv_inner<const FAIR: bool, O: ReceiveOutput<T, P>>(
+        &mut self,
+    ) -> (Result<O::Item, TryRecvError>, Option<LaneKey>) {
         loop {
             if self.active.is_empty() {
                 self.collect_ready(true);
@@ -232,7 +467,7 @@ impl<T, P: Teardown> Receiver<T, P> {
                         self.active.push_front(key);
                     }
                     self.items_until_ready_poll -= 1;
-                    return (Ok(value), released.then_some(key));
+                    return (Ok(O::item(self, key, value)), released.then_some(key));
                 }
                 LanePoll::Keep { released } => {
                     self.active.push_back(key);
@@ -263,19 +498,24 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// # Errors
     ///
     /// Returns [`RecvError`] after all senders and buffered values are gone.
-    #[inline]
+    #[inline(always)]
     pub fn recv(&mut self) -> Result<T, RecvError> {
+        self.recv_output::<ItemOnly>()
+    }
+
+    #[inline]
+    pub(super) fn recv_output<O: ReceiveOutput<T, P>>(&mut self) -> Result<O::Item, RecvError> {
         // Convert directly to the blocking result type. Going through try_recv
         // adds another payload-sized return on this path.
         loop {
-            let (result, released) = self.try_recv_inner::<false>();
+            let (result, released) = self.try_recv_inner::<false, O>();
             let retry = released.is_some() && matches!(result, Err(TryRecvError::Empty));
             self.notify_released(released);
             match result {
                 Ok(value) => return Ok(value),
                 Err(TryRecvError::Disconnected) => return Err(RecvError),
                 Err(TryRecvError::Empty) if retry => {}
-                Err(TryRecvError::Empty) => return self.recv_slow(),
+                Err(TryRecvError::Empty) => return self.recv_slow::<O>(),
             }
         }
     }
@@ -496,18 +736,18 @@ impl<T, P: Teardown> Receiver<T, P> {
         Ok(drained.received)
     }
 
-    /// Scan every registered lane and append available values to `output`
+    /// Scan every unpaused registered lane and append available values to `output`
     /// while `admit` accepts them.
     ///
     /// Works like [`try_recv_batch_into_while`](Self::try_recv_batch_into_while),
-    /// but it does not rely on lane readiness. Every registered lane joins the
-    /// rotation first, so values sent with
+    /// but it does not rely on lane readiness. Every unpaused registered lane
+    /// joins the rotation first, so values sent with
     /// [`Sender::try_send_unsignaled`](super::Sender::try_send_unsignaled) are
     /// found as well. A lane leaves the rotation only after this call observes
     /// it empty, also when a signaled send on that lane races the scan. So
     /// when fewer than `limit` values are appended and `admit` rejected none,
-    /// every lane registered when the call started was observed empty during
-    /// this call. Lanes the rotation already held keep their order, and each
+    /// every unpaused lane registered when the call started was observed empty
+    /// during this call. Lanes the rotation already held keep their order, and each
     /// lane is queued at most once. The cost is proportional to the number of
     /// registered lanes.
     ///
@@ -539,16 +779,23 @@ impl<T, P: Teardown> Receiver<T, P> {
         limit: usize,
         mut admit: impl FnMut(&T) -> bool,
     ) -> Result<usize, TryRecvError> {
-        self.activate_all_lanes();
+        self.poll_all_lanes();
         self.try_recv_batch_into_while(output, limit, &mut admit)
     }
 
-    /// Put every registered lane in the rotation, keeping the current order
-    /// of lanes that are already queued.
-    fn activate_all_lanes(&mut self) {
+    /// Check every unpaused registered lane on subsequent receives, including
+    /// values sent with [`Sender::try_send_unsignaled`](super::Sender::try_send_unsignaled).
+    ///
+    /// Keeps the order of already active lanes and adds each other lane once.
+    /// Does not consume values, resume paused lanes, or wake a blocked receiver.
+    /// Call before a scalar or tagged receive when providing an external
+    /// wake protocol. That protocol still needs the fences documented on the
+    /// unsignaled send method before allowing the consumer to sleep.
+    pub fn poll_all_lanes(&mut self) {
         self.refresh_registry();
-        for lane in self.lanes.iter_mut().flatten() {
-            if !lane.queued {
+        for (slot, lane) in self.lanes.iter_mut().enumerate() {
+            let Some(lane) = lane else { continue };
+            if !self.paused[slot] && !lane.queued {
                 lane.queued = true;
                 self.active.push_back(lane.key);
             }
@@ -658,11 +905,11 @@ impl<T, P: Teardown> Receiver<T, P> {
 
     #[cold]
     #[inline(never)]
-    fn recv_slow(&mut self) -> Result<T, RecvError> {
+    fn recv_slow<O: ReceiveOutput<T, P>>(&mut self) -> Result<O::Item, RecvError> {
         let mut spin = SpinWait::blocking(self.wait_strategy, PARK_SPINS);
         while spin.step() {
             std::hint::spin_loop();
-            match self.try_recv() {
+            match self.try_recv_output::<O>() {
                 Ok(value) => return Ok(value),
                 Err(TryRecvError::Disconnected) => return Err(RecvError),
                 Err(TryRecvError::Empty) => {}
@@ -670,7 +917,7 @@ impl<T, P: Teardown> Receiver<T, P> {
         }
 
         loop {
-            match self.try_recv() {
+            match self.try_recv_output::<O>() {
                 Ok(value) => return Ok(value),
                 Err(TryRecvError::Disconnected) => return Err(RecvError),
                 Err(TryRecvError::Empty) => {}
@@ -678,7 +925,7 @@ impl<T, P: Teardown> Receiver<T, P> {
 
             let shared = self.shared.clone();
             let wait = shared.data_waiter.prepare();
-            let (result, released) = self.try_recv_inner::<false>();
+            let (result, released) = self.try_recv_inner::<false, O>();
             match result {
                 Ok(value) => {
                     wait.cancel();
@@ -709,12 +956,19 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// Returns [`RecvTimeoutError::Timeout`] when the timeout expires, or
     /// [`RecvTimeoutError::Disconnected`] after the channel disconnects.
     pub fn recv_timeout(&mut self, timeout: Duration) -> Result<T, RecvTimeoutError> {
+        self.recv_timeout_output::<ItemOnly>(timeout)
+    }
+
+    fn recv_timeout_output<O: ReceiveOutput<T, P>>(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<O::Item, RecvTimeoutError> {
         let Some(deadline) = Instant::now().checked_add(timeout) else {
             return self
-                .recv()
+                .recv_output::<O>()
                 .map_err(|RecvError| RecvTimeoutError::Disconnected);
         };
-        self.recv_deadline(deadline)
+        self.recv_deadline_output::<O>(deadline)
     }
 
     /// Receive one value, blocking until `deadline` while the channel is
@@ -725,10 +979,17 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// Returns [`RecvTimeoutError::Timeout`] at the deadline, or
     /// [`RecvTimeoutError::Disconnected`] after the channel disconnects.
     pub fn recv_deadline(&mut self, deadline: Instant) -> Result<T, RecvTimeoutError> {
+        self.recv_deadline_output::<ItemOnly>(deadline)
+    }
+
+    fn recv_deadline_output<O: ReceiveOutput<T, P>>(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<O::Item, RecvTimeoutError> {
         let mut spin = SpinWait::deadline(self.wait_strategy, deadline);
         while spin.step() {
             std::hint::spin_loop();
-            match self.try_recv() {
+            match self.try_recv_output::<O>() {
                 Ok(value) => return Ok(value),
                 Err(TryRecvError::Disconnected) => {
                     return Err(RecvTimeoutError::Disconnected);
@@ -738,7 +999,7 @@ impl<T, P: Teardown> Receiver<T, P> {
         }
 
         loop {
-            match self.try_recv() {
+            match self.try_recv_output::<O>() {
                 Ok(value) => return Ok(value),
                 Err(TryRecvError::Disconnected) => {
                     return Err(RecvTimeoutError::Disconnected);
@@ -748,7 +1009,7 @@ impl<T, P: Teardown> Receiver<T, P> {
 
             let shared = self.shared.clone();
             let wait = shared.data_waiter.prepare();
-            let (result, released) = self.try_recv_inner::<false>();
+            let (result, released) = self.try_recv_inner::<false, O>();
             match result {
                 Ok(value) => {
                     wait.cancel();
@@ -774,7 +1035,7 @@ impl<T, P: Teardown> Receiver<T, P> {
                 return Err(RecvTimeoutError::Timeout);
             }
             if wait.wait_timeout(remaining) {
-                match self.try_recv() {
+                match self.try_recv_output::<O>() {
                     Ok(value) => return Ok(value),
                     Err(TryRecvError::Disconnected) => {
                         return Err(RecvTimeoutError::Disconnected);
@@ -876,7 +1137,7 @@ impl<T, P: Teardown> Receiver<T, P> {
                     };
                     // A scan may already have queued a lane whose publication
                     // indexed it afterward. Queue each lane once.
-                    if lane.signal.is_pending() && !lane.queued {
+                    if !self.paused[slot] && lane.signal.is_pending() && !lane.queued {
                         lane.queued = true;
                         self.active.push_back(lane.key);
                     }
@@ -885,6 +1146,26 @@ impl<T, P: Teardown> Receiver<T, P> {
             self.ready_group_cursor = (group_index + 1) % group_count;
             if !all {
                 break;
+            }
+        }
+    }
+
+    #[cold]
+    fn retire_empty_paused_lanes(&mut self) {
+        // Paused lanes may have no ready-page entry left when their sender
+        // drops. Empty paused lanes must not hide final channel disconnect;
+        // unread paused values still require explicit drain.
+        for slot in 0..self.lanes.len() {
+            let retired = self.lanes[slot].as_mut().and_then(|lane| {
+                if self.paused[slot] && lane.cached_available == 0 {
+                    lane.cached_available = lane.consumer.prefetch();
+                    (lane.cached_available == 0).then_some(lane.key)
+                } else {
+                    None
+                }
+            });
+            if let Some(key) = retired {
+                self.retire_lane(key);
             }
         }
     }
@@ -909,8 +1190,10 @@ impl<T, P: Teardown> Receiver<T, P> {
         for pending in pending {
             if self.lanes.len() <= pending.key.slot {
                 self.lanes.resize_with(pending.key.slot + 1, || None);
+                self.paused.resize(pending.key.slot + 1, false);
             }
             debug_assert!(self.lanes[pending.key.slot].is_none());
+            self.paused[pending.key.slot] = false;
             self.lanes[pending.key.slot] =
                 Some(Lane::new(pending.key, pending.signal, pending.consumer));
         }
@@ -926,6 +1209,7 @@ impl<T, P: Teardown> Receiver<T, P> {
             return;
         };
         debug_assert_eq!(lane.key, key);
+        self.paused[key.slot] = false;
         self.shared.registered_lanes.fetch_sub(1, Ordering::AcqRel);
         let mut registry = lock(&self.shared.registry);
         registry.retire_lane(key);
@@ -941,8 +1225,14 @@ impl<T, P: Teardown> Receiver<T, P> {
     }
 
     #[inline]
-    fn is_drained(&self) -> bool {
-        self.is_disconnected() && self.shared.registered_lanes.load(Ordering::Acquire) == 0
+    fn is_drained(&mut self) -> bool {
+        if !self.is_disconnected() {
+            return false;
+        }
+        if self.shared.registered_lanes.load(Ordering::Acquire) != 0 {
+            self.retire_empty_paused_lanes();
+        }
+        self.shared.registered_lanes.load(Ordering::Acquire) == 0
     }
 
     /// Return per-sender capacity after `yring` rounding.

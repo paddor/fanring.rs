@@ -12,6 +12,11 @@ use serde::Serialize;
 
 use support::{Affinity, JsonlResults, Sampling, Saturation, median_and_relative_mad};
 
+// Producer stop checks must not share a cache line with queue allocations.
+#[derive(Debug)]
+#[repr(align(128))]
+struct Stop(AtomicBool);
+
 #[derive(Debug, Clone, Copy)]
 struct Config {
     producers: usize,
@@ -480,7 +485,7 @@ where
     S: BenchSender<T>,
     R: BenchReceiver<T>,
 {
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(Stop(AtomicBool::new(false)));
     let saturation = Saturation::new(config.producers, config.total_capacity());
     let barrier = Arc::new(Barrier::new(config.producers + 1));
     let mut handles = Vec::with_capacity(config.producers);
@@ -495,7 +500,7 @@ where
             affinity.pin(index + 1);
             barrier.wait();
             let mut sent = 0u64;
-            while !stop.load(Ordering::Relaxed) {
+            while !stop.0.load(Ordering::Relaxed) {
                 match sender.try_send(value) {
                     SendAttempt::Sent => sent += 1,
                     SendAttempt::Full => {
@@ -537,7 +542,7 @@ where
             RecvAttempt::Disconnected => break,
         }
     }
-    stop.store(true, Ordering::Relaxed);
+    stop.0.store(true, Ordering::Relaxed);
 
     let sent = join_counts(handles, implementation);
     receiver.close_for_drain();
@@ -582,7 +587,7 @@ where
     S: BenchSender<T>,
     R: BenchReceiver<T>,
 {
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(Stop(AtomicBool::new(false)));
     let barrier = Arc::new(Barrier::new(config.producers + 1));
     let mut handles = Vec::with_capacity(config.producers);
     for (index, mut sender) in senders.into_iter().enumerate() {
@@ -594,7 +599,7 @@ where
             affinity.pin(index + 1);
             barrier.wait();
             let mut sent = 0u64;
-            while !stop.load(Ordering::Relaxed) {
+            while !stop.0.load(Ordering::Relaxed) {
                 let attempt = match mode {
                     Mode::Try => sender.try_send(value),
                     Mode::Blocking => {
@@ -638,7 +643,7 @@ where
             RecvAttempt::Disconnected => break,
         }
     }
-    stop.store(true, Ordering::Relaxed);
+    stop.0.store(true, Ordering::Relaxed);
     let sent = if mode == Mode::Blocking {
         while let Some(value) = receiver.recv() {
             black_box(value);

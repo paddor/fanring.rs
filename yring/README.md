@@ -2,31 +2,25 @@
 
 Bounded SPSC ring buffer with ypipe-style batched flush/prefetch.
 
-## The problem
+Requires Rust 1.93 or newer.
 
-Existing Rust SPSC ring buffers (`rtrb`, `ringbuf`, `crossbeam`) do 1-2
-atomic operations per item. At millions of items per second, those
-atomics become the bottleneck.
+## Batched publication
 
-## The solution
+The producer writes into its private window, then `flush()` publishes the
+batch. The consumer `prefetch()`es published values, pops from its cached
+window, and `release()`s consumed slots back to the producer.
 
-Separate writing from publication:
+| Operation | Effect |
+| --- | --- |
+| `push()` | Writes a value; cached space needs no atomic operation |
+| `flush()` | Publishes pending writes with release ordering |
+| `prefetch()` | Acquires a window of published values |
+| `pop()` | Reads from that window without atomic operations |
+| `release()` | Publishes consumed capacity with release ordering |
 
-- `head`: consumer read position (AtomicUsize, consumer-owned)
-- `cursor`: producer write position (plain usize, producer-private, no atomic)
-- `tail`: last flushed position (AtomicUsize, producer writes / consumer reads)
-
-`push()` writes without atomics while cached space remains. `flush()` makes all
-pending writes visible with a single Release store. `prefetch()` loads
-all available items with a single Acquire load. `pop()` reads with zero
-atomics. `release()` publishes consumed slots back to the producer with
-a single Release store. Result: atomic synchronization happens per
-batch, not per item.
-
-The speedup comes from caching positions and publishing batches. The
-three-pointer description counts the producer's local cursor alongside two
-shared atomic cursors. The consumer also keeps a local read position and
-a cached publication boundary.
+Each endpoint caches its own position and the opposite endpoint's published
+boundary. Synchronization happens at batch boundaries. The ring is bounded,
+with capacity rounded up to a power of two.
 
 ## Usage
 
@@ -114,11 +108,6 @@ all producer calls must come from the same thread. For producer access from
 multiple threads, use a channel with a multi-producer API instead.
 Thread tokens never wrap: allocation panics if the token range is exhausted.
 
-The key advantage over chunk-based batching APIs (like `rtrb`'s
-`write_chunk_uninit`): you keep the simple per-item `push()`/`pop()`
-API. No upfront batch size, no slice management, no restructuring your
-code. Push items one at a time, flush when you're ready.
-
 ## Backpressure
 
 `push()` returns `Err(val)` when the ring is full. `pop()` returns
@@ -138,31 +127,30 @@ without taking a value; ready also covers consumer shutdown. Check
 
 ## Wakeup hints
 
-`flush_and_check()`, `prefetch_and_pop_with_full()`, and
-`release_with_full()` provide conservative
-wakeup hints. Their booleans include registered waiters, so they are not
-exact empty/full snapshots. Signal whenever the returned hint is true.
-Calling either helper enables registration on the opposite endpoint. Hints
-remain conservatively true until that endpoint acknowledges activation.
-Queues using only ordinary flush/release skip this registration protocol.
+These helpers provide conservative wake hints, including registered waiters.
+Signal whenever a hint is true; it is not an exact empty/full snapshot.
 
-Once enabled, an empty `Consumer::prefetch()` window or `Consumer::is_empty()` check
-registers a data waiter before rechecking publication. A full
-`Producer::push()` or `Producer::is_full()` check registers a space waiter
-before retrying. These checks pair with the hint-producing operations so a
-concurrent flush or release cannot strand a waiter. Register any external
-waker before the final queue check, or use a stateful notification primitive.
-Exhausting the cached `pop()` window alone does not register a waiter.
+| Helper | Hint |
+| --- | --- |
+| `flush_and_check()` | `FlushResult::Flushed { was_empty, .. }`: consumer may need a wake |
+| `prefetch_and_pop_with_full()` | Returned boolean: producer may need a wake |
+| `release_with_full()` | Producer may need a wake after capacity publication |
 
-Ordinary `flush()` and `release()` still use one Release store. Use these
-when a separate signaling protocol handles wakeups.
+Using the helpers enables opposite-endpoint waiter registration. Hints stay
+conservatively true until that endpoint acknowledges activation. Ordinary
+flush/release avoid this registration protocol when helpers are unused.
 
-For batched consumers, `release_with_full()` publishes only popped slots and
-returns whether the producer needs a wake. Call it at the batch boundaries
-chosen by your transport, and signal whenever it returns true. A call with no
-newly consumed slots returns false without clearing a producer registration.
-The queue sets no release watermark. Hints include producer registrations
-beyond the consumer's cached tail, including unpublished full slots.
+Once enabled, an empty `prefetch()` or `is_empty()` check registers a data
+waiter and rechecks publication. A full `push()` or `is_full()` check registers
+a space waiter and retries. Register an external waker before the final queue
+check, or use a stateful notification primitive. Exhausting the cached `pop()`
+window alone does not register a waiter.
+
+`release_with_full()` publishes only consumed slots. The application chooses
+its batch boundaries; the ring sets no release watermark. With no newly
+consumed slots, it returns false and preserves the producer registration.
+Ordinary `flush()` and `release()` each use a release store when a separate
+protocol handles signaling.
 
 ## Correctness checks
 
@@ -185,31 +173,25 @@ ring ordering and wake delivery while assuming that dependency's contract.
 
 ## Benchmarks
 
-Cross-thread throughput (M items/s), 2 seconds per configuration,
-cap=1024, batch=64:
+From the workspace root:
 
-| Channel | API | u64 (8 B) | [u8; 32] | [u8; 64] | [u8; 128] |
-|---------|-----|----------:|----------:|----------:|----------:|
-| **yring** | per-item, batch=1 | 427 | 208 | 99 | 48 |
-| **yring** | per-item, batch=64 | 569 | 394 | 210 | 109 |
-| rtrb | per-item | 32 | 32 | 32 | 32 |
-| rtrb | chunk, batch=64 | **1937** | **603** | **313** | **171** |
-| crossbeam | bounded | 15 | 15 | 14 | 13 |
-| flume | bounded | 4 | 5 | 5 | 5 |
+```sh
+cargo bench -p yring --bench yring_comparison
+cargo bench -p yring --bench yring_throughput
+python3 yring/scripts/gen_chart.py
+```
 
-yring vs rtrb per-item (the natural API comparison): **3x** at 64
-bytes, **6x** at 32 bytes. rtrb's chunk API is faster in raw
-throughput because it copies contiguous slices in bulk, but requires
-restructuring code around upfront chunk sizes.
+The comparison harness covers cross-thread traffic with several payload sizes
+and batch sizes, using repeated samples and pinned threads. The throughput
+harness varies ring capacity and publication batch size.
 
-<p align="center">
-  <img src="doc/spsc_comparison.svg" alt="SPSC comparison chart" width="700">
-</p>
+![SPSC throughput comparison](doc/spsc_comparison.svg)
 
-Measured on Linux VM, i7-8700B @ 3.20 GHz (6 cores), performance
-governor, turbo off. Reproduce with `cargo bench -p yring --bench
-comparison`.
+[Benchmark notes](../BENCHMARKS.md#spsc-measurements) describe the measurements.
+
+[API reference](https://docs.rs/yring) and
+[changelog](CHANGELOG.md) provide further detail.
 
 ## License
 
-ISC
+[ISC](LICENSE)

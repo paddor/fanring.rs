@@ -4,6 +4,27 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- MPSC `Receiver::poll_all_lanes` discovers unsignaled publications for scalar
+  and tagged receives while preserving paused lanes and receive rotation.
+- MPSC `Sender::try_register_with_capacity` registers a lane with independent
+  ring capacity. Ordinary registrations retain the channel's original capacity.
+- MPSC `Sender::lane` returns an opaque, Copy, generation-safe `LaneId`.
+  Channel identities never wrap; exhausted lane generations are not reused.
+- MPSC `Receiver::with_lane_ids` borrows a receive view returning `(LaneId, T)`
+  from ordinary, fair, blocking, timed, and asynchronous single-value receives.
+  Plain receives share the drain implementation without constructing lane IDs.
+- MPSC receivers can pause/resume ordinary drainage, receive from one lane,
+  and close a lane independently. Paused lanes retain FIFO and backpressure;
+  targeted receives remain available and stale IDs cannot select reused slots.
+
+### Fixed
+
+- Closing a deferred MPSC lane rejects subsequent sends even when the producer
+  still has cached space. Signaled, unsignaled, and deferred sends check the
+  lane's own disconnect state.
+
 ## [0.3.8] - 2026-10-04
 
 ### Changed
