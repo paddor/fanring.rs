@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-10-06
+
 ### Added
 
 - MPSC `Receiver::poll_all_lanes` discovers unsignaled publications for scalar
@@ -18,6 +20,12 @@ All notable changes to this project are documented here.
 - MPSC receivers can pause/resume ordinary drainage, receive from one lane,
   and close a lane independently. Paused lanes retain FIFO and backpressure;
   targeted receives remain available and stale IDs cannot select reused slots.
+
+### Changed
+
+- Require yring 0.3.20.
+- Move usage guidance to `GETTING_STARTED.md` and consolidate teardown policy
+  contracts in `DESIGN.md`.
 
 ### Fixed
 
