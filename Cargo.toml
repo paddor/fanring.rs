@@ -29,7 +29,7 @@ cast_precision_loss = "allow"
 
 [package]
 name = "fanring"
-version = "0.3.9"
+version = "0.3.10"
 edition = "2024"
 rust-version = "1.93"
 autobins = false
@@ -72,7 +72,7 @@ all-features = true
 atomic-waker = { version = "1.1", optional = true }
 arc-swap = "1.7"
 concurrent-queue = { version = "2.5", features = ["loom"] }
-yring = { version = "0.3.20", path = "yring" }
+yring = { version = "0.3.21", path = "yring" }
 
 [target.'cfg(all(loom, target_pointer_width = "64"))'.dependencies]
 loom = "0.7"
