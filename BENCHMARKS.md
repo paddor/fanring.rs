@@ -87,12 +87,3 @@ The harness appends raw rows to `~/.cache/yring/comparison.jsonl`. The generator
 selects a complete run with matching configuration and distinct CPUs.
 [Development commands](DEVELOPMENT.md#spsc-comparison) reproduce the benchmark
 and chart; `--results` selects a different result file.
-
-## Run records
-
-This refresh's raw rows and source hashes are under
-`/mnt/bench/tmp/fanring-refresh-20261006-1630/`. `provenance.json` records the
-library sources, benchmark harness, dependency versions, and configuration.
-The SPSC data is in
-`spsc-comparison.jsonl`; throughput and latency data retain the usual
-per-implementation JSONL layout.
