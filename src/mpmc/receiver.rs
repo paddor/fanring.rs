@@ -113,6 +113,7 @@ impl<T, P: Teardown> Receiver<T, P> {
 
     #[inline]
     fn try_recv_inner(&mut self) -> (Result<T, TryRecvError>, Effects) {
+        let mut progressed = false;
         for attempt in 0..=TRY_RECV_RETRIES {
             let work_generation = match self.pop_work() {
                 WorkPop::Item(value) => return (Ok(value), Effects::default()),
@@ -121,8 +122,10 @@ impl<T, P: Teardown> Receiver<T, P> {
             let Some((lane, publication)) = self.acquire_lane() else {
                 match self.empty_scan_state(work_generation) {
                     EmptyScan::Changed if attempt != TRY_RECV_RETRIES => continue,
-                    EmptyScan::Changed | EmptyScan::Publishing | EmptyScan::Open => {
-                        return (Err(TryRecvError::Empty), Effects::default());
+                    // Work moved during this scan, possibly by this receiver.
+                    EmptyScan::Changed => return (Err(TryRecvError::Empty), Effects::progressed()),
+                    EmptyScan::Publishing | EmptyScan::Open => {
+                        return (Err(TryRecvError::Empty), Effects::progressed_if(progressed));
                     }
                     EmptyScan::Drained => {
                         return (Err(TryRecvError::Disconnected), Effects::default());
@@ -137,10 +140,11 @@ impl<T, P: Teardown> Receiver<T, P> {
                     if effects.has_effect() {
                         return (Err(TryRecvError::Empty), effects);
                     }
+                    progressed |= effects.progressed;
                 }
             }
         }
-        (Err(TryRecvError::Empty), Effects::default())
+        (Err(TryRecvError::Empty), Effects::progressed_if(progressed))
     }
 
     /// Pops work this receiver already moved out of sender lanes.
@@ -267,7 +271,7 @@ impl<T, P: Teardown> Receiver<T, P> {
                     wait.cancel();
                     return Err(RecvError);
                 }
-                Err(TryRecvError::Empty) if effects.has_effect() => {
+                Err(TryRecvError::Empty) if effects.must_retry() => {
                     wait.cancel();
                     self.apply_effects(effects);
                 }
@@ -334,7 +338,7 @@ impl<T, P: Teardown> Receiver<T, P> {
                     wait.cancel();
                     return Err(RecvTimeoutError::Disconnected);
                 }
-                Err(TryRecvError::Empty) if effects.has_effect() => {
+                Err(TryRecvError::Empty) if effects.must_retry() => {
                     wait.cancel();
                     self.apply_effects(effects);
                     continue;
@@ -468,15 +472,18 @@ impl<T, P: Teardown> Receiver<T, P> {
                         LaneDrain::Empty(Effects {
                             released,
                             wake: Wake::One,
+                            progressed: false,
                         })
                     }
                     FinishLane::Parked => LaneDrain::Empty(Effects {
                         released,
                         wake: Wake::None,
+                        progressed: false,
                     }),
                     FinishLane::Retired { wake_all } => LaneDrain::Empty(Effects {
                         released,
                         wake: if wake_all { Wake::All } else { Wake::None },
+                        progressed: true,
                     }),
                 };
             }
@@ -531,7 +538,11 @@ impl<T, P: Teardown> Receiver<T, P> {
 
         LaneDrain::Item {
             value,
-            effects: Effects { released, wake },
+            effects: Effects {
+                released,
+                wake,
+                progressed: false,
+            },
         }
     }
 
@@ -845,11 +856,31 @@ impl Wake {
 struct Effects {
     released: Option<Arc<LaneSignal>>,
     wake: Wake,
+    /// Bounded maintenance retired a lane or saw work move. More may
+    /// remain, and no sender or publication has to wake a parked receiver.
+    progressed: bool,
 }
 
 impl Effects {
+    fn progressed() -> Self {
+        Self::progressed_if(true)
+    }
+
+    fn progressed_if(progressed: bool) -> Self {
+        Self {
+            progressed,
+            ..Self::default()
+        }
+    }
+
+    /// Whether there are notifications to send.
     fn has_effect(&self) -> bool {
         self.released.is_some() || self.wake != Wake::None
+    }
+
+    /// Whether a blocking receive must retry instead of parking.
+    fn must_retry(&self) -> bool {
+        self.has_effect() || self.progressed
     }
 }
 

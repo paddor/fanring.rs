@@ -17,6 +17,9 @@ All notable changes to this project are documented here.
   mutex. Notifiers and receiver teardown no longer wait for a racing recheck,
   including payload destructors that a coordinated close runs inside it.
 - Sender registration allocates its ring before taking the registry lock.
+- MPMC blocking and timed receives keep retiring dead sender lanes instead of
+  parking. After many senders dropped, `recv` could hang and `recv_timeout`
+  could report `Timeout` instead of `Disconnected`.
 
 ## [0.3.9] - 2026-10-06
 

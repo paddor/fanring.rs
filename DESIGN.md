@@ -98,7 +98,9 @@ A publication tracker covers transfers that temporarily hide work: lane
 claims, drainage, requeue, stealing, and receiver handoff. A final empty scan
 reports `Disconnected` only when there are no senders, lanes, or transfers left
 and the publication generation stayed stable. Otherwise bounded maintenance
-can report transient `Empty`.
+can report transient `Empty`. Blocking receives retry instead of parking while
+that maintenance progresses: retiring a lane or seeing work move notifies no
+one, so a parked receiver could miss the final disconnect.
 
 ## Waiting
 
