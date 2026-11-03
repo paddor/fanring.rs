@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- MPMC receives return values already staged by the receiver before any lane
+  maintenance, skipping per-value effect bookkeeping and payload copies.
+
 ### Fixed
 
 - MPSC `Receiver::pause` publishes slots already consumed from the lane, so

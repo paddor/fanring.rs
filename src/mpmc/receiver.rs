@@ -92,6 +92,14 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// gone and no publication is in flight.
     #[inline]
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        // Staged work needs no lane maintenance and has no effects.
+        if let Some(value) = self.pop_staged() {
+            return Ok(value);
+        }
+        self.try_recv_lanes()
+    }
+
+    fn try_recv_lanes(&mut self) -> Result<T, TryRecvError> {
         for attempt in 0..=TRY_RECV_RETRIES {
             let (result, effects) = self.try_recv_inner();
             let retry = effects.has_effect() && matches!(result, Err(TryRecvError::Empty));
@@ -135,14 +143,20 @@ impl<T, P: Teardown> Receiver<T, P> {
         (Err(TryRecvError::Empty), Effects::default())
     }
 
-    fn pop_work(&mut self) -> WorkPop<T> {
+    /// Pops work this receiver already moved out of sender lanes.
+    #[inline]
+    fn pop_staged(&mut self) -> Option<T> {
         // Clone publishes all private work before adding a receiver. After a
         // 2-to-1 transition, private is therefore empty and local/orphaned work
         // is observed before this receiver can stage another private batch.
         if let Some(value) = self.private.get_mut().pop_front() {
-            return WorkPop::Item(value);
+            return Some(value);
         }
-        if let Some(value) = self.local.pop() {
+        self.local.pop()
+    }
+
+    fn pop_work(&mut self) -> WorkPop<T> {
+        if let Some(value) = self.pop_staged() {
             return WorkPop::Item(value);
         }
 
