@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- MPSC `Receiver::pause` publishes slots already consumed from the lane, so
+  its sender can fill the whole ring while the lane stays paused.
+
 ## [0.3.9] - 2026-10-06
 
 ### Added

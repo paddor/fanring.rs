@@ -195,13 +195,19 @@ impl<T, P: Teardown> Receiver<T, P> {
     }
 
     /// Exclude a lane from all ordinary receives, including bulk and scan
-    /// receives. Targeted receives remain available. Does not release unread
-    /// slots or change the sender's capacity. Repeated pauses are harmless.
+    /// receives. Targeted receives remain available. Publishes slots already
+    /// consumed from the lane, so its sender can fill the whole ring. Does not
+    /// release unread slots. Repeated pauses are harmless.
     ///
     /// Returns `RecvError` for a retired lane or an ID from another channel.
     pub fn pause(&mut self, id: &LaneId) -> Result<(), RecvError> {
         let lane = self.lane_mut(id).ok_or(RecvError)?;
         lane.queued = false;
+        // Ordinary receives skip a paused lane, so nothing else would
+        // publish its partial release batch.
+        if lane.release_pending() {
+            lane.signal.notify_space();
+        }
         if self.paused[id.key.slot] {
             return Ok(());
         }

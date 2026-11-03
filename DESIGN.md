@@ -74,7 +74,8 @@ only the tagged view constructs source IDs.
 Consumed slots are published in batches independently of lane rotation. Empty
 lane handling publishes partial batches. `release_consumed()` explicitly
 publishes consumed capacity across lanes. Bulk and async receives do so before
-returning. Pausing and resuming do not free unread slots.
+returning. Pausing publishes the lane's partial batch. Pausing and resuming do
+not free unread slots.
 
 ## MPMC work distribution
 
