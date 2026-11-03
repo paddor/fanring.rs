@@ -15,7 +15,7 @@ use crate::compat::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock};
 use crate::config::{WaitStrategy, validate_capacity};
 use crate::publication::PublicationTracker;
 use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
-use crate::wait::MultiWaitCell;
+use crate::wait::{MultiWaitCell, MultiWaitRegistration, WaitSource};
 
 mod receiver;
 mod sender;
@@ -176,7 +176,7 @@ fn build_channel<T, P: Teardown>(capacity_per_sender: usize) -> (Sender<T, P>, R
     )
 }
 
-struct Shared<T, P: Teardown> {
+pub(crate) struct Shared<T, P: Teardown> {
     registry: Mutex<Registry<T, P>>,
     #[cfg(not(loom))]
     work_queues: ArcSwap<Vec<(usize, WorkQueue<T>)>>,
@@ -321,6 +321,18 @@ impl<T, P: Teardown> Shared<T, P> {
         }
         while self.orphaned_work.pop().is_some() {}
         self.data_waiters.notify_all();
+    }
+}
+
+/// Receivers park on the channel data cell.
+impl<T, P: Teardown> WaitSource for Shared<T, P> {
+    type Registration<'a>
+        = MultiWaitRegistration<'a>
+    where
+        Self: 'a;
+
+    fn register(&self) -> MultiWaitRegistration<'_> {
+        self.data_waiters.prepare()
     }
 }
 

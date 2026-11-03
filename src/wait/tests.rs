@@ -1,4 +1,4 @@
-use super::{MultiWaitCell, WAITING, WaitCell};
+use super::{MultiWaitCell, Park, WAITING, WaitCell};
 use crate::compat::{Ordering, lock};
 use std::sync::mpsc::sync_channel;
 use std::time::Duration;
@@ -68,13 +68,11 @@ fn multi_notify_all_does_not_wait_for_a_registered_recheck() {
 #[test]
 fn finished_registrations_leave_no_waiter_behind() {
     let cell = WaitCell::new();
-    cell.prepare().cancel();
     drop(cell.prepare());
     cell.prepare().wait_timeout(Duration::ZERO);
     assert_eq!(cell.state.load(Ordering::Acquire) & WAITING, 0);
 
     let cell = MultiWaitCell::new();
-    cell.prepare().cancel();
     drop(cell.prepare());
     cell.prepare().wait_timeout(Duration::ZERO);
     assert_eq!(*lock(&cell.mutex), 0);

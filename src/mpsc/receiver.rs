@@ -2,9 +2,11 @@ use crate::teardown::{Deferred, Teardown};
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::marker::PhantomData;
 use std::mem;
 use std::time::{Duration, Instant};
 
+use crate::blocking::{self, Attempt, Blocking, Recheck};
 use crate::compat::{Arc, Ordering, lock};
 use crate::config::{SpinWait, WaitStrategy};
 use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
@@ -139,7 +141,7 @@ impl<T, P: Teardown> LaneReceiver<'_, T, P> {
 
 // Specialize the output construction without adding a runtime mode branch.
 // Both modes use the same receive and waiter protocols.
-pub(super) trait ReceiveOutput<T, P: Teardown> {
+pub(crate) trait ReceiveOutput<T, P: Teardown> {
     type Item;
     fn item(receiver: &Receiver<T, P>, key: LaneKey, value: T) -> Self::Item;
 }
@@ -912,46 +914,8 @@ impl<T, P: Teardown> Receiver<T, P> {
     #[cold]
     #[inline(never)]
     fn recv_slow<O: ReceiveOutput<T, P>>(&mut self) -> Result<O::Item, RecvError> {
-        let mut spin = SpinWait::blocking(self.wait_strategy);
-        while spin.step() {
-            std::hint::spin_loop();
-            match self.try_recv_output::<O>() {
-                Ok(value) => return Ok(value),
-                Err(TryRecvError::Disconnected) => return Err(RecvError),
-                Err(TryRecvError::Empty) => {}
-            }
-        }
-
-        loop {
-            match self.try_recv_output::<O>() {
-                Ok(value) => return Ok(value),
-                Err(TryRecvError::Disconnected) => return Err(RecvError),
-                Err(TryRecvError::Empty) => {}
-            }
-
-            let shared = self.shared.clone();
-            let wait = shared.data_waiter.prepare();
-            let (result, released) = self.try_recv_inner::<false, O>();
-            match result {
-                Ok(value) => {
-                    wait.cancel();
-                    self.notify_released(released);
-                    return Ok(value);
-                }
-                Err(TryRecvError::Disconnected) => {
-                    wait.cancel();
-                    return Err(RecvError);
-                }
-                Err(TryRecvError::Empty) => {
-                    if released.is_some() {
-                        wait.cancel();
-                        self.notify_released(released);
-                        continue;
-                    }
-                    wait.wait();
-                }
-            }
-        }
+        let spin = SpinWait::blocking(self.wait_strategy);
+        blocking::block(self, PhantomData::<O>, spin)
     }
 
     /// Receive one value, blocking for at most `timeout` while the channel is
@@ -992,64 +956,13 @@ impl<T, P: Teardown> Receiver<T, P> {
         &mut self,
         deadline: Instant,
     ) -> Result<O::Item, RecvTimeoutError> {
-        let mut spin = SpinWait::deadline(self.wait_strategy, deadline);
-        while spin.step() {
-            std::hint::spin_loop();
-            match self.try_recv_output::<O>() {
-                Ok(value) => return Ok(value),
-                Err(TryRecvError::Disconnected) => {
-                    return Err(RecvTimeoutError::Disconnected);
-                }
-                Err(TryRecvError::Empty) => {}
-            }
-        }
-
-        loop {
-            match self.try_recv_output::<O>() {
-                Ok(value) => return Ok(value),
-                Err(TryRecvError::Disconnected) => {
-                    return Err(RecvTimeoutError::Disconnected);
-                }
-                Err(TryRecvError::Empty) => {}
-            }
-
-            let shared = self.shared.clone();
-            let wait = shared.data_waiter.prepare();
-            let (result, released) = self.try_recv_inner::<false, O>();
-            match result {
-                Ok(value) => {
-                    wait.cancel();
-                    self.notify_released(released);
-                    return Ok(value);
-                }
-                Err(TryRecvError::Disconnected) => {
-                    wait.cancel();
-                    return Err(RecvTimeoutError::Disconnected);
-                }
-                Err(TryRecvError::Empty) => {
-                    if released.is_some() {
-                        wait.cancel();
-                        self.notify_released(released);
-                        continue;
-                    }
-                }
-            }
-
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                wait.cancel();
-                return Err(RecvTimeoutError::Timeout);
-            }
-            if wait.wait_timeout(remaining) {
-                match self.try_recv_output::<O>() {
-                    Ok(value) => return Ok(value),
-                    Err(TryRecvError::Disconnected) => {
-                        return Err(RecvTimeoutError::Disconnected);
-                    }
-                    Err(TryRecvError::Empty) => return Err(RecvTimeoutError::Timeout),
-                }
-            }
-        }
+        let spin = SpinWait::deadline(self.wait_strategy, deadline);
+        blocking::recv_timeout_result(blocking::block_until(
+            self,
+            PhantomData::<O>,
+            spin,
+            deadline,
+        ))
     }
 
     // Keep LanePoll in the caller. Extra yring branches can otherwise exceed
@@ -1380,6 +1293,39 @@ enum LanePoll<T> {
         released: bool,
     },
     Stale,
+}
+
+/// Blocking receives. `PhantomData<O>` selects the output view.
+impl<T, P: Teardown, O: ReceiveOutput<T, P>> Blocking<PhantomData<O>> for Receiver<T, P> {
+    type Output = Result<O::Item, RecvError>;
+    type Deferred = Option<LaneKey>;
+    type Waiter = Arc<Shared<T, P>>;
+
+    fn waiter(&self) -> Arc<Shared<T, P>> {
+        self.shared.clone()
+    }
+
+    #[inline]
+    fn attempt(&mut self, view: PhantomData<O>) -> Attempt<PhantomData<O>, Self::Output> {
+        blocking::recv_attempt(self.try_recv_output::<O>(), view)
+    }
+
+    fn recheck(
+        &mut self,
+        view: PhantomData<O>,
+    ) -> Recheck<PhantomData<O>, Self::Output, Option<LaneKey>> {
+        let (result, released) = self.try_recv_inner::<false, O>();
+        match result {
+            Ok(value) => Recheck::Done(Ok(value), released),
+            Err(TryRecvError::Disconnected) => Recheck::Done(Err(RecvError), None),
+            Err(TryRecvError::Empty) if released.is_some() => Recheck::Progressed(view, released),
+            Err(TryRecvError::Empty) => Recheck::Pending(view),
+        }
+    }
+
+    fn notify(&mut self, released: Option<LaneKey>) {
+        self.notify_released(released);
+    }
 }
 
 impl<T, P: Teardown> Drop for Receiver<T, P> {

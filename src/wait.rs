@@ -87,22 +87,42 @@ impl fmt::Debug for WaitCell {
     }
 }
 
-/// Registered single waiter. Dropping it unregisters the waiter.
+/// Owner of a wait cell that blocking operations park on.
+pub(crate) trait WaitSource {
+    type Registration<'a>: Park
+    where
+        Self: 'a;
+
+    /// Register a waiter. Recheck the condition before parking on it.
+    fn register(&self) -> Self::Registration<'_>;
+}
+
+/// A registered waiter. Dropping it unregisters the waiter.
+pub(crate) trait Park {
+    /// Sleep until notified, unless a notification arrived since
+    /// registration.
+    fn wait(self);
+
+    /// Like [`wait`](Self::wait), for at most `timeout`. Returns whether the
+    /// wait timed out.
+    fn wait_timeout(self, timeout: Duration) -> bool;
+}
+
+/// Registered single waiter.
 pub(crate) struct WaitRegistration<'a> {
     cell: &'a WaitCell,
     snapshot: usize,
 }
 
-impl WaitRegistration<'_> {
-    pub(crate) fn wait(self) {
+impl Park for WaitRegistration<'_> {
+    fn wait(self) {
         let guard = lock(&self.cell.mutex);
         if self.is_current() {
             drop(wait_on(&self.cell.condvar, guard));
         }
     }
 
-    /// Wait for at most `timeout`. Returns whether the wait timed out.
-    pub(crate) fn wait_timeout(self, timeout: Duration) -> bool {
+    fn wait_timeout(self, timeout: Duration) -> bool {
         let guard = lock(&self.cell.mutex);
         if !self.is_current() {
             return false;
@@ -110,11 +130,9 @@ impl WaitRegistration<'_> {
         let (_guard, timed_out) = wait_on_timeout(&self.cell.condvar, guard, timeout);
         timed_out
     }
+}
 
-    pub(crate) fn cancel(self) {
-        drop(self);
-    }
-
+impl WaitRegistration<'_> {
     /// Whether no notification arrived since `prepare`. Callers hold the
     /// condition mutex, so a later notifier signals only after they sleep.
     fn is_current(&self) -> bool {
@@ -210,15 +228,14 @@ impl fmt::Debug for MultiWaitCell {
     }
 }
 
-/// Registered waiter of a [`MultiWaitCell`]. Dropping it unregisters the
-/// waiter.
+/// Registered waiter of a [`MultiWaitCell`].
 pub(crate) struct MultiWaitRegistration<'a> {
     cell: &'a MultiWaitCell,
     snapshot: usize,
 }
 
-impl MultiWaitRegistration<'_> {
-    pub(crate) fn wait(self) {
+impl Park for MultiWaitRegistration<'_> {
+    fn wait(self) {
         let cell = self.cell;
         let mut waiters = lock(&cell.mutex);
         if self.is_current() {
@@ -227,8 +244,7 @@ impl MultiWaitRegistration<'_> {
         self.finish(waiters);
     }
 
-    /// Wait for at most `timeout`. Returns whether the wait timed out.
-    pub(crate) fn wait_timeout(self, timeout: Duration) -> bool {
+    fn wait_timeout(self, timeout: Duration) -> bool {
         let cell = self.cell;
         let waiters = lock(&cell.mutex);
         if !self.is_current() {
@@ -239,11 +255,9 @@ impl MultiWaitRegistration<'_> {
         self.finish(waiters);
         timed_out
     }
+}
 
-    pub(crate) fn cancel(self) {
-        drop(self);
-    }
-
+impl MultiWaitRegistration<'_> {
     /// Whether no notification arrived since `prepare`. Callers hold the
     /// condition mutex, so a later notifier signals only after they sleep.
     fn is_current(&self) -> bool {
@@ -270,7 +284,7 @@ mod tests;
 
 #[cfg(all(test, loom, target_pointer_width = "64"))]
 mod loom_tests {
-    use super::{MultiWaitCell, WaitCell};
+    use super::{MultiWaitCell, Park, WaitCell};
     use super::{NOTIFY_INCREMENT, WAITING};
     use crate::compat::{Arc, AtomicBool, Ordering};
     use std::time::Duration;
@@ -286,7 +300,7 @@ mod loom_tests {
             let waiter = loom::thread::spawn(move || {
                 let registration = waiter_cell.prepare();
                 if waiter_ready.load(Ordering::Acquire) {
-                    registration.cancel();
+                    drop(registration);
                 } else {
                     registration.wait();
                 }
@@ -307,7 +321,7 @@ mod loom_tests {
             cell.state.fetch_add(NOTIFY_INCREMENT, Ordering::AcqRel);
             cell.state.fetch_add(NOTIFY_INCREMENT, Ordering::AcqRel);
             assert_ne!(cell.state.load(Ordering::Acquire), WAITING);
-            registration.cancel();
+            drop(registration);
         });
     }
 
@@ -336,7 +350,7 @@ mod loom_tests {
             let waiter = loom::thread::spawn(move || {
                 let registration = waiter_cell.prepare();
                 if waiter_ready.load(Ordering::Acquire) {
-                    registration.cancel();
+                    drop(registration);
                 } else {
                     registration.wait();
                 }
@@ -357,7 +371,7 @@ mod loom_tests {
             cell.state.0.fetch_add(NOTIFY_INCREMENT, Ordering::AcqRel);
             cell.state.0.fetch_add(NOTIFY_INCREMENT, Ordering::AcqRel);
             assert_ne!(cell.state.0.load(Ordering::Acquire), WAITING);
-            registration.cancel();
+            drop(registration);
         });
     }
 
@@ -392,7 +406,7 @@ mod loom_tests {
                 waiters.push(loom::thread::spawn(move || {
                     let registration = waiter_cell.prepare();
                     if waiter_ready.load(Ordering::Acquire) {
-                        registration.cancel();
+                        drop(registration);
                     } else {
                         registration.wait();
                     }

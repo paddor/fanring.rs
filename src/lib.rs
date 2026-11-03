@@ -44,6 +44,7 @@
 //! See each channel module for its exact ordering, capacity, and disconnection
 //! contracts.
 
+mod blocking;
 mod compat;
 mod config;
 mod error;

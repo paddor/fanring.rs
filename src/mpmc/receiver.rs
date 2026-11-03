@@ -6,6 +6,7 @@ use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
+use crate::blocking::{self, Attempt, Blocking, Recheck};
 use crate::compat::{Arc, Ordering};
 use crate::config::{SpinWait, WaitStrategy};
 use crate::publication::Publication;
@@ -241,43 +242,8 @@ impl<T, P: Teardown> Receiver<T, P> {
     #[cold]
     #[inline(never)]
     fn recv_slow(&mut self) -> Result<T, RecvError> {
-        let mut spin = SpinWait::blocking(self.wait_strategy);
-        while spin.step() {
-            std::hint::spin_loop();
-            match self.try_recv() {
-                Ok(value) => return Ok(value),
-                Err(TryRecvError::Disconnected) => return Err(RecvError),
-                Err(TryRecvError::Empty) => {}
-            }
-        }
-
-        loop {
-            match self.try_recv() {
-                Ok(value) => return Ok(value),
-                Err(TryRecvError::Disconnected) => return Err(RecvError),
-                Err(TryRecvError::Empty) => {}
-            }
-
-            let shared = self.shared.clone();
-            let wait = shared.data_waiters.prepare();
-            let (result, effects) = self.try_recv_inner();
-            match result {
-                Ok(value) => {
-                    wait.cancel();
-                    self.apply_effects(effects);
-                    return Ok(value);
-                }
-                Err(TryRecvError::Disconnected) => {
-                    wait.cancel();
-                    return Err(RecvError);
-                }
-                Err(TryRecvError::Empty) if effects.must_retry() => {
-                    wait.cancel();
-                    self.apply_effects(effects);
-                }
-                Err(TryRecvError::Empty) => wait.wait(),
-            }
-        }
+        let spin = SpinWait::blocking(self.wait_strategy);
+        blocking::block(self, (), spin)
     }
 
     /// Receive one value, blocking for at most `timeout` while the channel is
@@ -304,63 +270,8 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// Returns [`RecvTimeoutError::Timeout`] at the deadline, or
     /// [`RecvTimeoutError::Disconnected`] after the channel disconnects.
     pub fn recv_deadline(&mut self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        let mut spin = SpinWait::deadline(self.wait_strategy, deadline);
-        while spin.step() {
-            std::hint::spin_loop();
-            match self.try_recv() {
-                Ok(value) => return Ok(value),
-                Err(TryRecvError::Disconnected) => {
-                    return Err(RecvTimeoutError::Disconnected);
-                }
-                Err(TryRecvError::Empty) => {}
-            }
-        }
-
-        loop {
-            match self.try_recv() {
-                Ok(value) => return Ok(value),
-                Err(TryRecvError::Disconnected) => {
-                    return Err(RecvTimeoutError::Disconnected);
-                }
-                Err(TryRecvError::Empty) => {}
-            }
-
-            let shared = self.shared.clone();
-            let wait = shared.data_waiters.prepare();
-            let (result, effects) = self.try_recv_inner();
-            match result {
-                Ok(value) => {
-                    wait.cancel();
-                    self.apply_effects(effects);
-                    return Ok(value);
-                }
-                Err(TryRecvError::Disconnected) => {
-                    wait.cancel();
-                    return Err(RecvTimeoutError::Disconnected);
-                }
-                Err(TryRecvError::Empty) if effects.must_retry() => {
-                    wait.cancel();
-                    self.apply_effects(effects);
-                    continue;
-                }
-                Err(TryRecvError::Empty) => {}
-            }
-
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                wait.cancel();
-                return Err(RecvTimeoutError::Timeout);
-            }
-            if wait.wait_timeout(remaining) {
-                match self.try_recv() {
-                    Ok(value) => return Ok(value),
-                    Err(TryRecvError::Disconnected) => {
-                        return Err(RecvTimeoutError::Disconnected);
-                    }
-                    Err(TryRecvError::Empty) => return Err(RecvTimeoutError::Timeout),
-                }
-            }
-        }
+        let spin = SpinWait::deadline(self.wait_strategy, deadline);
+        blocking::recv_timeout_result(blocking::block_until(self, (), spin, deadline))
     }
 
     fn acquire_lane(&self) -> Option<(LaneToken<T, P>, Publication<'_>)> {
@@ -635,6 +546,35 @@ impl<T, P: Teardown> Receiver<T, P> {
     }
 }
 
+impl<T, P: Teardown> Blocking<()> for Receiver<T, P> {
+    type Output = Result<T, RecvError>;
+    type Deferred = Effects;
+    type Waiter = Arc<Shared<T, P>>;
+
+    fn waiter(&self) -> Arc<Shared<T, P>> {
+        self.shared.clone()
+    }
+
+    #[inline]
+    fn attempt(&mut self, (): ()) -> Attempt<(), Result<T, RecvError>> {
+        blocking::recv_attempt(self.try_recv(), ())
+    }
+
+    fn recheck(&mut self, (): ()) -> Recheck<(), Result<T, RecvError>, Effects> {
+        let (result, effects) = self.try_recv_inner();
+        match result {
+            Ok(value) => Recheck::Done(Ok(value), effects),
+            Err(TryRecvError::Disconnected) => Recheck::Done(Err(RecvError), Effects::default()),
+            Err(TryRecvError::Empty) if effects.must_retry() => Recheck::Progressed((), effects),
+            Err(TryRecvError::Empty) => Recheck::Pending(()),
+        }
+    }
+
+    fn notify(&mut self, effects: Effects) {
+        self.apply_effects(effects);
+    }
+}
+
 impl<T, P: Teardown> Drop for Receiver<T, P> {
     fn drop(&mut self) {
         let publication = self.shared.publications.begin();
@@ -853,7 +793,7 @@ impl Wake {
 }
 
 #[derive(Default)]
-struct Effects {
+pub(crate) struct Effects {
     released: Option<Arc<LaneSignal>>,
     wake: Wake,
     /// Bounded maintenance retired a lane or saw work move. More may

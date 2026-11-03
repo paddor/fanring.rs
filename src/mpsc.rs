@@ -17,7 +17,7 @@ use std::fmt;
 use crate::compat::{Arc, AtomicBool, AtomicU64, AtomicUsize, Mutex, Ordering, lock};
 use crate::config::{WaitStrategy, validate_capacity};
 use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
-use crate::wait::WaitCell;
+use crate::wait::{WaitCell, WaitRegistration, WaitSource};
 
 #[cfg(feature = "async")]
 mod asynchronous;
@@ -199,7 +199,7 @@ fn build_channel<T, P: Teardown>(capacity_per_sender: usize) -> (Sender<T, P>, R
     )
 }
 
-struct Shared<T, P: Teardown> {
+pub(crate) struct Shared<T, P: Teardown> {
     registry: Mutex<Registry<T, P>>,
     registry_generation: AtomicUsize,
     registered_lanes: AtomicUsize,
@@ -261,6 +261,18 @@ impl<T, P: Teardown> Shared<T, P> {
     }
 }
 
+/// Receivers park on the channel data cell.
+impl<T, P: Teardown> WaitSource for Shared<T, P> {
+    type Registration<'a>
+        = WaitRegistration<'a>
+    where
+        Self: 'a;
+
+    fn register(&self) -> WaitRegistration<'_> {
+        self.data_waiter.prepare()
+    }
+}
+
 impl<T, P: Teardown> fmt::Debug for Shared<T, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Shared")
@@ -279,7 +291,7 @@ impl<T, P: Teardown> fmt::Debug for Shared<T, P> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct LaneKey {
+pub(crate) struct LaneKey {
     slot: usize,
     generation: usize,
 }

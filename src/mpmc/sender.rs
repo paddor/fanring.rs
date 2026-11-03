@@ -2,6 +2,7 @@ use crate::teardown::{Deferred, Teardown};
 
 use std::time::{Duration, Instant};
 
+use crate::blocking::{self, Attempt, Blocking, Recheck};
 use crate::compat::{Arc, Ordering};
 use crate::config::{SpinWait, WaitStrategy};
 use crate::ready::LaneSignal;
@@ -112,43 +113,9 @@ impl<T, P: Teardown> Sender<T, P> {
 
     #[cold]
     #[inline(never)]
-    fn send_slow(&mut self, mut value: T) -> Result<(), SendError<T>> {
-        let mut spin = SpinWait::blocking(self.wait_strategy);
-        while spin.step() {
-            std::hint::spin_loop();
-            match self.try_send(value) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Disconnected(value)) => return Err(SendError(value)),
-                Err(TrySendError::Full(returned)) => value = returned,
-            }
-        }
-
-        loop {
-            match self.try_send(value) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Disconnected(value)) => return Err(SendError(value)),
-                Err(TrySendError::Full(returned)) => value = returned,
-            }
-
-            let signal = self.signal.clone();
-            let wait = signal.prepare_space_wait();
-            let (result, wake_receiver) = self.try_send_inner(value);
-            match result {
-                Ok(()) => {
-                    wait.cancel();
-                    if wake_receiver {
-                        self.shared.data_waiters.notify_one();
-                    }
-                    return Ok(());
-                }
-                Err(TrySendError::Disconnected(value)) => {
-                    wait.cancel();
-                    return Err(SendError(value));
-                }
-                Err(TrySendError::Full(returned)) => value = returned,
-            }
-            wait.wait();
-        }
+    fn send_slow(&mut self, value: T) -> Result<(), SendError<T>> {
+        let spin = SpinWait::blocking(self.wait_strategy);
+        blocking::block(self, value, spin).map_err(SendError)
     }
 
     /// Send one value, blocking up to `timeout` while this sender's ring is
@@ -178,65 +145,11 @@ impl<T, P: Teardown> Sender<T, P> {
     /// disconnects.
     pub fn send_deadline(
         &mut self,
-        mut value: T,
+        value: T,
         deadline: Instant,
     ) -> Result<(), SendTimeoutError<T>> {
-        let mut spin = SpinWait::deadline(self.wait_strategy, deadline);
-        while spin.step() {
-            std::hint::spin_loop();
-            match self.try_send(value) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Disconnected(value)) => {
-                    return Err(SendTimeoutError::Disconnected(value));
-                }
-                Err(TrySendError::Full(returned)) => value = returned,
-            }
-        }
-
-        loop {
-            match self.try_send(value) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Disconnected(value)) => {
-                    return Err(SendTimeoutError::Disconnected(value));
-                }
-                Err(TrySendError::Full(returned)) => value = returned,
-            }
-
-            let signal = self.signal.clone();
-            let wait = signal.prepare_space_wait();
-            let (result, wake_receiver) = self.try_send_inner(value);
-            match result {
-                Ok(()) => {
-                    wait.cancel();
-                    if wake_receiver {
-                        self.shared.data_waiters.notify_one();
-                    }
-                    return Ok(());
-                }
-                Err(TrySendError::Disconnected(value)) => {
-                    wait.cancel();
-                    return Err(SendTimeoutError::Disconnected(value));
-                }
-                Err(TrySendError::Full(returned)) => value = returned,
-            }
-
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                wait.cancel();
-                return Err(SendTimeoutError::Timeout(value));
-            }
-            if wait.wait_timeout(remaining) {
-                match self.try_send(value) {
-                    Ok(()) => return Ok(()),
-                    Err(TrySendError::Disconnected(value)) => {
-                        return Err(SendTimeoutError::Disconnected(value));
-                    }
-                    Err(TrySendError::Full(value)) => {
-                        return Err(SendTimeoutError::Timeout(value));
-                    }
-                }
-            }
-        }
+        let spin = SpinWait::deadline(self.wait_strategy, deadline);
+        blocking::send_timeout_result(blocking::block_until(self, value, spin, deadline))
     }
 
     /// Return this sender's lane slot.
@@ -279,6 +192,32 @@ impl<T, P: Teardown> Sender<T, P> {
     #[must_use]
     pub fn same_channel(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
+    }
+}
+
+impl<T, P: Teardown> Blocking<T> for Sender<T, P> {
+    type Output = Result<(), T>;
+    type Deferred = bool;
+    type Waiter = Arc<LaneSignal>;
+
+    fn waiter(&self) -> Arc<LaneSignal> {
+        self.signal.clone()
+    }
+
+    #[inline]
+    fn attempt(&mut self, value: T) -> Attempt<T, Result<(), T>> {
+        blocking::send_attempt(self.try_send(value))
+    }
+
+    fn recheck(&mut self, value: T) -> Recheck<T, Result<(), T>, bool> {
+        let (result, wake_receiver) = self.try_send_inner(value);
+        blocking::send_recheck(result, wake_receiver)
+    }
+
+    fn notify(&mut self, wake_receiver: bool) {
+        if wake_receiver {
+            self.shared.data_waiters.notify_one();
+        }
     }
 }
 
