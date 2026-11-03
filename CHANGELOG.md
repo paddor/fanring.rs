@@ -8,6 +8,9 @@ All notable changes to this project are documented here.
 
 - MPMC receives return values already staged by the receiver before any lane
   maintenance, skipping per-value effect bookkeeping and payload copies.
+- `WaitStrategy::Park` spins for about ten microseconds before untimed
+  operations park, instead of 128 retries. The retry window varied with
+  payload size and code generation, from about 1.5 to 14 microseconds.
 
 ### Fixed
 

@@ -70,10 +70,6 @@ const READY_POLL_INTERVAL: usize = 64;
 const MIN_RELEASE_BATCH: usize = 64;
 #[cfg(loom)]
 const MIN_RELEASE_BATCH: usize = 2;
-#[cfg(not(loom))]
-const PARK_SPINS: usize = 128;
-#[cfg(loom)]
-const PARK_SPINS: usize = 0;
 
 /// Create an MPSC channel with one bounded ring per sender.
 ///

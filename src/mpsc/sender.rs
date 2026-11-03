@@ -7,7 +7,7 @@ use crate::config::{SpinWait, WaitStrategy};
 use crate::ready::LaneSignal;
 
 use super::{
-    LaneId, LaneKey, PARK_SPINS, SendError, SendTimeoutError, Shared, TryRegisterBoundedError,
+    LaneId, LaneKey, SendError, SendTimeoutError, Shared, TryRegisterBoundedError,
     TryRegisterError, TrySendError,
 };
 
@@ -234,7 +234,7 @@ impl<T, P: Teardown> Sender<T, P> {
     #[cold]
     #[inline(never)]
     fn send_slow(&mut self, mut value: T) -> Result<(), SendError<T>> {
-        let mut spin = SpinWait::blocking(self.wait_strategy, PARK_SPINS);
+        let mut spin = SpinWait::blocking(self.wait_strategy);
         while spin.step() {
             std::hint::spin_loop();
             match self.try_send(value) {

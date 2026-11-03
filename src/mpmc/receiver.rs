@@ -12,8 +12,8 @@ use crate::publication::Publication;
 use crate::ready::{LaneSignal, PAGES_PER_GROUP};
 
 use super::{
-    PARK_SPINS, PREFETCH_LIMIT, ReadyTopology, RecvError, RecvTimeoutError, Shared,
-    TRY_RECV_RETRIES, TryRecvError,
+    PREFETCH_LIMIT, ReadyTopology, RecvError, RecvTimeoutError, Shared, TRY_RECV_RETRIES,
+    TryRecvError,
 };
 
 /// Receiving half.
@@ -241,7 +241,7 @@ impl<T, P: Teardown> Receiver<T, P> {
     #[cold]
     #[inline(never)]
     fn recv_slow(&mut self) -> Result<T, RecvError> {
-        let mut spin = SpinWait::blocking(self.wait_strategy, PARK_SPINS);
+        let mut spin = SpinWait::blocking(self.wait_strategy);
         while spin.step() {
             std::hint::spin_loop();
             match self.try_recv() {

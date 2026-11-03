@@ -4,6 +4,15 @@ use crate::error::ChannelError;
 
 const CLOCK_CHECK_INTERVAL: usize = 16;
 
+/// How long [`WaitStrategy::Park`] spins before an untimed operation parks.
+/// A time budget keeps the window independent of per-attempt cost. It is
+/// about one park and wake round trip, which bounds wasted spinning by the
+/// cost of parking.
+#[cfg(not(all(loom, target_pointer_width = "64")))]
+pub(crate) const PARK_SPIN: Duration = Duration::from_micros(10);
+#[cfg(all(loom, target_pointer_width = "64"))]
+pub(crate) const PARK_SPIN: Duration = Duration::ZERO;
+
 /// Policy used by synchronous blocking operations before they park.
 ///
 /// This policy belongs to one endpoint. Newly registered senders and cloned
@@ -13,9 +22,9 @@ pub enum WaitStrategy {
     /// Use the standard short retry phase, then park the thread.
     ///
     /// This is the default and favors low idle CPU usage. Untimed blocking
-    /// operations currently execute up to 128 [`std::hint::spin_loop`] retries
-    /// before parking. Timeout and deadline operations park immediately after
-    /// their lost-wakeup recheck.
+    /// operations currently retry with [`std::hint::spin_loop`] for about ten
+    /// microseconds before parking. Timeout and deadline operations park
+    /// immediately after their lost-wakeup recheck.
     #[default]
     Park,
     /// Actively retry for at most this duration, then park the thread.
@@ -34,7 +43,8 @@ pub(crate) struct SpinWait {
 
 #[derive(Debug)]
 enum SpinMode {
-    Retries(usize),
+    /// No spin phase.
+    Done,
     Timed {
         started: Instant,
         duration: Duration,
@@ -44,35 +54,44 @@ enum SpinMode {
 }
 
 impl SpinWait {
-    pub(crate) fn blocking(strategy: WaitStrategy, park_spins: usize) -> Self {
-        Self::new(strategy, park_spins, None)
+    /// Spin phase of an untimed operation.
+    pub(crate) fn blocking(strategy: WaitStrategy) -> Self {
+        Self::new(strategy, PARK_SPIN, None)
     }
 
+    /// Spin phase of a timed operation. Park mode does not spin.
     pub(crate) fn deadline(strategy: WaitStrategy, deadline: Instant) -> Self {
-        Self::new(strategy, 0, Some(deadline))
+        Self::new(strategy, Duration::ZERO, Some(deadline))
     }
 
-    fn new(strategy: WaitStrategy, park_spins: usize, operation_deadline: Option<Instant>) -> Self {
-        let mode = match strategy {
-            WaitStrategy::Park => SpinMode::Retries(park_spins),
-            WaitStrategy::SpinFor(duration) => SpinMode::Timed {
+    fn new(
+        strategy: WaitStrategy,
+        park_spin: Duration,
+        operation_deadline: Option<Instant>,
+    ) -> Self {
+        let duration = match strategy {
+            WaitStrategy::Park => park_spin,
+            WaitStrategy::SpinFor(duration) => duration,
+        };
+        if duration.is_zero() {
+            return Self {
+                mode: SpinMode::Done,
+            };
+        }
+        Self {
+            mode: SpinMode::Timed {
                 started: Instant::now(),
                 duration,
                 operation_deadline,
                 until_clock_check: 0,
             },
-        };
-        Self { mode }
+        }
     }
 
     #[inline]
     pub(crate) fn step(&mut self) -> bool {
         match &mut self.mode {
-            SpinMode::Retries(remaining) => {
-                let spin = *remaining != 0;
-                *remaining = remaining.saturating_sub(1);
-                spin
-            }
+            SpinMode::Done => false,
             SpinMode::Timed {
                 started,
                 duration,
@@ -117,18 +136,29 @@ mod tests {
     use super::{SpinWait, WaitStrategy};
     use std::time::{Duration, Instant};
 
+    #[cfg(not(loom))]
     #[test]
-    fn park_uses_requested_retry_count() {
-        let mut wait = SpinWait::blocking(WaitStrategy::Park, 3);
-        assert!(wait.step());
-        assert!(wait.step());
-        assert!(wait.step());
+    fn park_spins_for_the_park_budget() {
+        let started = Instant::now();
+        let mut wait = SpinWait::blocking(WaitStrategy::Park);
+        let mut steps = 0;
+        while wait.step() {
+            steps += 1;
+        }
+        assert!(steps > 0);
+        assert!(started.elapsed() >= super::PARK_SPIN);
+    }
+
+    #[test]
+    fn timed_operations_do_not_spin_in_park_mode() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut wait = SpinWait::deadline(WaitStrategy::Park, deadline);
         assert!(!wait.step());
     }
 
     #[test]
     fn zero_duration_does_not_spin() {
-        let mut wait = SpinWait::blocking(WaitStrategy::SpinFor(Duration::ZERO), 128);
+        let mut wait = SpinWait::blocking(WaitStrategy::SpinFor(Duration::ZERO));
         assert!(!wait.step());
     }
 

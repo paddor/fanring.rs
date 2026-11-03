@@ -10,7 +10,7 @@ use crate::config::{SpinWait, WaitStrategy};
 use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
 
 use super::{
-    LaneId, LaneKey, MIN_RELEASE_BATCH, PARK_SPINS, PREFETCH_LIMIT, READY_POLL_INTERVAL, RecvError,
+    LaneId, LaneKey, MIN_RELEASE_BATCH, PREFETCH_LIMIT, READY_POLL_INTERVAL, RecvError,
     RecvTimeoutError, Shared, TryRecvError,
 };
 
@@ -912,7 +912,7 @@ impl<T, P: Teardown> Receiver<T, P> {
     #[cold]
     #[inline(never)]
     fn recv_slow<O: ReceiveOutput<T, P>>(&mut self) -> Result<O::Item, RecvError> {
-        let mut spin = SpinWait::blocking(self.wait_strategy, PARK_SPINS);
+        let mut spin = SpinWait::blocking(self.wait_strategy);
         while spin.step() {
             std::hint::spin_loop();
             match self.try_recv_output::<O>() {

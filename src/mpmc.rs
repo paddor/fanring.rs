@@ -39,10 +39,6 @@ const PREFETCH_LIMIT: usize = 64;
 #[cfg(loom)]
 const PREFETCH_LIMIT: usize = 2;
 const TRY_RECV_RETRIES: usize = 1;
-#[cfg(not(loom))]
-const PARK_SPINS: usize = 128;
-#[cfg(loom)]
-const PARK_SPINS: usize = 0;
 
 /// Create an MPMC channel with one bounded ring per sender.
 ///

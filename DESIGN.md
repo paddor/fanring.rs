@@ -112,9 +112,11 @@ sleeping. The registration snapshots a notification generation, and the
 sleep starts only if no notification arrived since. The recheck runs
 without the condition mutex, so notifiers and teardown never wait for it.
 
-Wait strategy belongs to the endpoint. Default parking has a short retry
-phase; bounded spinning uses the same registration protocol when its budget
-expires. Timeout operations share this protocol and stop at their deadline.
+Wait strategy belongs to the endpoint. Untimed default parking first retries
+for about one park and wake round trip, measured in time rather than
+attempts. Bounded spinning uses the same registration protocol when its
+budget expires. Timeout operations share this protocol and stop at their
+deadline.
 
 Async MPSC uses per-sender capacity wakers and one receiver data waker.
 Registration precedes a queue recheck. Futures remove retained registrations
