@@ -229,6 +229,13 @@ impl<T, P: Teardown> Shared<T, P> {
         if !self.receiver_alive.load(Ordering::Acquire) {
             return Err(TryRegisterBoundedError::Disconnected);
         }
+        // Skip a ring allocation that the locked recheck would discard.
+        if self.registered_lanes.load(Ordering::Acquire) >= max_lanes {
+            return Err(TryRegisterBoundedError::AtCapacity);
+        }
+        // Allocate outside the registry lock; the receiver takes it to adopt
+        // lanes.
+        let (producer, consumer) = crate::ring::spsc(capacity);
 
         let mut registry = lock(&self.registry);
         if !self.receiver_alive.load(Ordering::Acquire) {
@@ -240,7 +247,6 @@ impl<T, P: Teardown> Shared<T, P> {
         }
         let (key, page) = registry.allocate_lane();
         let signal = Arc::new(LaneSignal::new(page, key.slot));
-        let (producer, consumer) = crate::ring::spsc(capacity);
         registry.pending.push(PendingLane {
             key,
             signal: signal.clone(),

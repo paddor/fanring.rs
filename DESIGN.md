@@ -106,9 +106,9 @@ Each sender lane has one capacity wait cell. MPSC has one receiver data wait
 cell; MPMC shares data notifications among receiver waiters.
 
 Blocking operations try the queue, register a waiter, and recheck before
-sleeping. The wait registration bridges the recheck and condition-variable
-sleep. Opposite-direction notifications are delivered after releasing the
-current wait registration, avoiding data/space lock inversion.
+sleeping. The registration snapshots a notification generation, and the
+sleep starts only if no notification arrived since. The recheck runs
+without the condition mutex, so notifiers and teardown never wait for it.
 
 Wait strategy belongs to the endpoint. Default parking has a short retry
 phase; bounded spinning uses the same registration protocol when its budget

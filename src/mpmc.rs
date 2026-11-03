@@ -210,6 +210,9 @@ impl<T, P: Teardown> Shared<T, P> {
         if !self.receiver_alive.load(Ordering::Acquire) {
             return Err(TryRegisterError::Disconnected);
         }
+        // Allocate outside the registry lock; receivers take it to claim and
+        // park lanes.
+        let (producer, consumer) = crate::ring::spsc(self.capacity_per_sender);
 
         let mut registry = lock(&self.registry);
         if !self.receiver_alive.load(Ordering::Acquire) {
@@ -218,7 +221,6 @@ impl<T, P: Teardown> Shared<T, P> {
 
         let (key, page, topology_changed) = registry.allocate_lane();
         let signal = Arc::new(LaneSignal::new(page, key.slot));
-        let (producer, consumer) = crate::ring::spsc(self.capacity_per_sender);
         registry.install_lane(LaneToken::new(Lane::new(key, signal.clone(), consumer)));
         if topology_changed {
             self.ready

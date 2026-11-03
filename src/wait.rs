@@ -14,9 +14,11 @@ const NOTIFY_INCREMENT: usize = 2;
 /// notification generation. Clearing a registration preserves notifications
 /// that raced with wakeup handling.
 ///
-/// The registration owns the mutex across the caller's condition recheck.
-/// A notifier that observes `waiting` cannot signal until `Condvar::wait` has
-/// atomically released that mutex.
+/// A registration snapshots the generation. The caller rechecks its
+/// condition without holding the condition mutex; `wait` compares the
+/// snapshot under that mutex. A notifier advances the generation before it
+/// takes the mutex, so it either changes the snapshot or finds the waiter
+/// asleep in `Condvar::wait`. Notifiers never wait for a recheck.
 pub(crate) struct WaitCell {
     state: AtomicUsize,
     mutex: Mutex<()>,
@@ -37,12 +39,12 @@ impl WaitCell {
     }
 
     pub(crate) fn prepare(&self) -> WaitRegistration<'_> {
-        let guard = lock(&self.mutex);
+        // AcqRel: a notify that missed WAITING precedes this RMW, so the
+        // caller's recheck sees what that notifier published.
         let previous = self.state.fetch_or(WAITING, Ordering::AcqRel);
         debug_assert_eq!(previous & WAITING, 0);
         WaitRegistration {
             cell: self,
-            guard: Some(guard),
             snapshot: previous | WAITING,
         }
     }
@@ -85,74 +87,61 @@ impl fmt::Debug for WaitCell {
     }
 }
 
+/// Registered single waiter. Dropping it unregisters the waiter.
 pub(crate) struct WaitRegistration<'a> {
     cell: &'a WaitCell,
-    guard: Option<MutexGuard<'a, ()>>,
     snapshot: usize,
 }
 
 impl WaitRegistration<'_> {
-    #[allow(
-        clippy::significant_drop_tightening,
-        reason = "the condition mutex must stay held until the waiter bit is cleared"
-    )]
-    pub(crate) fn wait(mut self) {
-        if self.cell.state.load(Ordering::Acquire) != self.snapshot {
-            self.clear();
-            return;
+    pub(crate) fn wait(self) {
+        let guard = lock(&self.cell.mutex);
+        if self.is_current() {
+            drop(wait_on(&self.cell.condvar, guard));
         }
-        let guard = self.guard.take().expect("wait registration is active");
-        let guard = wait_on(&self.cell.condvar, guard);
-        self.guard = Some(guard);
-        self.clear();
     }
 
     /// Wait for at most `timeout`. Returns whether the wait timed out.
-    #[allow(
-        clippy::significant_drop_tightening,
-        reason = "the condition mutex must stay held until the waiter bit is cleared"
-    )]
-    pub(crate) fn wait_timeout(mut self, timeout: Duration) -> bool {
-        if self.cell.state.load(Ordering::Acquire) != self.snapshot {
-            self.clear();
+    pub(crate) fn wait_timeout(self, timeout: Duration) -> bool {
+        let guard = lock(&self.cell.mutex);
+        if !self.is_current() {
             return false;
         }
-        let guard = self.guard.take().expect("wait registration is active");
-        let (guard, timed_out) = wait_on_timeout(&self.cell.condvar, guard, timeout);
-        self.guard = Some(guard);
-        self.clear();
+        let (_guard, timed_out) = wait_on_timeout(&self.cell.condvar, guard, timeout);
         timed_out
     }
 
-    pub(crate) fn cancel(mut self) {
-        self.clear();
+    pub(crate) fn cancel(self) {
+        drop(self);
     }
 
-    fn clear(&mut self) {
+    /// Whether no notification arrived since `prepare`. Callers hold the
+    /// condition mutex, so a later notifier signals only after they sleep.
+    fn is_current(&self) -> bool {
+        self.cell.state.load(Ordering::Acquire) == self.snapshot
+    }
+}
+
+impl Drop for WaitRegistration<'_> {
+    fn drop(&mut self) {
+        // Keep the generation bits; the next snapshot starts from them.
         self.cell.state.fetch_and(!WAITING, Ordering::AcqRel);
-        self.guard.take();
     }
 }
 
 #[repr(align(128))]
 struct PaddedWaitState(AtomicUsize);
 
-impl Drop for WaitRegistration<'_> {
-    fn drop(&mut self) {
-        if self.guard.is_some() {
-            self.clear();
-        }
-    }
-}
-
 /// Multi-waiter condition cell.
 ///
-/// Waiters snapshot a notification generation while holding the condition
-/// mutex. Notifications advance the generation before taking that mutex, so a
-/// waiter either observes the change or is asleep when the condition variable
-/// is signaled. The low atomic state bit records whether any waiter exists;
-/// the exact count lives under the mutex already required by the condition
-/// variable.
+/// Waiters snapshot a notification generation and recheck their condition
+/// without holding the condition mutex; `wait` compares the snapshot under
+/// that mutex. Notifications advance the generation before taking the mutex,
+/// so a waiter either observes the change or is asleep when the condition
+/// variable is signaled. The low atomic state bit records whether any waiter
+/// exists; the exact count lives under the mutex already required by the
+/// condition variable. That bit changes only under the mutex and stays set
+/// while a registration counts, so only notifications change a snapshot.
 pub(crate) struct MultiWaitCell {
     state: PaddedWaitState,
     mutex: Mutex<usize>,
@@ -169,13 +158,21 @@ impl MultiWaitCell {
     }
 
     pub(crate) fn prepare(&self) -> MultiWaitRegistration<'_> {
-        let mut guard = lock(&self.mutex);
-        *guard = guard.checked_add(1).expect("waiter count overflow");
+        let mut waiters = lock(&self.mutex);
+        *waiters = waiters.checked_add(1).expect("waiter count overflow");
+        // AcqRel: a notify that missed WAITING precedes this RMW, so the
+        // caller's recheck sees what that notifier published.
         let previous = self.state.0.fetch_or(WAITING, Ordering::AcqRel);
         MultiWaitRegistration {
             cell: self,
-            guard: Some(guard),
             snapshot: previous | WAITING,
+        }
+    }
+
+    fn remove_waiter(&self, waiters: &mut usize) {
+        *waiters = waiters.checked_sub(1).expect("waiter count underflow");
+        if *waiters == 0 {
+            self.state.0.fetch_and(!WAITING, Ordering::AcqRel);
         }
     }
 
@@ -213,65 +210,63 @@ impl fmt::Debug for MultiWaitCell {
     }
 }
 
+/// Registered waiter of a [`MultiWaitCell`]. Dropping it unregisters the
+/// waiter.
 pub(crate) struct MultiWaitRegistration<'a> {
     cell: &'a MultiWaitCell,
-    guard: Option<MutexGuard<'a, usize>>,
     snapshot: usize,
 }
 
 impl MultiWaitRegistration<'_> {
-    #[allow(
-        clippy::significant_drop_tightening,
-        reason = "the condition mutex protects the waiter count during cleanup"
-    )]
-    pub(crate) fn wait(mut self) {
-        if self.cell.state.0.load(Ordering::Acquire) != self.snapshot {
-            self.clear();
-            return;
+    pub(crate) fn wait(self) {
+        let cell = self.cell;
+        let mut waiters = lock(&cell.mutex);
+        if self.is_current() {
+            waiters = wait_on(&cell.condvar, waiters);
         }
-        let guard = self.guard.take().expect("wait registration is active");
-        let guard = wait_on(&self.cell.condvar, guard);
-        self.guard = Some(guard);
-        self.clear();
+        self.finish(waiters);
     }
 
-    #[allow(
-        clippy::significant_drop_tightening,
-        reason = "the condition mutex protects the waiter count during cleanup"
-    )]
-    pub(crate) fn wait_timeout(mut self, timeout: Duration) -> bool {
-        if self.cell.state.0.load(Ordering::Acquire) != self.snapshot {
-            self.clear();
+    /// Wait for at most `timeout`. Returns whether the wait timed out.
+    pub(crate) fn wait_timeout(self, timeout: Duration) -> bool {
+        let cell = self.cell;
+        let waiters = lock(&cell.mutex);
+        if !self.is_current() {
+            self.finish(waiters);
             return false;
         }
-        let guard = self.guard.take().expect("wait registration is active");
-        let (guard, timed_out) = wait_on_timeout(&self.cell.condvar, guard, timeout);
-        self.guard = Some(guard);
-        self.clear();
+        let (waiters, timed_out) = wait_on_timeout(&cell.condvar, waiters, timeout);
+        self.finish(waiters);
         timed_out
     }
 
-    pub(crate) fn cancel(mut self) {
-        self.clear();
+    pub(crate) fn cancel(self) {
+        drop(self);
     }
 
-    fn clear(&mut self) {
-        let guard = self.guard.as_mut().expect("wait registration is active");
-        **guard = (**guard).checked_sub(1).expect("waiter count underflow");
-        if **guard == 0 {
-            self.cell.state.0.fetch_and(!WAITING, Ordering::AcqRel);
-        }
-        self.guard.take();
+    /// Whether no notification arrived since `prepare`. Callers hold the
+    /// condition mutex, so a later notifier signals only after they sleep.
+    fn is_current(&self) -> bool {
+        self.cell.state.0.load(Ordering::Acquire) == self.snapshot
+    }
+
+    /// Unregister with the condition mutex already held.
+    fn finish(self, mut waiters: MutexGuard<'_, usize>) {
+        self.cell.remove_waiter(&mut waiters);
+        // Already unregistered; skip the `Drop` that would lock again.
+        std::mem::forget(self);
     }
 }
 
 impl Drop for MultiWaitRegistration<'_> {
     fn drop(&mut self) {
-        if self.guard.is_some() {
-            self.clear();
-        }
+        let mut waiters = lock(&self.cell.mutex);
+        self.cell.remove_waiter(&mut waiters);
     }
 }
+
+#[cfg(all(test, not(loom)))]
+mod tests;
 
 #[cfg(all(test, loom, target_pointer_width = "64"))]
 mod loom_tests {

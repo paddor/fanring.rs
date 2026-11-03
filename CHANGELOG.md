@@ -8,6 +8,10 @@ All notable changes to this project are documented here.
 
 - MPSC `Receiver::pause` publishes slots already consumed from the lane, so
   its sender can fill the whole ring while the lane stays paused.
+- Blocking sends and receives recheck the queue without holding the wait
+  mutex. Notifiers and receiver teardown no longer wait for a racing recheck,
+  including payload destructors that a coordinated close runs inside it.
+- Sender registration allocates its ring before taking the registry lock.
 
 ## [0.3.9] - 2026-10-06
 
