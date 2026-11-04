@@ -61,6 +61,9 @@ unsafe_op_in_unsafe_fn = "deny"
 level = "warn"
 check-cfg = ["cfg(loom)"]
 
+[lints.clippy]
+too_many_lines = "warn"
+
 [features]
 default = []
 async = ["dep:atomic-waker"]
