@@ -141,6 +141,14 @@ impl<T, P: Teardown> Receiver<T, P> {
                 return Ok(O::item(self, key, value));
             }
         }
+        // OPTIMIZE: A lone lane still takes two out-of-line receives per
+        // burst. The value that completes the burst or release batch goes
+        // through `try_recv_inner` below, and the next call opens a window.
+        // Serving that value here with full lane bookkeeping and opening the
+        // next window in the same call would save one, an estimated 5% on
+        // prefilled u64 `try_recv`. Keep calls off the path between the slot
+        // read and the return: an end-of-window call in the fast path cost
+        // `[u64; 32]` one extra copy per value.
         loop {
             let (result, released) = self.try_recv_inner::<false, O>();
             let retry = released.is_some() && matches!(result, Err(TryRecvError::Empty));
