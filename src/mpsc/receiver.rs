@@ -119,11 +119,16 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// out of line to keep the caller's receive loop short.
     #[inline(never)]
     fn try_recv_refill<O: ReceiveOutput<T, P>>(&mut self) -> Result<O::Item, TryRecvError> {
+        // Run a due readiness poll here, as the full path would, so a new
+        // window can open in this call.
+        if self.items_until_ready_poll == 0 && !self.active.is_empty() {
+            self.collect_ready(false);
+            self.items_until_ready_poll = READY_POLL_INTERVAL;
+        }
         // Keep the front lane in place between release, rotation, and
         // readiness boundaries. Refresh short prefetch windows here as well:
         // they do not require lane scheduling or a wakeup.
-        if self.items_until_ready_poll != 0
-            && let Some(&key) = self.active.front()
+        if let Some(&key) = self.active.front()
             && let Some(lane) = self.lanes.get_mut(key.slot).and_then(Option::as_mut)
             && lane.key == key
         {
