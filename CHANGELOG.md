@@ -4,8 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-11-04
+
 ### Changed
 
+- Require yring 0.3.21.
 - MPMC receives return values already staged by the receiver before any lane
   maintenance, skipping per-value effect bookkeeping and payload copies.
 - MPSC `try_recv`, and `try_recv_fair` with one active lane, serve a lane's
