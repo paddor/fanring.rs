@@ -377,48 +377,17 @@ impl<T, P: Teardown> Receiver<T, P> {
             lane.cached_available = lane.consumer.prefetch();
             if lane.cached_available == 0 {
                 let released = lane.release_pending().then(|| lane.signal.clone());
-                return match self.shared.finish_empty_lane(lane) {
-                    FinishLane::Ready(lane) => {
-                        self.requeue_lane(lane);
-                        LaneDrain::Empty(Effects {
-                            released,
-                            wake: Wake::One,
-                            progressed: false,
-                        })
-                    }
-                    FinishLane::Parked => LaneDrain::Empty(Effects {
-                        released,
-                        wake: Wake::None,
-                        progressed: false,
-                    }),
-                    FinishLane::Retired { wake_all } => LaneDrain::Empty(Effects {
-                        released,
-                        wake: if wake_all { Wake::All } else { Wake::None },
-                        progressed: true,
-                    }),
-                };
+                let (wake, retired) = self.finish_lane(lane);
+                return LaneDrain::Empty(Effects {
+                    released,
+                    wake,
+                    progressed: retired,
+                });
             }
         }
 
         let batch = lane.cached_available.min(PREFETCH_LIMIT);
-        let value = lane
-            .consumer
-            .pop()
-            .expect("cached_available guarantees prefetched data");
-        // Only this receiver can create a second clone while the count is one.
-        if self.shared.live_receivers.load(Ordering::Acquire) == 1 {
-            self.private.borrow_mut().extend((1..batch).map(|_| {
-                lane.consumer
-                    .pop()
-                    .expect("batch is bounded by cached availability")
-            }));
-        } else {
-            self.local.push_batch((1..batch).map(|_| {
-                lane.consumer
-                    .pop()
-                    .expect("batch is bounded by cached availability")
-            }));
-        }
+        let value = self.take_batch(&mut lane, batch);
         lane.cached_available -= batch;
         lane.unreleased += batch;
         // Release a full batch, or everything once this receiver has taken the
@@ -428,32 +397,61 @@ impl<T, P: Teardown> Receiver<T, P> {
             && lane.release_pending())
         .then(|| lane.signal.clone());
 
-        let mut wake = if batch > 1 { Wake::All } else { Wake::None };
-        if lane.cached_available != 0 {
-            self.requeue_lane(lane);
-            wake = wake.merge(Wake::One);
-        } else {
-            match self.shared.finish_empty_lane(lane) {
-                FinishLane::Ready(lane) => {
-                    self.requeue_lane(lane);
-                    wake = wake.merge(Wake::One);
-                }
-                FinishLane::Parked => {}
-                FinishLane::Retired { wake_all } => {
-                    if wake_all {
-                        wake = Wake::All;
-                    }
-                }
-            }
-        }
-
+        let staged = if batch > 1 { Wake::All } else { Wake::None };
+        let (wake, _) = self.settle_lane(lane);
         LaneDrain::Item {
             value,
             effects: Effects {
                 released,
-                wake,
+                wake: staged.merge(wake),
                 progressed: false,
             },
+        }
+    }
+
+    /// Pops `batch` prefetched values from `lane`. Returns the first and stages
+    /// the rest for this receiver, or for stealing once it has clones.
+    fn take_batch(&self, lane: &mut LaneToken<T, P>, batch: usize) -> T {
+        let value = lane
+            .consumer
+            .pop()
+            .expect("cached_available guarantees prefetched data");
+        let rest = (1..batch).map(|_| {
+            lane.consumer
+                .pop()
+                .expect("batch is bounded by cached availability")
+        });
+        // Only this receiver can create a second clone while the count is one.
+        if self.shared.live_receivers.load(Ordering::Acquire) == 1 {
+            self.private.borrow_mut().extend(rest);
+        } else {
+            self.local.push_batch(rest);
+        }
+        value
+    }
+
+    /// Requeues `lane` while it holds prefetched values, otherwise finishes it.
+    /// Returns the receiver wake that calls for and whether the lane retired.
+    fn settle_lane(&self, lane: LaneToken<T, P>) -> (Wake, bool) {
+        if lane.cached_available != 0 {
+            self.requeue_lane(lane);
+            return (Wake::One, false);
+        }
+        self.finish_lane(lane)
+    }
+
+    /// Finishes an empty `lane`: requeues it if a send raced in, or parks or
+    /// retires it. Returns the receiver wake and whether the lane retired.
+    fn finish_lane(&self, lane: LaneToken<T, P>) -> (Wake, bool) {
+        match self.shared.finish_empty_lane(lane) {
+            FinishLane::Ready(lane) => {
+                self.requeue_lane(lane);
+                (Wake::One, false)
+            }
+            FinishLane::Parked => (Wake::None, false),
+            FinishLane::Retired { wake_all } => {
+                (if wake_all { Wake::All } else { Wake::None }, true)
+            }
         }
     }
 

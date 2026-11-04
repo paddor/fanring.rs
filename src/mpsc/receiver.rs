@@ -247,24 +247,17 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// ID from another channel. Buffered values precede disconnect.
     pub fn try_recv_from(&mut self, id: &LaneId) -> Result<T, TryRecvError> {
         let lane = self.lane_mut(id).ok_or(TryRecvError::Disconnected)?;
-        if lane.cached_available == 0 {
-            lane.cached_available = lane.consumer.prefetch();
-            if lane.cached_available == 0 {
-                let empty = lane.settle_empty();
-                let released = match empty {
-                    EmptyLane::Keep { released } | EmptyLane::Idle { released, .. } => released,
-                };
-                if released {
-                    lane.signal.notify_space();
+        if let Some(empty) = lane.refill() {
+            if empty.released() {
+                lane.signal.notify_space();
+            }
+            if let EmptyLane::Idle { disconnected, .. } = empty {
+                self.active.retain(|key| *key != id.key);
+                if disconnected {
+                    self.retire_lane(id.key);
+                    return Err(TryRecvError::Disconnected);
                 }
-                if let EmptyLane::Idle { disconnected, .. } = empty {
-                    self.active.retain(|key| *key != id.key);
-                    if disconnected {
-                        self.retire_lane(id.key);
-                        return Err(TryRecvError::Disconnected);
-                    }
-                    return Err(TryRecvError::Empty);
-                }
+                return Err(TryRecvError::Empty);
             }
         }
         let lane = self.lanes[id.key.slot].as_mut().expect("validated lane");
@@ -828,18 +821,7 @@ impl<T, P: Teardown> Receiver<T, P> {
         admit: &mut A,
     ) -> Drained {
         let mut received = 0;
-        let mut rejected = false;
-        while received < limit {
-            if self.active.is_empty() {
-                self.collect_ready(true);
-                if self.active.is_empty() {
-                    break;
-                }
-            } else if self.items_until_ready_poll == 0 {
-                self.collect_ready(false);
-                self.items_until_ready_poll = READY_POLL_INTERVAL;
-            }
-
+        while received < limit && self.refresh_active() {
             let key = *self.active.front().expect("active lane present");
             let Some(lane) = self
                 .lanes
@@ -850,65 +832,63 @@ impl<T, P: Teardown> Receiver<T, P> {
                 self.active.pop_front();
                 continue;
             };
-
-            if lane.cached_available == 0 {
-                lane.cached_available = lane.consumer.prefetch();
-                if lane.cached_available == 0 {
-                    match lane.settle_empty() {
-                        EmptyLane::Keep { released } => {
-                            if released {
-                                lane.signal.notify_space();
-                            }
-                            self.active.rotate_left(1);
-                        }
-                        EmptyLane::Idle {
-                            disconnected,
-                            released,
-                        } => {
-                            if released {
-                                lane.signal.notify_space();
-                            }
-                            self.active.pop_front();
-                            if disconnected {
-                                self.retire_lane(key);
-                            }
-                        }
-                    }
-                    continue;
+            if let Some(empty) = lane.refill() {
+                if empty.released() {
+                    lane.signal.notify_space();
                 }
+                self.settle_empty_front(key, empty);
+                continue;
             }
 
             let take = (limit - received)
-                .min(lane.cached_available)
-                .min(PREFETCH_LIMIT - lane.burst)
-                .min(lane.release_batch - lane.unreleased)
-                .min(self.items_until_ready_poll);
-            let moved = if A::ALWAYS {
-                let moved = lane.consumer.pop_into(output, take);
-                debug_assert_eq!(moved, take, "prefetched window shorter than cached");
-                moved
-            } else {
-                lane.consumer
-                    .pop_into_while(output, take, |value| admit.admit(value))
-            };
-            lane.cached_available -= moved;
-            lane.unreleased += moved;
-            lane.burst += moved;
+                .min(self.items_until_ready_poll)
+                .min(lane.chunk_limit());
+            let moved = lane.move_chunk(output, take, admit);
             self.items_until_ready_poll -= moved;
             received += moved;
-            if lane.unreleased == lane.release_batch && lane.release_pending() {
-                lane.signal.notify_space();
-            }
             if lane.burst == PREFETCH_LIMIT {
                 lane.burst = 0;
                 self.active.rotate_left(1);
             }
             if moved < take {
-                rejected = true;
-                break;
+                return Drained {
+                    received,
+                    rejected: true,
+                };
             }
         }
-        Drained { received, rejected }
+        Drained {
+            received,
+            rejected: false,
+        }
+    }
+
+    /// Whether a lane is queued for draining. Collects ready lanes when none
+    /// is queued, and when the readiness poll is due.
+    fn refresh_active(&mut self) -> bool {
+        if self.active.is_empty() {
+            self.collect_ready(true);
+            return !self.active.is_empty();
+        }
+        if self.items_until_ready_poll == 0 {
+            self.collect_ready(false);
+            self.items_until_ready_poll = READY_POLL_INTERVAL;
+        }
+        true
+    }
+
+    /// Rotates past the front lane after its ring came back empty, or removes
+    /// it and retires it once its sender is gone.
+    fn settle_empty_front(&mut self, key: LaneKey, empty: EmptyLane) {
+        match empty {
+            EmptyLane::Keep { .. } => self.active.rotate_left(1),
+            EmptyLane::Idle { disconnected, .. } => {
+                self.active.pop_front();
+                if disconnected {
+                    self.retire_lane(key);
+                }
+            }
+        }
     }
 
     #[cold]
@@ -976,20 +956,17 @@ impl<T, P: Teardown> Receiver<T, P> {
             return LanePoll::Stale;
         }
 
-        if lane.cached_available == 0 {
-            lane.cached_available = lane.consumer.prefetch();
-            if lane.cached_available == 0 {
-                return match lane.settle_empty() {
-                    EmptyLane::Keep { released } => LanePoll::Keep { released },
-                    EmptyLane::Idle {
-                        disconnected,
-                        released,
-                    } => LanePoll::Idle {
-                        disconnected,
-                        released,
-                    },
-                };
-            }
+        if let Some(empty) = lane.refill() {
+            return match empty {
+                EmptyLane::Keep { released } => LanePoll::Keep { released },
+                EmptyLane::Idle {
+                    disconnected,
+                    released,
+                } => LanePoll::Idle {
+                    disconnected,
+                    released,
+                },
+            };
         }
 
         let value = lane
@@ -1244,6 +1221,51 @@ impl<T, P: Teardown> Lane<T, P> {
         true
     }
 
+    /// Prefetch once the cached window is used up. Returns how the lane
+    /// settled when its ring is empty.
+    #[inline(always)]
+    fn refill(&mut self) -> Option<EmptyLane> {
+        if self.cached_available == 0 {
+            self.cached_available = self.consumer.prefetch();
+            if self.cached_available == 0 {
+                return Some(self.settle_empty());
+            }
+        }
+        None
+    }
+
+    /// Most values one bulk move may take before slot release or rotation.
+    fn chunk_limit(&self) -> usize {
+        self.cached_available
+            .min(PREFETCH_LIMIT - self.burst)
+            .min(self.release_batch - self.unreleased)
+    }
+
+    /// Move up to `take` prefetched values to `output`, stopping at the first
+    /// value `admit` rejects. Releases slots once a release batch is complete.
+    fn move_chunk<A: Admit<T>>(
+        &mut self,
+        output: &mut Vec<T>,
+        take: usize,
+        admit: &mut A,
+    ) -> usize {
+        let moved = if A::ALWAYS {
+            let moved = self.consumer.pop_into(output, take);
+            debug_assert_eq!(moved, take, "prefetched window shorter than cached");
+            moved
+        } else {
+            self.consumer
+                .pop_into_while(output, take, |value| admit.admit(value))
+        };
+        self.cached_available -= moved;
+        self.unreleased += moved;
+        self.burst += moved;
+        if self.unreleased == self.release_batch && self.release_pending() {
+            self.signal.notify_space();
+        }
+        moved
+    }
+
     /// Handle a prefetch window that came back empty.
     ///
     /// Releases partial credits first so neither side parks on unpublished
@@ -1277,6 +1299,15 @@ impl<T, P: Teardown> Lane<T, P> {
 enum EmptyLane {
     Keep { released: bool },
     Idle { disconnected: bool, released: bool },
+}
+
+impl EmptyLane {
+    /// Whether settling released consumed slots to the sender.
+    const fn released(&self) -> bool {
+        match self {
+            Self::Keep { released } | Self::Idle { released, .. } => *released,
+        }
+    }
 }
 
 enum LanePoll<T> {
