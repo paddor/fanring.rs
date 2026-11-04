@@ -11,9 +11,21 @@ impl<T, P: Teardown> Receiver<T, P> {
     pub(super) fn collect_ready(&mut self, all: bool) {
         self.refresh_registry();
         let group_count = self.groups.len();
-        let start = self.ready_group_cursor;
-        for offset in 0..group_count {
-            let group_index = (start + offset) % group_count;
+        // The cursor may equal `group_count`. Wrap it by comparison: this
+        // runs on every readiness poll, and a modulo costs a division.
+        let mut next_group = self.ready_group_cursor;
+        for _ in 0..group_count {
+            let group_index = if next_group < group_count {
+                next_group
+            } else {
+                0
+            };
+            next_group = group_index + 1;
+            // A load skips the swap for an empty group. Like the swap, it
+            // sees every mark whose wake check missed a registered waiter.
+            if !self.groups[group_index].has_ready() {
+                continue;
+            }
             let mut page_bits = self.groups[group_index].take_all();
             if page_bits == 0 {
                 continue;
@@ -45,7 +57,7 @@ impl<T, P: Teardown> Receiver<T, P> {
                     }
                 }
             }
-            self.ready_group_cursor = (group_index + 1) % group_count;
+            self.ready_group_cursor = next_group;
             if !all {
                 break;
             }

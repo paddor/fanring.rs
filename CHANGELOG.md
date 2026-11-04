@@ -17,6 +17,8 @@ All notable changes to this project are documented here.
   wake check stay small enough to inline into the caller's loop.
 - MPSC `try_recv` runs a due readiness poll itself and opens the next fast
   window in the same call, instead of taking the full receive path.
+- MPSC readiness polls load each ready group before swapping it and advance
+  the group cursor without a division.
 - `WaitStrategy::Park` spins for about ten microseconds before untimed
   operations park, instead of 128 retries. The retry window varied with
   payload size and code generation, from about 1.5 to 14 microseconds.
