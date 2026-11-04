@@ -9,10 +9,16 @@ pub(in crate::mpsc) struct Lane<T, P: Teardown> {
     pub(super) key: LaneKey,
     pub(super) signal: Arc<LaneSignal>,
     pub(super) consumer: crate::ring::Consumer<T, P>,
-    pub(super) cached_available: usize,
-    pub(super) unreleased: usize,
-    pub(super) release_batch: usize,
-    pub(super) burst: usize,
+    // The counters below change only through `Lane` methods, so every
+    // reader sees them with the fast window closed.
+    cached_available: usize,
+    unreleased: usize,
+    release_batch: usize,
+    burst: usize,
+    /// Values of an open fast window that single receives may still pop.
+    /// The counters above already include them; `close_fast` refunds the
+    /// rest.
+    fast_left: usize,
     /// Whether `key` is in the receiver's `active` rotation.
     pub(super) queued: bool,
 }
@@ -38,12 +44,154 @@ impl<T, P: Teardown> Lane<T, P> {
             unreleased: 0,
             release_batch,
             burst: 0,
+            fast_left: 0,
             queued: false,
         }
     }
 
+    /// Opens a fast window on this lane.
+    ///
+    /// The window holds up to `poll_budget` prefetched values and stops one
+    /// short of the release batch and of the burst limit, so the value that
+    /// completes either goes through [`poll`](Self::poll). Its values are
+    /// charged to the lane counters up front, which lets
+    /// [`pop_fast`](Self::pop_fast) skip per-value lane bookkeeping. The
+    /// caller still charges the poll budget per value.
+    pub(super) fn grant_fast(&mut self, poll_budget: usize) {
+        self.close_fast();
+        if self.cached_available == 0 {
+            self.cached_available = self.consumer.prefetch();
+        }
+        let granted = self
+            .cached_available
+            .min(self.release_batch.saturating_sub(self.unreleased + 1))
+            .min(PREFETCH_LIMIT.saturating_sub(self.burst + 1))
+            .min(poll_budget);
+        self.cached_available -= granted;
+        self.unreleased += granted;
+        self.burst += granted;
+        self.fast_left = granted;
+    }
+
+    /// Pops the next value of the open fast window, if any.
+    #[inline(always)]
+    pub(super) fn pop_fast(&mut self) -> Option<T> {
+        if self.fast_left == 0 {
+            return None;
+        }
+        self.fast_left -= 1;
+        Some(
+            self.consumer
+                .pop()
+                .expect("a fast window holds prefetched values"),
+        )
+    }
+
+    /// Refunds the unpopped part of the fast window to the counters.
+    #[inline]
+    pub(super) fn close_fast(&mut self) {
+        if self.fast_left != 0 {
+            self.cached_available += self.fast_left;
+            self.unreleased -= self.fast_left;
+            self.burst -= self.fast_left;
+            self.fast_left = 0;
+        }
+    }
+
+    /// Pops one value with full bookkeeping: slot release at the release
+    /// batch and rotation at the burst limit, or every value when `FAIR`.
+    #[inline(always)]
+    pub(super) fn poll<const FAIR: bool>(&mut self) -> LanePoll<T> {
+        if let Some(empty) = self.refill() {
+            return match empty {
+                EmptyLane::Keep { released } => LanePoll::Keep { released },
+                EmptyLane::Idle {
+                    disconnected,
+                    released,
+                } => LanePoll::Idle {
+                    disconnected,
+                    released,
+                },
+            };
+        }
+
+        let value = self
+            .consumer
+            .pop()
+            .expect("cached_available guarantees prefetched data");
+        self.cached_available -= 1;
+        self.unreleased += 1;
+        self.burst += 1;
+        let released = self.unreleased == self.release_batch && self.release_pending();
+
+        let rotate = FAIR || self.burst == PREFETCH_LIMIT;
+        if rotate {
+            self.burst = 0;
+        }
+        LanePoll::Item {
+            value,
+            rotate,
+            released,
+        }
+    }
+
+    /// Pops a prefetched value for a fair receive from the only active
+    /// lane, through its fast window. Opens one if none is open.
+    ///
+    /// A fair receive ends the burst, so afterwards the burst counts only
+    /// the window's unpopped values, which [`close_fast`](Self::close_fast)
+    /// refunds. The value that completes the release batch goes through
+    /// [`poll`](Self::poll).
+    // Inline into the fair fast path: an out-of-line call returns a large
+    // `T` through memory, which costs one more payload copy per value.
+    #[inline(always)]
+    pub(super) fn pop_fair(&mut self, poll_budget: usize) -> Option<T> {
+        if self.fast_left == 0 {
+            // No window is open, so there is nothing to refund. Ending the
+            // burst first lets the window run to the burst limit.
+            self.burst = 0;
+            self.grant_fast(poll_budget);
+        }
+        let value = self.pop_fast()?;
+        self.burst = self.fast_left;
+        Some(value)
+    }
+
+    /// Pops a value after [`refill`](Self::refill) found one, leaving the
+    /// burst alone. Returns it and whether its slot completed a release
+    /// batch, which the caller signals.
+    pub(super) fn pop_targeted(&mut self) -> (T, bool) {
+        debug_assert_eq!(self.fast_left, 0, "refill closes the fast window");
+        let value = self.consumer.pop().expect("prefetched value");
+        self.cached_available -= 1;
+        self.unreleased += 1;
+        let released = self.unreleased == self.release_batch && self.release_pending();
+        (value, released)
+    }
+
+    /// Ends a burst that reached the limit. Returns whether it did.
+    #[inline]
+    pub(super) fn end_full_burst(&mut self) -> bool {
+        debug_assert_eq!(self.fast_left, 0, "refill closes the fast window");
+        if self.burst != PREFETCH_LIMIT {
+            return false;
+        }
+        self.burst = 0;
+        true
+    }
+
+    /// Reloads an exhausted window. Returns whether the ring is still empty.
+    pub(super) fn reload_is_empty(&mut self) -> bool {
+        self.close_fast();
+        if self.cached_available == 0 {
+            self.cached_available = self.consumer.prefetch();
+        }
+        self.cached_available == 0
+    }
+
     #[inline]
     pub(super) fn release_pending(&mut self) -> bool {
+        self.close_fast();
         if self.unreleased == 0 {
             return false;
         }
@@ -56,6 +204,7 @@ impl<T, P: Teardown> Lane<T, P> {
     /// settled when its ring is empty.
     #[inline(always)]
     pub(super) fn refill(&mut self) -> Option<EmptyLane> {
+        self.close_fast();
         if self.cached_available == 0 {
             self.cached_available = self.consumer.prefetch();
             if self.cached_available == 0 {
@@ -68,6 +217,7 @@ impl<T, P: Teardown> Lane<T, P> {
     /// Most values one bulk move may take before slot release or rotation.
     #[inline]
     pub(super) fn chunk_limit(&self) -> usize {
+        debug_assert_eq!(self.fast_left, 0, "refill closes the fast window");
         self.cached_available
             .min(PREFETCH_LIMIT - self.burst)
             .min(self.release_batch - self.unreleased)

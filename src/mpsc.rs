@@ -193,6 +193,7 @@ fn build_channel<T, P: Teardown>(capacity_per_sender: usize) -> (Sender<T, P>, R
             ready_group_cursor: 0,
             seen_registry_generation: 0,
             items_until_ready_poll: READY_POLL_INTERVAL,
+            fast_slot: 0,
             capacity_per_sender: capacity_per_sender.next_power_of_two(),
             wait_strategy: WaitStrategy::default(),
         },

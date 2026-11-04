@@ -180,11 +180,9 @@ impl<T, P: Teardown> Receiver<T, P> {
             }
         }
         let lane = self.lanes[id.key.slot].as_mut().expect("validated lane");
-        let value = lane.consumer.pop().expect("prefetched value");
-        lane.cached_available -= 1;
-        lane.unreleased += 1;
         // A targeted receive does not change the ordinary lane rotation.
-        if lane.unreleased == lane.release_batch && lane.release_pending() {
+        let (value, released) = lane.pop_targeted();
+        if released {
             lane.signal.notify_space();
         }
         if !self.paused[id.key.slot] && !lane.queued {

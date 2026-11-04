@@ -11,9 +11,7 @@ use crate::compat::{Arc, Ordering, lock};
 use crate::config::{SpinWait, WaitStrategy};
 use crate::ready::{ReadyGroup, ReadyPage};
 
-use super::{
-    LaneKey, PREFETCH_LIMIT, READY_POLL_INTERVAL, RecvError, RecvTimeoutError, Shared, TryRecvError,
-};
+use super::{LaneKey, READY_POLL_INTERVAL, RecvError, RecvTimeoutError, Shared, TryRecvError};
 
 mod batch;
 mod iter;
@@ -62,6 +60,10 @@ pub struct Receiver<T, P: Teardown = Deferred> {
     pub(super) ready_group_cursor: usize,
     pub(super) seen_registry_generation: usize,
     pub(super) items_until_ready_poll: usize,
+    /// Slot of the lane that last opened or used a fast window. Only that
+    /// lane can hold one, and an empty, closed, or replaced slot simply
+    /// fails the fast path.
+    pub(super) fast_slot: usize,
     pub(super) capacity_per_sender: usize,
     pub(super) wait_strategy: WaitStrategy,
 }
@@ -99,31 +101,38 @@ impl<T, P: Teardown> Receiver<T, P> {
     pub(super) fn try_recv_output<O: ReceiveOutput<T, P>>(
         &mut self,
     ) -> Result<O::Item, TryRecvError> {
-        // Keep the front lane in place between release, rotation, and readiness
-        // boundaries. Refresh short prefetch windows here as well: they do not
-        // require lane scheduling or a wakeup.
+        // An open fast window skips lane lookup, rotation, slot release, and
+        // readiness checks until it runs out.
+        if let Some(lane) = self.lanes.get_mut(self.fast_slot).and_then(Option::as_mut)
+            && let Some(value) = lane.pop_fast()
+        {
+            let key = lane.key;
+            // The window fits in the poll budget, so this cannot underflow.
+            self.items_until_ready_poll -= 1;
+            return Ok(O::item(self, key, value));
+        }
+        self.try_recv_refill::<O>()
+    }
+
+    /// Opens a fast window on the front lane and receives its first value,
+    /// or takes the full receive path. Runs once per window, so it stays
+    /// out of line to keep the caller's receive loop short.
+    #[inline(never)]
+    fn try_recv_refill<O: ReceiveOutput<T, P>>(&mut self) -> Result<O::Item, TryRecvError> {
+        // Keep the front lane in place between release, rotation, and
+        // readiness boundaries. Refresh short prefetch windows here as well:
+        // they do not require lane scheduling or a wakeup.
         if self.items_until_ready_poll != 0
             && let Some(&key) = self.active.front()
             && let Some(lane) = self.lanes.get_mut(key.slot).and_then(Option::as_mut)
             && lane.key == key
         {
-            if lane.cached_available == 0 {
-                lane.cached_available = lane.consumer.prefetch();
-            }
-            if lane.cached_available != 0
-                && lane.unreleased + 1 < lane.release_batch
-                && lane.burst + 1 < PREFETCH_LIMIT
-            {
-                // Finish bookkeeping before loading T, so the payload does not
-                // pass through the maintenance path's intermediate results.
-                lane.cached_available -= 1;
-                lane.unreleased += 1;
-                lane.burst += 1;
+            // The poll budget is charged per value, not per window, so it
+            // stays exact when another receive closes the window early.
+            lane.grant_fast(self.items_until_ready_poll);
+            if let Some(value) = lane.pop_fast() {
                 self.items_until_ready_poll -= 1;
-                let value = lane
-                    .consumer
-                    .pop()
-                    .expect("cached_available guarantees prefetched data");
+                self.fast_slot = key.slot;
                 return Ok(O::item(self, key, value));
             }
         }
@@ -172,21 +181,11 @@ impl<T, P: Teardown> Receiver<T, P> {
             && let Some(&key) = self.active.front()
             && let Some(lane) = self.lanes.get_mut(key.slot).and_then(Option::as_mut)
             && lane.key == key
+            && let Some(value) = lane.pop_fair(self.items_until_ready_poll)
         {
-            if lane.cached_available == 0 {
-                lane.cached_available = lane.consumer.prefetch();
-            }
-            if lane.cached_available != 0 && lane.unreleased + 1 < lane.release_batch {
-                lane.cached_available -= 1;
-                lane.unreleased += 1;
-                lane.burst = 0;
-                self.items_until_ready_poll -= 1;
-                let value = lane
-                    .consumer
-                    .pop()
-                    .expect("cached_available guarantees prefetched data");
-                return Ok(O::item(self, key, value));
-            }
+            self.items_until_ready_poll -= 1;
+            self.fast_slot = key.slot;
+            return Ok(O::item(self, key, value));
         }
         loop {
             let (result, released) = self.try_recv_inner::<true, O>();
@@ -345,43 +344,9 @@ impl<T, P: Teardown> Receiver<T, P> {
     // the compiler's inline budget and add a call/return to every blocking recv.
     #[inline(always)]
     fn poll_lane<const FAIR: bool>(&mut self, key: LaneKey) -> LanePoll<T> {
-        let Some(lane) = self.lanes.get_mut(key.slot).and_then(Option::as_mut) else {
-            return LanePoll::Stale;
-        };
-        if lane.key != key {
-            return LanePoll::Stale;
-        }
-
-        if let Some(empty) = lane.refill() {
-            return match empty {
-                EmptyLane::Keep { released } => LanePoll::Keep { released },
-                EmptyLane::Idle {
-                    disconnected,
-                    released,
-                } => LanePoll::Idle {
-                    disconnected,
-                    released,
-                },
-            };
-        }
-
-        let value = lane
-            .consumer
-            .pop()
-            .expect("cached_available guarantees prefetched data");
-        lane.cached_available -= 1;
-        lane.unreleased += 1;
-        lane.burst += 1;
-        let released = lane.unreleased == lane.release_batch && lane.release_pending();
-
-        let rotate = FAIR || lane.burst == PREFETCH_LIMIT;
-        if rotate {
-            lane.burst = 0;
-        }
-        LanePoll::Item {
-            value,
-            rotate,
-            released,
+        match self.lanes.get_mut(key.slot).and_then(Option::as_mut) {
+            Some(lane) if lane.key == key => lane.poll::<FAIR>(),
+            _ => LanePoll::Stale,
         }
     }
 

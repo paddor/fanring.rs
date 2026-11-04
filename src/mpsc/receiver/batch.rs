@@ -1,4 +1,4 @@
-use crate::mpsc::{LaneKey, PREFETCH_LIMIT, READY_POLL_INTERVAL, RecvError, TryRecvError};
+use crate::mpsc::{LaneKey, READY_POLL_INTERVAL, RecvError, TryRecvError};
 use crate::teardown::Teardown;
 
 use super::{EmptyLane, Receiver};
@@ -367,8 +367,7 @@ impl<T, P: Teardown> Receiver<T, P> {
             let moved = lane.move_chunk(output, take, admit);
             self.items_until_ready_poll -= moved;
             received += moved;
-            if lane.burst == PREFETCH_LIMIT {
-                lane.burst = 0;
+            if lane.end_full_burst() {
                 self.active.rotate_left(1);
             }
             if moved < take {

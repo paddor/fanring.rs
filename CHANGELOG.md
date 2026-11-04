@@ -8,6 +8,11 @@ All notable changes to this project are documented here.
 
 - MPMC receives return values already staged by the receiver before any lane
   maintenance, skipping per-value effect bookkeeping and payload copies.
+- MPSC `try_recv`, and `try_recv_fair` with one active lane, serve a lane's
+  prefetched values from a fast window that skips lane lookup and per-value
+  release, rotation, and burst checks. The window ends where the next
+  release, rotation, or readiness poll is due, so scheduling and slot release
+  are unchanged.
 - `WaitStrategy::Park` spins for about ten microseconds before untimed
   operations park, instead of 128 retries. The retry window varied with
   payload size and code generation, from about 1.5 to 14 microseconds.

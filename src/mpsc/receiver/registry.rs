@@ -58,14 +58,9 @@ impl<T, P: Teardown> Receiver<T, P> {
         // drops. Empty paused lanes must not hide final channel disconnect;
         // unread paused values still require explicit drain.
         for slot in 0..self.lanes.len() {
-            let retired = self.lanes[slot].as_mut().and_then(|lane| {
-                if self.paused[slot] && lane.cached_available == 0 {
-                    lane.cached_available = lane.consumer.prefetch();
-                    (lane.cached_available == 0).then_some(lane.key)
-                } else {
-                    None
-                }
-            });
+            let retired = self.lanes[slot]
+                .as_mut()
+                .and_then(|lane| (self.paused[slot] && lane.reload_is_empty()).then_some(lane.key));
             if let Some(key) = retired {
                 self.retire_lane(key);
             }
