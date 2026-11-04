@@ -10,7 +10,7 @@ mod support;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fanring::mpsc::{Receiver, Sender, TryRecvError, TrySendError, channel};
@@ -53,6 +53,45 @@ struct RunContext {
     run_id: String,
     cpu: String,
     affinity: Affinity,
+}
+impl RunContext {
+    /// Tags this run with the current time, the CPU, and the pinning policy.
+    fn from_env() -> Self {
+        Self {
+            run_id: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before Unix epoch")
+                .as_nanos()
+                .to_string(),
+            cpu: cpu_name(),
+            affinity: Affinity::from_env(),
+        }
+    }
+}
+
+/// Configurations, receive modes, and sampling selected for this run.
+#[derive(Debug)]
+struct Plan {
+    configs: Vec<Config>,
+    receives: Vec<Receive>,
+    sampling: Sampling,
+}
+
+/// One timed channel run.
+#[derive(Debug, Clone, Copy)]
+struct Case<'a, T> {
+    context: &'a RunContext,
+    config: Config,
+    receive: Receive,
+    payload: Payload<T>,
+}
+
+/// Stop flag and round barriers shared with prefilled producers.
+#[derive(Debug)]
+struct PrefillSync {
+    stop: Arc<AtomicBool>,
+    start_barrier: Arc<Barrier>,
+    filled_barrier: Arc<Barrier>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,36 +143,10 @@ fn main() {
     let sampling = Sampling::from_env();
     let mut results = JsonlResults::new("batch-mpsc.jsonl");
     let payload_filter = Filter::from_env("FANRING_BENCH_PAYLOADS");
-    let receive_filter = Filter::from_env("FANRING_BENCH_RECEIVES");
-    let profile_filter = Filter::from_env("FANRING_BENCH_PROFILE");
-    let context = RunContext {
-        run_id: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before Unix epoch")
-            .as_nanos()
-            .to_string(),
-        cpu: cpu_name(),
-        affinity: Affinity::from_env(),
-    };
+    let receives = selected_receives();
+    let profiles = selected_profiles();
+    let context = RunContext::from_env();
     let total_capacity = env_usize("FANRING_BENCH_CAPACITY", 8192);
-    let producer_counts = env_list("FANRING_BENCH_PRODUCERS", &[1, 2, 4, 8]);
-    let batch_limits = env_list("FANRING_BENCH_BATCH", &[64, 1024]);
-    let receive_modes = if receive_filter.values.is_some() {
-        Receive::ALL.as_slice()
-    } else {
-        Receive::DEFAULT.as_slice()
-    };
-    let receives = receive_modes
-        .iter()
-        .copied()
-        .filter(|receive| receive_filter.matches(receive.label()))
-        .collect::<Vec<_>>();
-    let profiles = Profile::ALL
-        .into_iter()
-        .filter(|profile| profile_filter.matches(profile.label()))
-        .collect::<Vec<_>>();
-    assert!(!receives.is_empty(), "no receive mode selected");
-    assert!(!profiles.is_empty(), "no profile selected");
 
     println!(
         "MPSC batch receive comparison ({} x {:.2}s, {:.2}s warmup, capacity {} items, affinity {}, results {})\n",
@@ -145,8 +158,56 @@ fn main() {
         results.root().display()
     );
 
+    let plan = Plan {
+        configs: configs(&profiles, total_capacity, duration, &sampling),
+        receives,
+        sampling,
+    };
+    run_payloads(&context, &mut results, &plan, &payload_filter);
+    results.flush();
+}
+
+/// Receive modes that `FANRING_BENCH_RECEIVES` selects. Without the filter,
+/// only the default modes run.
+fn selected_receives() -> Vec<Receive> {
+    let receive_filter = Filter::from_env("FANRING_BENCH_RECEIVES");
+    let receive_modes = if receive_filter.values.is_some() {
+        Receive::ALL.as_slice()
+    } else {
+        Receive::DEFAULT.as_slice()
+    };
+    let receives = receive_modes
+        .iter()
+        .copied()
+        .filter(|receive| receive_filter.matches(receive.label()))
+        .collect::<Vec<_>>();
+    assert!(!receives.is_empty(), "no receive mode selected");
+    receives
+}
+
+/// Profiles that `FANRING_BENCH_PROFILE` selects.
+fn selected_profiles() -> Vec<Profile> {
+    let profile_filter = Filter::from_env("FANRING_BENCH_PROFILE");
+    let profiles = Profile::ALL
+        .into_iter()
+        .filter(|profile| profile_filter.matches(profile.label()))
+        .collect::<Vec<_>>();
+    assert!(!profiles.is_empty(), "no profile selected");
+    profiles
+}
+
+/// One configuration per profile, producer count, and batch limit, each
+/// splitting the total capacity evenly across its senders.
+fn configs(
+    profiles: &[Profile],
+    total_capacity: usize,
+    duration: Duration,
+    sampling: &Sampling,
+) -> Vec<Config> {
+    let producer_counts = env_list("FANRING_BENCH_PRODUCERS", &[1, 2, 4, 8]);
+    let batch_limits = env_list("FANRING_BENCH_BATCH", &[64, 1024]);
     let mut configs = Vec::new();
-    for &profile in &profiles {
+    for &profile in profiles {
         for &producers in &producer_counts {
             for &batch_limit in &batch_limits {
                 configs.push(Config {
@@ -161,14 +222,21 @@ fn main() {
             }
         }
     }
+    configs
+}
 
+/// Runs the plan once per payload that the payload filter selects.
+fn run_payloads(
+    context: &RunContext,
+    results: &mut JsonlResults,
+    plan: &Plan,
+    payload_filter: &Filter,
+) {
     if payload_filter.matches("u64") {
         run_payload(
-            &context,
-            &mut results,
-            &configs,
-            &receives,
-            sampling,
+            context,
+            results,
+            plan,
             Payload {
                 label: "u64",
                 value: 0u64,
@@ -177,11 +245,9 @@ fn main() {
     }
     if payload_filter.matches("bytes64") {
         run_payload(
-            &context,
-            &mut results,
-            &configs,
-            &receives,
-            sampling,
+            context,
+            results,
+            plan,
             Payload {
                 label: "bytes64",
                 value: [0u64; 8],
@@ -190,31 +256,30 @@ fn main() {
     }
     if payload_filter.matches("bytes256") {
         run_payload(
-            &context,
-            &mut results,
-            &configs,
-            &receives,
-            sampling,
+            context,
+            results,
+            plan,
             Payload {
                 label: "bytes256",
                 value: [0u64; 32],
             },
         );
     }
-
-    results.flush();
 }
 
 fn run_payload<T>(
     context: &RunContext,
     results: &mut JsonlResults,
-    configs: &[Config],
-    receives: &[Receive],
-    sampling: Sampling,
+    plan: &Plan,
     payload: Payload<T>,
 ) where
     T: Copy + Send + 'static,
 {
+    let Plan {
+        configs,
+        receives,
+        sampling,
+    } = plan;
     println!("--- {} ({} bytes) ---", payload.label, size_of::<T>());
     for &config in configs {
         println!(
@@ -286,51 +351,37 @@ where
         let tx = senders[0].try_clone().expect("fanring sender slot");
         senders.push(tx);
     }
+    let case = Case {
+        context,
+        config,
+        receive,
+        payload,
+    };
     match config.profile {
-        Profile::Prefilled => run_prefilled(context, config, receive, payload, senders, rx),
-        Profile::Stream => run_stream(context, config, receive, payload, senders, rx),
+        Profile::Prefilled => run_prefilled(case, senders, rx),
+        Profile::Stream => run_stream(case, senders, rx),
     }
 }
 
-fn run_prefilled<T>(
-    context: &RunContext,
-    config: Config,
-    receive: Receive,
-    payload: Payload<T>,
-    senders: Vec<Sender<T>>,
-    mut rx: Receiver<T>,
-) -> Row
+fn run_prefilled<T>(case: Case<'_, T>, senders: Vec<Sender<T>>, mut rx: Receiver<T>) -> Row
 where
     T: Copy + Send + 'static,
 {
+    let Case {
+        context,
+        config,
+        receive,
+        ..
+    } = case;
     let capacity = rx.capacity_per_sender();
     let per_round = capacity * config.producers;
-    let stop = Arc::new(AtomicBool::new(false));
-    let start_barrier = Arc::new(Barrier::new(config.producers + 1));
-    let filled_barrier = Arc::new(Barrier::new(config.producers + 1));
-    let mut handles = Vec::with_capacity(config.producers);
-    for (index, mut sender) in senders.into_iter().enumerate() {
-        let stop = stop.clone();
-        let start_barrier = start_barrier.clone();
-        let filled_barrier = filled_barrier.clone();
-        let affinity = context.affinity.clone();
-        let value = payload.value;
-        handles.push(thread::spawn(move || {
-            affinity.pin(index + 1);
-            loop {
-                start_barrier.wait();
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                let mut filled = 0;
-                while sender.try_send(value).is_ok() {
-                    filled += 1;
-                }
-                assert_eq!(filled, capacity, "producer could not refill its ring");
-                filled_barrier.wait();
-            }
-        }));
-    }
+    let sync = PrefillSync::new(config.producers);
+    let handles = spawn_prefill_producers(case, senders, capacity, &sync);
+    let PrefillSync {
+        stop,
+        start_barrier,
+        filled_barrier,
+    } = sync;
 
     context.affinity.pin(0);
     let mut batch = Vec::with_capacity(config.batch_limit);
@@ -367,42 +418,67 @@ where
         handle.join().expect("producer thread panicked");
     }
     assert!(rounds > 0, "no prefilled round completed");
-    row(context, config, receive, payload, drain, items, rounds)
+    row(case, drain, items, rounds)
 }
 
-fn run_stream<T>(
-    context: &RunContext,
-    config: Config,
-    receive: Receive,
-    payload: Payload<T>,
+impl PrefillSync {
+    fn new(producers: usize) -> Self {
+        Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            start_barrier: Arc::new(Barrier::new(producers + 1)),
+            filled_barrier: Arc::new(Barrier::new(producers + 1)),
+        }
+    }
+}
+
+fn spawn_prefill_producers<T>(
+    case: Case<'_, T>,
     senders: Vec<Sender<T>>,
-    mut rx: Receiver<T>,
-) -> Row
+    capacity: usize,
+    sync: &PrefillSync,
+) -> Vec<JoinHandle<()>>
 where
     T: Copy + Send + 'static,
 {
-    let stop = Arc::new(AtomicBool::new(false));
-    let barrier = Arc::new(Barrier::new(config.producers + 1));
-    let mut handles = Vec::with_capacity(config.producers);
+    let mut handles = Vec::with_capacity(case.config.producers);
     for (index, mut sender) in senders.into_iter().enumerate() {
-        let stop = stop.clone();
-        let barrier = barrier.clone();
-        let affinity = context.affinity.clone();
-        let value = payload.value;
+        let stop = sync.stop.clone();
+        let start_barrier = sync.start_barrier.clone();
+        let filled_barrier = sync.filled_barrier.clone();
+        let affinity = case.context.affinity.clone();
+        let value = case.payload.value;
         handles.push(thread::spawn(move || {
             affinity.pin(index + 1);
-            barrier.wait();
-            let mut sent = 0u64;
-            while !stop.load(Ordering::Relaxed) {
-                match sender.try_send(value) {
-                    Ok(()) => sent += 1,
-                    Err(TrySendError::Full(_)) => thread::yield_now(),
-                    Err(TrySendError::Disconnected(_)) => break,
+            loop {
+                start_barrier.wait();
+                if stop.load(Ordering::Relaxed) {
+                    break;
                 }
+                let mut filled = 0;
+                while sender.try_send(value).is_ok() {
+                    filled += 1;
+                }
+                assert_eq!(filled, capacity, "producer could not refill its ring");
+                filled_barrier.wait();
             }
-            sent
         }));
     }
+    handles
+}
+
+fn run_stream<T>(case: Case<'_, T>, senders: Vec<Sender<T>>, mut rx: Receiver<T>) -> Row
+where
+    T: Copy + Send + 'static,
+{
+    let Case {
+        context,
+        config,
+        receive,
+        ..
+    } = case;
+    let stop = Arc::new(AtomicBool::new(false));
+    let barrier = Arc::new(Barrier::new(config.producers + 1));
+    let handles = spawn_stream_producers(case, senders, &stop, &barrier);
 
     context.affinity.pin(0);
     let mut batch = Vec::with_capacity(config.batch_limit);
@@ -444,7 +520,39 @@ where
     }
     let elapsed = start.elapsed();
     assert_eq!(sent, items, "stream lost messages");
-    row(context, config, receive, payload, elapsed, items, 0)
+    row(case, elapsed, items, 0)
+}
+
+fn spawn_stream_producers<T>(
+    case: Case<'_, T>,
+    senders: Vec<Sender<T>>,
+    stop: &Arc<AtomicBool>,
+    barrier: &Arc<Barrier>,
+) -> Vec<JoinHandle<u64>>
+where
+    T: Copy + Send + 'static,
+{
+    let mut handles = Vec::with_capacity(case.config.producers);
+    for (index, mut sender) in senders.into_iter().enumerate() {
+        let stop = stop.clone();
+        let barrier = barrier.clone();
+        let affinity = case.context.affinity.clone();
+        let value = case.payload.value;
+        handles.push(thread::spawn(move || {
+            affinity.pin(index + 1);
+            barrier.wait();
+            let mut sent = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                match sender.try_send(value) {
+                    Ok(()) => sent += 1,
+                    Err(TrySendError::Full(_)) => thread::yield_now(),
+                    Err(TrySendError::Disconnected(_)) => break,
+                }
+            }
+            sent
+        }));
+    }
+    handles
 }
 
 #[inline(never)]
@@ -536,15 +644,13 @@ fn receive_single<T, const FAIR: bool, const LANE_IDS: bool>(
     }
 }
 
-fn row<T>(
-    context: &RunContext,
-    config: Config,
-    receive: Receive,
-    payload: Payload<T>,
-    elapsed: Duration,
-    items: u64,
-    rounds: u64,
-) -> Row {
+fn row<T>(case: Case<'_, T>, elapsed: Duration, items: u64, rounds: u64) -> Row {
+    let Case {
+        context,
+        config,
+        receive,
+        payload,
+    } = case;
     let seconds = elapsed.as_secs_f64();
     let items_per_sec = items as f64 / seconds;
     Row {

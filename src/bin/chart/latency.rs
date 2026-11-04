@@ -3,19 +3,15 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use plotters::coord::Shift;
 use plotters::prelude::*;
-use plotters::style::text_anchor::{HPos, Pos, VPos};
+use plotters::style::text_anchor::HPos;
 use serde::Deserialize;
 
 use super::hardware::chart_hardware;
+use super::plot::{
+    AXIS, Area, BG, Bar, Font, GRID, MUTED, Plot, TEXT, finish_svg, line, px, rect, text,
+};
 use super::{ChartError, ChartResult, DrawResultExt};
-
-const BG: RGBColor = RGBColor(0x0d, 0x11, 0x17);
-const GRID: RGBColor = RGBColor(0x21, 0x26, 0x2d);
-const AXIS: RGBColor = RGBColor(0x30, 0x36, 0x3d);
-const TEXT: RGBColor = RGBColor(0xe6, 0xed, 0xf3);
-const MUTED: RGBColor = RGBColor(0x7d, 0x85, 0x90);
 
 const MPSC_SERIES: &[Series] = &[
     Series::new("fanring", "fanring", RGBColor(0xf8, 0x71, 0x71)),
@@ -104,8 +100,6 @@ struct ImplementationRun<'a> {
     shape: LatencyShape,
     rows: Vec<&'a LatencyRow>,
 }
-
-type Area<'a> = DrawingArea<SVGBackend<'a>, Shift>;
 
 pub(super) fn draw_latency_chart(
     inputs: &[PathBuf],
@@ -298,29 +292,50 @@ fn complete_rows<'a>(rows: &[&'a LatencyRow], series: &[Series]) -> Option<Vec<&
 fn draw(rows: &[&LatencyRow], series: &[Series], topology: &str, output: &Path) -> ChartResult<()> {
     let width = 1024;
     let height = 445;
-    let plot_left = 70.0;
-    let plot_right = 1000.0;
-    let plot_top = 62.0;
-    let plot_bottom = 296.0;
     let area = SVGBackend::new(output, (width, height)).into_drawing_area();
     area.fill(&BG).chart()?;
 
     let first = rows.first().copied().ok_or(ChartError::NoRenderableRows)?;
+    let middle = i32::try_from(width / 2).expect("chart width fits i32");
+    draw_header(&area, first, topology, middle)?;
+
+    let max_value = rows
+        .iter()
+        .map(|row| row.p99_ns as f64)
+        .fold(0.0_f64, f64::max);
+    let plot = Plot {
+        left: 70.0,
+        right: 1000.0,
+        top: 62.0,
+        bottom: 296.0,
+        y_max: (max_value * 1.15).max(1.0),
+    };
+    draw_y_grid(&area, plot)?;
+    draw_bars(&area, plot, series, rows)?;
+    draw_legend(&area, series, rows, 40.0, 350.0)?;
+    draw_footnotes(&area, middle)?;
+    area.present().chart()?;
+    drop(area);
+    finish_svg(output, width, height)
+}
+
+fn draw_header(
+    area: &Area<'_>,
+    first: &LatencyRow,
+    topology: &str,
+    middle: i32,
+) -> ChartResult<()> {
     text(
-        &area,
+        area,
         format!(
             "{} blocking wake latency (lower is better)",
             topology.to_uppercase()
         ),
-        i32::try_from(width / 2).expect("chart width fits i32"),
-        20,
-        15,
-        TEXT,
-        HPos::Center,
-        true,
+        (middle, 20),
+        Font::bold(15, TEXT, HPos::Center),
     )?;
     text(
-        &area,
+        area,
         format!(
             "{}; capacity {}; {} rounds; {} {} settle",
             chart_hardware(&first.cpu),
@@ -329,26 +344,22 @@ fn draw(rows: &[&LatencyRow], series: &[Series], topology: &str, output: &Path) 
             format_duration(first.settle_ns as f64),
             first.settle_mode
         ),
-        i32::try_from(width / 2).expect("chart width fits i32"),
-        40,
-        10,
-        MUTED,
-        HPos::Center,
-        false,
-    )?;
+        (middle, 40),
+        Font::regular(10, MUTED, HPos::Center),
+    )
+}
 
+fn draw_bars(
+    area: &Area<'_>,
+    plot: Plot,
+    series: &[Series],
+    rows: &[&LatencyRow],
+) -> ChartResult<()> {
     let values = rows
         .iter()
         .map(|row| ((row.implementation.as_str(), row.operation.as_str()), *row))
         .collect::<BTreeMap<_, _>>();
-    let max_value = rows
-        .iter()
-        .map(|row| row.p99_ns as f64)
-        .fold(0.0_f64, f64::max);
-    let y_max = (max_value * 1.15).max(1.0);
-    draw_y_grid(&area, plot_left, plot_right, plot_top, plot_bottom, y_max)?;
-
-    let group_width = (plot_right - plot_left) / OPERATIONS.len() as f64;
+    let group_width = (plot.right - plot.left) / OPERATIONS.len() as f64;
     let bar_gap = 8.0;
     let minimum_group_gap = 36.0;
     let preferred_bar_width: f64 = 44.0;
@@ -360,35 +371,29 @@ fn draw(rows: &[&LatencyRow], series: &[Series], topology: &str, output: &Path) 
         series.len() as f64 * bar_width + series.len().saturating_sub(1) as f64 * bar_gap;
     for (operation_index, (operation, label)) in OPERATIONS.iter().enumerate() {
         let cluster_x =
-            plot_left + operation_index as f64 * group_width + (group_width - cluster_width) / 2.0;
+            plot.left + operation_index as f64 * group_width + (group_width - cluster_width) / 2.0;
         for (series_index, candidate) in series.iter().enumerate() {
             let row = values
                 .get(&(candidate.key, *operation))
                 .ok_or(ChartError::NoRenderableRows)?;
-            draw_bar(
-                &area,
-                cluster_x + series_index as f64 * (bar_width + bar_gap),
-                bar_width,
-                plot_top,
-                plot_bottom,
-                y_max,
-                row.p50_ns as f64,
-                row.p99_ns as f64,
-                candidate.color,
-            )?;
+            let bar = Bar {
+                x: cluster_x + series_index as f64 * (bar_width + bar_gap),
+                width: bar_width,
+                color: candidate.color,
+            };
+            draw_bar(area, plot, bar, row)?;
         }
         text(
-            &area,
+            area,
             *label,
-            px(cluster_x + cluster_width / 2.0),
-            px(plot_bottom + 22.0),
-            12,
-            TEXT,
-            HPos::Center,
-            true,
+            (px(cluster_x + cluster_width / 2.0), px(plot.bottom + 22.0)),
+            Font::bold(12, TEXT, HPos::Center),
         )?;
     }
-    draw_legend(&area, series, rows, 40.0, 350.0)?;
+    Ok(())
+}
+
+fn draw_footnotes(area: &Area<'_>, middle: i32) -> ChartResult<()> {
     for (footnote, y) in [
         (
             "Solid bars reach p50; translucent extensions reach p99.",
@@ -400,45 +405,36 @@ fn draw(rows: &[&LatencyRow], series: &[Series], topology: &str, output: &Path) 
         ),
     ] {
         text(
-            &area,
+            area,
             footnote,
-            i32::try_from(width / 2).expect("chart width fits i32"),
-            y,
-            9,
-            MUTED,
-            HPos::Center,
-            false,
+            (middle, y),
+            Font::regular(9, MUTED, HPos::Center),
         )?;
     }
-    area.present().chart()?;
-    drop(area);
-    finish_svg(output, width, height)
+    Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_bar(
-    area: &Area<'_>,
-    x: f64,
-    width: f64,
-    plot_top: f64,
-    plot_bottom: f64,
-    y_max: f64,
-    p50: f64,
-    p99: f64,
-    color: RGBColor,
-) -> ChartResult<()> {
-    let p99_y = plot_bottom - p99 / y_max * (plot_bottom - plot_top);
-    translucent_rect(area, x, p99_y, x + width, plot_bottom, color)?;
-    let p50_y = plot_bottom - p50 / y_max * (plot_bottom - plot_top);
-    rect(area, x, p50_y, x + width, plot_bottom, color)
+fn draw_bar(area: &Area<'_>, plot: Plot, bar: Bar, row: &LatencyRow) -> ChartResult<()> {
+    let p99_y = plot.y(row.p99_ns as f64);
+    translucent_rect(
+        area,
+        (bar.x, p99_y),
+        (bar.x + bar.width, plot.bottom),
+        bar.color,
+    )?;
+    let p50_y = plot.y(row.p50_ns as f64);
+    rect(
+        area,
+        (bar.x, p50_y),
+        (bar.x + bar.width, plot.bottom),
+        bar.color,
+    )
 }
 
 fn translucent_rect(
     area: &Area<'_>,
-    x1: f64,
-    y1: f64,
-    x2: f64,
-    y2: f64,
+    (x1, y1): (f64, f64),
+    (x2, y2): (f64, f64),
     color: RGBColor,
 ) -> ChartResult<()> {
     let corners = [(px(x1), px(y1)), (px(x2), px(y2))];
@@ -448,32 +444,27 @@ fn translucent_rect(
         .chart()
 }
 
-fn draw_y_grid(
-    area: &Area<'_>,
-    x_left: f64,
-    x_right: f64,
-    plot_top: f64,
-    plot_bottom: f64,
-    y_max: f64,
-) -> ChartResult<()> {
-    let step = nice_step(y_max, 5);
+fn draw_y_grid(area: &Area<'_>, plot: Plot) -> ChartResult<()> {
+    let step = nice_step(plot.y_max, 5);
     let mut value = step;
-    while value <= y_max {
-        let y = plot_bottom - value / y_max * (plot_bottom - plot_top);
-        line(area, x_left, y, x_right, y, GRID, 1)?;
+    while value <= plot.y_max {
+        let y = plot.y(value);
+        line(area, (plot.left, y), (plot.right, y), GRID, 1)?;
         text(
             area,
             format_duration(value),
-            px(x_left - 8.0),
-            px(y),
-            10,
-            MUTED,
-            HPos::Right,
-            false,
+            (px(plot.left - 8.0), px(y)),
+            Font::regular(10, MUTED, HPos::Right),
         )?;
         value += step;
     }
-    line(area, x_left, plot_bottom, x_right, plot_bottom, AXIS, 2)
+    line(
+        area,
+        (plot.left, plot.bottom),
+        (plot.right, plot.bottom),
+        AXIS,
+        2,
+    )
 }
 
 fn draw_legend(
@@ -490,10 +481,8 @@ fn draw_legend(
         let legend_y = y + row as f64 * 20.0;
         rect(
             area,
-            legend_x,
-            legend_y - 6.0,
-            legend_x + 12.0,
-            legend_y + 6.0,
+            (legend_x, legend_y - 6.0),
+            (legend_x + 12.0, legend_y + 6.0),
             candidate.color,
         )?;
         let label = rows
@@ -515,85 +504,11 @@ fn draw_legend(
         text(
             area,
             label,
-            px(legend_x + 18.0),
-            px(legend_y),
-            10,
-            TEXT,
-            HPos::Left,
-            false,
+            (px(legend_x + 18.0), px(legend_y)),
+            Font::regular(10, TEXT, HPos::Left),
         )?;
     }
     Ok(())
-}
-
-fn finish_svg(path: &Path, width: u32, height: u32) -> ChartResult<()> {
-    let mut svg = std::fs::read_to_string(path).map_err(|source| ChartError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    svg = svg.replacen(
-        &format!("<svg width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\""),
-        &format!("<svg viewBox=\"0 0 {width} {height}\""),
-        1,
-    );
-    svg = svg.replacen(
-        "xmlns=\"http://www.w3.org/2000/svg\"",
-        "xmlns=\"http://www.w3.org/2000/svg\" font-family=\"system-ui, -apple-system, sans-serif\"",
-        1,
-    );
-    std::fs::write(path, svg).map_err(|source| ChartError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn text(
-    area: &Area<'_>,
-    value: impl Into<String>,
-    x: i32,
-    y: i32,
-    size: u32,
-    color: RGBColor,
-    horizontal: HPos,
-    bold: bool,
-) -> ChartResult<()> {
-    let mut font = ("sans-serif", size).into_font();
-    if bold {
-        font = font.style(FontStyle::Bold);
-    }
-    area.draw(&Text::new(
-        value.into(),
-        (x, y),
-        TextStyle::from(font)
-            .color(&color)
-            .pos(Pos::new(horizontal, VPos::Center)),
-    ))
-    .chart()
-}
-
-fn rect(area: &Area<'_>, x1: f64, y1: f64, x2: f64, y2: f64, color: RGBColor) -> ChartResult<()> {
-    area.draw(&Rectangle::new(
-        [(px(x1), px(y1)), (px(x2), px(y2))],
-        ShapeStyle::from(&color).filled(),
-    ))
-    .chart()
-}
-
-fn line(
-    area: &Area<'_>,
-    x1: f64,
-    y1: f64,
-    x2: f64,
-    y2: f64,
-    color: RGBColor,
-    width: u32,
-) -> ChartResult<()> {
-    area.draw(&PathElement::new(
-        vec![(px(x1), px(y1)), (px(x2), px(y2))],
-        color.stroke_width(width),
-    ))
-    .chart()
 }
 
 fn nice_step(max_value: f64, target_lines: usize) -> f64 {
@@ -614,10 +529,6 @@ fn format_duration(ns: f64) -> String {
     } else {
         format!("{ns:.0} ns")
     }
-}
-
-fn px(value: f64) -> i32 {
-    value.round() as i32
 }
 
 const fn one() -> usize {

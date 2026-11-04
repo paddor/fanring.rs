@@ -12,11 +12,86 @@ use super::{
     Measurement, Row, SERIES, TEXT_COLOR,
 };
 
+const TABLE_LEFT: i32 = 184;
+const TABLE_RIGHT: i32 = 24;
+
+/// Pixel size of the whole chart and of its header and payload sections.
+struct ChartLayout {
+    width: u32,
+    height: u32,
+    header_height: u32,
+    section_height: u32,
+}
+
+/// Column and row geometry of one heatmap table.
+///
+/// Columns form one group per producer count with one cell per consumer
+/// count. MPSC tables use a single consumer column of 0 per group.
+struct HeatTable {
+    producers: Vec<usize>,
+    consumers: Vec<usize>,
+    cell_width: i32,
+    group_gap: i32,
+    rows_top: i32,
+    row_height: i32,
+}
+
+/// Pixel rectangle of one heatmap cell.
+#[derive(Clone, Copy)]
+struct Cell {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
 pub(super) fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
     if rows.is_empty() {
         return Err(ChartError::NoRenderableRows);
     }
 
+    let payloads = payloads_by_size(rows);
+    let is_mpmc = rows.iter().any(|row| row.consumers.is_some());
+    let layout = ChartLayout::new(rows, is_mpmc, payloads.len());
+    let width_i32 = u32_to_i32(layout.width);
+
+    let root = SVGBackend::new(output, (layout.width, layout.height)).into_drawing_area();
+    root.fill(&BACKGROUND_COLOR).chart()?;
+    draw_chart_title(&root, rows, is_mpmc, width_i32 / 2)?;
+
+    for (index, payload) in payloads.iter().enumerate() {
+        let payload_rows: Vec<&Row> = rows.iter().filter(|row| &row.payload == payload).collect();
+        let raw_max = values_by_series(&payload_rows)
+            .values()
+            .map(|measurement| measurement.median)
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
+        let scale_max = nice_axis_max(raw_max, 5);
+        let section_y = layout.section_y(index);
+
+        if is_mpmc {
+            draw_mpmc_heatmap(&root, &payload_rows, section_y, width_i32, scale_max)?;
+        } else {
+            draw_mpsc_heatmap(&root, &payload_rows, section_y, width_i32, scale_max)?;
+        }
+    }
+
+    root.draw(&Text::new(
+        capacity_footnote(rows, is_mpmc),
+        (width_i32 / 2, u32_to_i32(layout.height) - 9),
+        ("sans-serif", 9)
+            .into_font()
+            .color(&MUTED_TEXT_COLOR)
+            .pos(Pos::new(HPos::Center, VPos::Center)),
+    ))
+    .chart()?;
+
+    root.present().chart()?;
+    Ok(())
+}
+
+/// Returns payload names ordered by payload size.
+fn payloads_by_size(rows: &[Row]) -> Vec<String> {
     let mut payloads: Vec<(String, usize)> = rows
         .iter()
         .map(|row| (row.payload.clone(), row.payload_bytes))
@@ -24,28 +99,44 @@ pub(super) fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
         .into_iter()
         .collect();
     payloads.sort_by_key(|(_, bytes)| *bytes);
-    let payloads: Vec<String> = payloads.into_iter().map(|(payload, _)| payload).collect();
-    let is_mpmc = rows.iter().any(|row| row.consumers.is_some());
-    let width: u32 = if is_mpmc { 1440 } else { 1024 };
-    let series_count = present_series(&rows.iter().collect::<Vec<_>>()).len();
-    let (section_header, row_height) = if is_mpmc { (100, 29) } else { (78, 25) };
-    let section_h: u32 =
-        section_header + row_height * u32::try_from(series_count).expect("series count fits u32");
-    let header_h: u32 = 58;
-    let footer_h: u32 = 24;
-    let payload_count = u32::try_from(payloads.len()).expect("payload count fits u32");
-    let total_h = section_h
-        .checked_mul(payload_count)
-        .and_then(|height| header_h.checked_add(height))
-        .and_then(|height| footer_h.checked_add(height))
-        .expect("chart height fits u32");
-    let width_i32 = u32_to_i32(width);
-    let section_h_i32 = u32_to_i32(section_h);
-    let header_h_i32 = u32_to_i32(header_h);
+    payloads.into_iter().map(|(payload, _)| payload).collect()
+}
 
-    let root = SVGBackend::new(output, (width, total_h)).into_drawing_area();
-    root.fill(&BACKGROUND_COLOR).chart()?;
+impl ChartLayout {
+    fn new(rows: &[Row], is_mpmc: bool, payload_count: usize) -> Self {
+        let width: u32 = if is_mpmc { 1440 } else { 1024 };
+        let series_count = present_series(&rows.iter().collect::<Vec<_>>()).len();
+        let (section_header, row_height) = if is_mpmc { (100, 29) } else { (78, 25) };
+        let section_height: u32 = section_header
+            + row_height * u32::try_from(series_count).expect("series count fits u32");
+        let header_height: u32 = 58;
+        let footer_height: u32 = 24;
+        let payload_count = u32::try_from(payload_count).expect("payload count fits u32");
+        let height = section_height
+            .checked_mul(payload_count)
+            .and_then(|height| header_height.checked_add(height))
+            .and_then(|height| footer_height.checked_add(height))
+            .expect("chart height fits u32");
+        Self {
+            width,
+            height,
+            header_height,
+            section_height,
+        }
+    }
 
+    /// Returns the top pixel row of the payload section at `index`.
+    fn section_y(&self, index: usize) -> i32 {
+        u32_to_i32(self.header_height) + usize_to_i32(index) * u32_to_i32(self.section_height)
+    }
+}
+
+fn draw_chart_title(
+    root: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    rows: &[Row],
+    is_mpmc: bool,
+    center: i32,
+) -> ChartResult<()> {
     let title_style = ("sans-serif", 15)
         .into_font()
         .color(&TEXT_COLOR)
@@ -68,46 +159,16 @@ pub(super) fn draw_chart(rows: &[Row], output: &Path) -> ChartResult<()> {
             "fanring {} {profile} comparison",
             if is_mpmc { "MPMC" } else { "MPSC" }
         ),
-        (width_i32 / 2, 17),
+        (center, 17),
         title_style,
     ))
     .chart()?;
     root.draw(&Text::new(
         chart_subtitle(rows),
-        (width_i32 / 2, 35),
+        (center, 35),
         subtitle_style,
     ))
-    .chart()?;
-
-    for (index, payload) in payloads.iter().enumerate() {
-        let payload_rows: Vec<&Row> = rows.iter().filter(|row| &row.payload == payload).collect();
-        let raw_max = values_by_series(&payload_rows)
-            .values()
-            .map(|measurement| measurement.median)
-            .fold(0.0_f64, f64::max)
-            .max(1.0);
-        let scale_max = nice_axis_max(raw_max, 5);
-        let section_y = header_h_i32 + usize_to_i32(index) * section_h_i32;
-
-        if is_mpmc {
-            draw_mpmc_heatmap(&root, &payload_rows, section_y, width_i32, scale_max)?;
-        } else {
-            draw_mpsc_heatmap(&root, &payload_rows, section_y, width_i32, scale_max)?;
-        }
-    }
-
-    root.draw(&Text::new(
-        capacity_footnote(rows, is_mpmc),
-        (width_i32 / 2, u32_to_i32(total_h) - 9),
-        ("sans-serif", 9)
-            .into_font()
-            .color(&MUTED_TEXT_COLOR)
-            .pos(Pos::new(HPos::Center, VPos::Center)),
-    ))
-    .chart()?;
-
-    root.present().chart()?;
-    Ok(())
+    .chart()
 }
 
 fn draw_mpsc_heatmap(
@@ -117,20 +178,7 @@ fn draw_mpsc_heatmap(
     width: i32,
     scale_max: f64,
 ) -> ChartResult<()> {
-    let series = present_series(rows);
-    let producers: Vec<usize> = rows
-        .iter()
-        .map(|row| row.producers)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let values = values_by_series(rows);
-    let winners = winners_by_topology(&values);
-    let table_left = 184;
-    let table_right = 24;
-    let cell_width = (width - table_left - table_right) / usize_to_i32(producers.len().max(1));
-    let row_height = 25;
-    let rows_top = y + 68;
+    let table = HeatTable::mpsc(rows, y, width);
 
     draw_section_title(area, rows, y, scale_max, "")?;
     draw_text(
@@ -142,54 +190,20 @@ fn draw_mpsc_heatmap(
     draw_text(
         area,
         "producer threads",
-        ((table_left + width - table_right) / 2, y + 38),
+        ((TABLE_LEFT + width - TABLE_RIGHT) / 2, y + 38),
         label_style(MUTED_TEXT_COLOR, HPos::Center),
     )?;
 
-    for (column, producer) in producers.iter().enumerate() {
-        let x = table_left + usize_to_i32(column) * cell_width;
+    for (column, producer) in table.producers.iter().enumerate() {
         draw_text(
             area,
             producer.to_string(),
-            (x + cell_width / 2, y + 56),
+            (table.group_x(column) + table.cell_width / 2, y + 56),
             label_style(TEXT_COLOR, HPos::Center),
         )?;
     }
 
-    for (row_index, (key, label)) in series.iter().enumerate() {
-        let row_y = rows_top + usize_to_i32(row_index) * row_height;
-        let color = if key.starts_with("fanring") {
-            RGBColor(250, 204, 21)
-        } else {
-            TEXT_COLOR
-        };
-        draw_text(
-            area,
-            *label,
-            (28, row_y + row_height / 2),
-            label_style(color, HPos::Left),
-        )?;
-
-        for (column, producer) in producers.iter().enumerate() {
-            let topology = (*producer, 0);
-            let measurement = values.get(&(*key, topology)).copied();
-            let winner = measurement
-                .map(|measurement| measurement.median)
-                .zip(winners.get(&topology).copied())
-                .is_some_and(|(value, best)| value >= best);
-            draw_heat_cell(
-                area,
-                table_left + usize_to_i32(column) * cell_width,
-                row_y,
-                cell_width,
-                row_height,
-                measurement,
-                scale_max,
-                winner,
-            )?;
-        }
-    }
-
+    draw_series_rows(area, rows, &table, scale_max)?;
     draw_separator(area, y + 260, width)?;
     Ok(())
 }
@@ -201,43 +215,19 @@ fn draw_mpmc_heatmap(
     width: i32,
     scale_max: f64,
 ) -> ChartResult<()> {
-    let series = present_series(rows);
-    let producers: Vec<usize> = rows
-        .iter()
-        .map(|row| row.producers)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let consumers: Vec<usize> = rows
-        .iter()
-        .filter_map(|row| row.consumers)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let values = values_by_series(rows);
-    let winners = winners_by_topology(&values);
-    let table_left = 184;
-    let table_right = 24;
-    let group_gap = 8;
-    let topology_count = producers.len().saturating_mul(consumers.len());
-    let consumer_count = usize_to_i32(consumers.len());
-    let total_gaps = group_gap * usize_to_i32(producers.len().saturating_sub(1));
-    let cell_width =
-        (width - table_left - table_right - total_gaps) / usize_to_i32(topology_count.max(1));
-    let row_height = 29;
-    let rows_top = y + 89;
+    let table = HeatTable::mpmc(rows, y, width);
 
     draw_section_title(area, rows, y, scale_max, "")?;
     draw_text(
         area,
         "producer threads",
-        (table_left - 12, y + 39),
+        (TABLE_LEFT - 12, y + 39),
         label_style(MUTED_TEXT_COLOR, HPos::Right),
     )?;
     draw_text(
         area,
         "consumer threads",
-        (table_left - 12, y + 61),
+        (TABLE_LEFT - 12, y + 61),
         label_style(MUTED_TEXT_COLOR, HPos::Right),
     )?;
     draw_text(
@@ -247,23 +237,23 @@ fn draw_mpmc_heatmap(
         label_style(MUTED_TEXT_COLOR, HPos::Left),
     )?;
 
-    for (producer_index, producer) in producers.iter().enumerate() {
-        let group_start =
-            table_left + usize_to_i32(producer_index) * (consumer_count * cell_width + group_gap);
-        let group_width = consumer_count * cell_width;
+    for (producer_index, producer) in table.producers.iter().enumerate() {
         draw_text(
             area,
             producer.to_string(),
-            (group_start + group_width / 2, y + 39),
+            (
+                table.group_x(producer_index) + table.group_width() / 2,
+                y + 39,
+            ),
             label_style(TEXT_COLOR, HPos::Center),
         )?;
 
-        for (consumer_index, consumer) in consumers.iter().enumerate() {
+        for (consumer_index, consumer) in table.consumers.iter().enumerate() {
             draw_text(
                 area,
                 consumer.to_string(),
                 (
-                    group_start + usize_to_i32(consumer_index) * cell_width + cell_width / 2,
+                    table.cell_x(producer_index, consumer_index) + table.cell_width / 2,
                     y + 61,
                 ),
                 label_style(TEXT_COLOR, HPos::Center),
@@ -271,8 +261,23 @@ fn draw_mpmc_heatmap(
         }
     }
 
+    draw_series_rows(area, rows, &table, scale_max)?;
+    draw_separator(area, y + 235, width)?;
+    Ok(())
+}
+
+/// Draws one labeled row of heat cells per present series.
+fn draw_series_rows(
+    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    rows: &[&Row],
+    table: &HeatTable,
+    scale_max: f64,
+) -> ChartResult<()> {
+    let series = present_series(rows);
+    let values = values_by_series(rows);
+    let winners = winners_by_topology(&values);
     for (row_index, (key, label)) in series.iter().enumerate() {
-        let row_y = rows_top + usize_to_i32(row_index) * row_height;
+        let row_y = table.rows_top + usize_to_i32(row_index) * table.row_height;
         let color = if key.starts_with("fanring") {
             RGBColor(250, 204, 21)
         } else {
@@ -281,36 +286,88 @@ fn draw_mpmc_heatmap(
         draw_text(
             area,
             *label,
-            (28, row_y + row_height / 2),
+            (28, row_y + table.row_height / 2),
             label_style(color, HPos::Left),
         )?;
 
-        for (producer_index, producer) in producers.iter().enumerate() {
-            let group_start = table_left
-                + usize_to_i32(producer_index) * (consumer_count * cell_width + group_gap);
-            for (consumer_index, consumer) in consumers.iter().enumerate() {
+        for (producer_index, producer) in table.producers.iter().enumerate() {
+            for (consumer_index, consumer) in table.consumers.iter().enumerate() {
                 let topology = (*producer, *consumer);
                 let measurement = values.get(&(*key, topology)).copied();
                 let winner = measurement
                     .map(|measurement| measurement.median)
                     .zip(winners.get(&topology).copied())
                     .is_some_and(|(value, best)| value >= best);
-                draw_heat_cell(
-                    area,
-                    group_start + usize_to_i32(consumer_index) * cell_width,
-                    row_y,
-                    cell_width,
-                    row_height,
-                    measurement,
-                    scale_max,
-                    winner,
-                )?;
+                let cell = Cell {
+                    x: table.cell_x(producer_index, consumer_index),
+                    y: row_y,
+                    width: table.cell_width,
+                    height: table.row_height,
+                };
+                draw_heat_cell(area, cell, measurement, scale_max, winner)?;
             }
         }
     }
-
-    draw_separator(area, y + 235, width)?;
     Ok(())
+}
+
+impl HeatTable {
+    fn mpsc(rows: &[&Row], y: i32, width: i32) -> Self {
+        let producers = distinct_producers(rows);
+        let cell_width = (width - TABLE_LEFT - TABLE_RIGHT) / usize_to_i32(producers.len().max(1));
+        Self {
+            producers,
+            consumers: vec![0],
+            cell_width,
+            group_gap: 0,
+            rows_top: y + 68,
+            row_height: 25,
+        }
+    }
+
+    fn mpmc(rows: &[&Row], y: i32, width: i32) -> Self {
+        let producers = distinct_producers(rows);
+        let consumers: Vec<usize> = rows
+            .iter()
+            .filter_map(|row| row.consumers)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let group_gap = 8;
+        let topology_count = producers.len().saturating_mul(consumers.len());
+        let total_gaps = group_gap * usize_to_i32(producers.len().saturating_sub(1));
+        let cell_width =
+            (width - TABLE_LEFT - TABLE_RIGHT - total_gaps) / usize_to_i32(topology_count.max(1));
+        Self {
+            producers,
+            consumers,
+            cell_width,
+            group_gap,
+            rows_top: y + 89,
+            row_height: 29,
+        }
+    }
+
+    fn group_width(&self) -> i32 {
+        usize_to_i32(self.consumers.len()) * self.cell_width
+    }
+
+    /// Returns the left pixel column of the producer group at `producer_index`.
+    fn group_x(&self, producer_index: usize) -> i32 {
+        TABLE_LEFT + usize_to_i32(producer_index) * (self.group_width() + self.group_gap)
+    }
+
+    fn cell_x(&self, producer_index: usize, consumer_index: usize) -> i32 {
+        self.group_x(producer_index) + usize_to_i32(consumer_index) * self.cell_width
+    }
+}
+
+fn distinct_producers(rows: &[&Row]) -> Vec<usize> {
+    rows.iter()
+        .map(|row| row.producers)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 type SeriesValues<'a> = BTreeMap<(&'a str, (usize, usize)), Measurement>;
@@ -386,21 +443,17 @@ fn draw_section_title(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_heat_cell(
     area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
+    cell: Cell,
     measurement: Option<Measurement>,
     scale_max: f64,
     winner: bool,
 ) -> ChartResult<()> {
-    let x0 = x + 2;
-    let y0 = y + 2;
-    let x1 = x + width - 2;
-    let y1 = y + height - 2;
+    let x0 = cell.x + 2;
+    let y0 = cell.y + 2;
+    let x1 = cell.x + cell.width - 2;
+    let y1 = cell.y + cell.height - 2;
     let intensity = measurement.map_or(0.0, |measurement| {
         (measurement.median / scale_max).clamp(0.0, 1.0)
     });
