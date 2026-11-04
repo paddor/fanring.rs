@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.21] - 2026-11-04
+
+### Changed
+
+- Split the source into ring, producer, and consumer modules. The public API
+  and behavior are unchanged.
+
 ## [0.3.20] - 2026-10-06
 
 ### Changed
