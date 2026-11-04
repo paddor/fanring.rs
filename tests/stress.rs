@@ -181,22 +181,61 @@ fn repeated_empty_ready_races_do_not_lose_messages() {
     });
 }
 
-#[test]
-fn randomized_sender_churn_matches_per_sender_fifo_model() {
-    struct ModelSender {
-        id: usize,
-        next_sequence: usize,
-        tx: fanring::mpsc::Sender<(usize, usize)>,
+/// A live sender in the per-sender FIFO model.
+struct ModelSender {
+    id: usize,
+    next_sequence: usize,
+    tx: fanring::mpsc::Sender<(usize, usize)>,
+}
+
+/// Sequences that each sender has sent and the receiver has not yet received.
+struct FifoModel {
+    expected: Vec<VecDeque<usize>>,
+    expected_count: usize,
+}
+
+impl FifoModel {
+    /// Adds an empty queue for a new sender and returns its ID.
+    fn register(&mut self) -> usize {
+        let id = self.expected.len();
+        self.expected.push(VecDeque::new());
+        id
     }
 
+    /// Sends the next sequence of `model`. A full lane must return the value.
+    fn try_send_next(&mut self, model: &mut ModelSender) {
+        let value = (model.id, model.next_sequence);
+        match model.tx.try_send(value) {
+            Ok(()) => {
+                self.expected[model.id].push_back(model.next_sequence);
+                self.expected_count += 1;
+                model.next_sequence += 1;
+            }
+            Err(TrySendError::Full(returned)) => assert_eq!(returned, value),
+            Err(TrySendError::Disconnected(_)) => panic!("receiver remains alive"),
+        }
+    }
+
+    /// Checks that `(sender, sequence)` is the next value expected from that
+    /// sender.
+    fn receive(&mut self, (sender, sequence): (usize, usize)) {
+        assert_eq!(self.expected[sender].pop_front(), Some(sequence));
+        self.expected_count -= 1;
+    }
+}
+
+#[test]
+fn randomized_sender_churn_matches_per_sender_fifo_model() {
     let (root, mut rx) = channel(4);
     let mut senders = vec![ModelSender {
         id: 0,
         next_sequence: 0,
         tx: root,
     }];
-    let mut expected = vec![VecDeque::new()];
-    let mut expected_count = 0;
+    let mut model = FifoModel {
+        expected: vec![VecDeque::new()],
+        expected_count: 0,
+    };
     let mut random = 0x9e37_79b9_7f4a_7c15;
 
     for _ in 0..STATE_MACHINE_STEPS {
@@ -204,8 +243,7 @@ fn randomized_sender_churn_matches_per_sender_fifo_model() {
             0 if senders.len() < 16 => {
                 let source = next_random(&mut random) % senders.len();
                 let tx = senders[source].tx.try_clone().unwrap();
-                let id = expected.len();
-                expected.push(VecDeque::new());
+                let id = model.register();
                 senders.push(ModelSender {
                     id,
                     next_sequence: 0,
@@ -218,24 +256,11 @@ fn randomized_sender_churn_matches_per_sender_fifo_model() {
             }
             2 | 3 => {
                 let sender = next_random(&mut random) % senders.len();
-                let model = &mut senders[sender];
-                let value = (model.id, model.next_sequence);
-                match model.tx.try_send(value) {
-                    Ok(()) => {
-                        expected[model.id].push_back(model.next_sequence);
-                        expected_count += 1;
-                        model.next_sequence += 1;
-                    }
-                    Err(TrySendError::Full(returned)) => assert_eq!(returned, value),
-                    Err(TrySendError::Disconnected(_)) => panic!("receiver remains alive"),
-                }
+                model.try_send_next(&mut senders[sender]);
             }
             _ => match rx.try_recv() {
-                Ok((sender, sequence)) => {
-                    assert_eq!(expected[sender].pop_front(), Some(sequence));
-                    expected_count -= 1;
-                }
-                Err(TryRecvError::Empty) => assert_eq!(expected_count, 0),
+                Ok(value) => model.receive(value),
+                Err(TryRecvError::Empty) => assert_eq!(model.expected_count, 0),
                 Err(TryRecvError::Disconnected) => panic!("at least one sender remains alive"),
             },
         }
@@ -244,16 +269,13 @@ fn randomized_sender_churn_matches_per_sender_fifo_model() {
     drop(senders);
     loop {
         match rx.try_recv() {
-            Ok((sender, sequence)) => {
-                assert_eq!(expected[sender].pop_front(), Some(sequence));
-                expected_count -= 1;
-            }
+            Ok(value) => model.receive(value),
             Err(TryRecvError::Empty) => std::thread::yield_now(),
             Err(TryRecvError::Disconnected) => break,
         }
     }
-    assert_eq!(expected_count, 0);
-    assert!(expected.iter().all(VecDeque::is_empty));
+    assert_eq!(model.expected_count, 0);
+    assert!(model.expected.iter().all(VecDeque::is_empty));
 }
 
 #[test]
