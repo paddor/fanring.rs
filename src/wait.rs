@@ -55,10 +55,16 @@ impl WaitCell {
         let previous = self.state.fetch_add(NOTIFY_INCREMENT, Ordering::AcqRel);
         #[cfg(feature = "async")]
         self.waker.wake();
-        if previous & WAITING == 0 {
-            return;
+        if previous & WAITING != 0 {
+            self.notify_waiter();
         }
+    }
 
+    // Out of line, so inlining `notify` adds one RMW and a call to send
+    // paths instead of the mutex and condvar code.
+    #[cold]
+    #[inline(never)]
+    fn notify_waiter(&self) {
         let _guard = lock(&self.mutex);
         if self.state.load(Ordering::Relaxed) & WAITING != 0 {
             self.condvar.notify_one();
