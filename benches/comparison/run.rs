@@ -7,11 +7,11 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Instant;
 
-use crate::adapters::{
-    BenchReceiver, BenchSender, ConcurrentReceiver, ConcurrentSender, RecvAttempt, SendAttempt,
+use crate::support::{
+    BenchReceiver, BenchSender, ConcurrentReceiver, ConcurrentSender, Mode, Outcome, Profile,
+    RecvAttempt, Saturation, SendAttempt, clones,
 };
-use crate::support::Saturation;
-use crate::{Case, Mode, Outcome, Profile, Row, clones, row};
+use crate::{Case, Row, row};
 
 // Producer stop checks must not share a cache line with queue allocations.
 #[derive(Debug)]

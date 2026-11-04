@@ -1,11 +1,10 @@
 #![cfg_attr(test, allow(dead_code, unused_imports))]
 
-mod adapters;
 mod run;
 #[path = "../support/mod.rs"]
 mod support;
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -13,7 +12,11 @@ use run::{
     bench_concurrent_queue, bench_crossbeam_channel, bench_crossfire, bench_fanring, bench_flume,
     bench_kanal, bench_thingbuf,
 };
-use support::{Affinity, JsonlResults, Sampling, Saturation, median_and_relative_mad};
+use support::{
+    Filter, JsonlResults, Mode, Outcome, Payload, PayloadRun, Profile, RunContext, Sampling,
+    Saturation, bench_duration, capacity_per_sender, for_each_payload, median_and_relative_mad,
+    producer_counts, selected_payload_count, total_capacity,
+};
 
 #[derive(Debug, Clone, Copy)]
 struct Config {
@@ -24,39 +27,6 @@ struct Config {
     sample: usize,
     samples: usize,
     expected_rows: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Try,
-    Blocking,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Profile {
-    Uncontrolled,
-    Saturated,
-}
-
-#[derive(Debug)]
-struct RunContext {
-    run_id: String,
-    cpu: String,
-    affinity: Affinity,
-}
-impl RunContext {
-    /// Tags this run with the current time, the CPU, and the pinning policy.
-    fn from_env() -> Self {
-        Self {
-            run_id: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock before Unix epoch")
-                .as_nanos()
-                .to_string(),
-            cpu: cpu_name(),
-            affinity: Affinity::from_env(),
-        }
-    }
 }
 
 /// Configurations, implementations, sampling, and mode selected for this run.
@@ -79,17 +49,6 @@ struct Case<'a, T> {
 }
 
 type BenchFn<T> = fn(Case<'_, T>) -> Row;
-
-#[derive(Debug, Clone, Copy)]
-struct Payload<T> {
-    label: &'static str,
-    value: T,
-}
-
-#[derive(Debug)]
-struct Filter {
-    values: Option<Vec<String>>,
-}
 
 #[derive(Debug, Serialize)]
 struct Row {
@@ -115,11 +74,6 @@ struct Row {
     expected_rows: usize,
 }
 
-struct Outcome {
-    elapsed: Duration,
-    items: u64,
-}
-
 // Cargo sets `cfg(test)` for bench targets. Keep `cargo test --all-targets`
 // from running the full benchmark, while normal optimized `cargo bench` runs.
 #[cfg(all(test, debug_assertions))]
@@ -128,12 +82,7 @@ fn main() {}
 #[cfg(not(all(test, debug_assertions)))]
 fn main() {
     crossfire::detect_backoff_cfg();
-    let duration = Duration::from_secs_f64(
-        std::env::var("FANRING_BENCH_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1.0),
-    );
+    let duration = bench_duration();
     let sampling = Sampling::from_env();
     let mut results = JsonlResults::new("throughput-mpsc.jsonl");
     let payload_filter = Filter::from_env("FANRING_BENCH_PAYLOADS");
@@ -168,7 +117,14 @@ fn main() {
         sampling,
         mode,
     };
-    run_payloads(&context, &mut results, &plan, &payload_filter);
+    for_each_payload(
+        &payload_filter,
+        &mut Runner {
+            context: &context,
+            results: &mut results,
+            plan: &plan,
+        },
+    );
     results.flush();
 }
 
@@ -195,45 +151,16 @@ fn configs(
         .collect()
 }
 
-/// Runs the plan once per payload that the payload filter selects.
-fn run_payloads(
-    context: &RunContext,
-    results: &mut JsonlResults,
-    plan: &Plan,
-    payload_filter: &Filter,
-) {
-    if payload_filter.matches("u64") {
-        run_payload(
-            context,
-            results,
-            plan,
-            Payload {
-                label: "u64",
-                value: 0u64,
-            },
-        );
-    }
-    if payload_filter.matches("bytes64") {
-        run_payload(
-            context,
-            results,
-            plan,
-            Payload {
-                label: "bytes64",
-                value: [0u64; 8],
-            },
-        );
-    }
-    if payload_filter.matches("bytes256") {
-        run_payload(
-            context,
-            results,
-            plan,
-            Payload {
-                label: "bytes256",
-                value: [0u64; 32],
-            },
-        );
+/// Runs the plan for one payload type.
+struct Runner<'a> {
+    context: &'a RunContext,
+    results: &'a mut JsonlResults,
+    plan: &'a Plan,
+}
+
+impl PayloadRun for Runner<'_> {
+    fn run<T: Copy + Default + Send + Sync + 'static>(&mut self, payload: Payload<T>) {
+        run_payload(self.context, self.results, self.plan, payload);
     }
 }
 
@@ -400,89 +327,10 @@ fn row<T>(case: Case<'_, T>, outcome: Outcome, saturation: Option<&Saturation>) 
     }
 }
 
-fn clones<T: Clone>(value: &T, count: usize) -> Vec<T> {
-    (0..count).map(|_| value.clone()).collect()
-}
-
 impl Config {
     fn total_capacity(self) -> usize {
         self.producers * self.capacity_per_sender
     }
-}
-
-impl Mode {
-    fn from_env() -> Self {
-        match std::env::var("FANRING_BENCH_MODE").as_deref() {
-            Ok("blocking") => Self::Blocking,
-            Ok("try") | Err(_) => Self::Try,
-            Ok(value) => panic!("invalid benchmark mode {value:?}; expected try or blocking"),
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Try => "try",
-            Self::Blocking => "blocking",
-        }
-    }
-}
-
-impl Profile {
-    fn from_env() -> Self {
-        match std::env::var("FANRING_BENCH_PROFILE").as_deref() {
-            Ok("saturated") => Self::Saturated,
-            Ok("uncontrolled") | Err(_) => Self::Uncontrolled,
-            Ok(value) => {
-                panic!("invalid benchmark profile {value:?}; expected uncontrolled or saturated")
-            }
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Uncontrolled => "uncontrolled",
-            Self::Saturated => "saturated, 50-100% occupancy",
-        }
-    }
-}
-
-impl Filter {
-    fn from_env(name: &str) -> Self {
-        let values = std::env::var(name).ok().map(|raw| {
-            raw.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        });
-        Self { values }
-    }
-
-    fn matches(&self, value: &str) -> bool {
-        self.values
-            .as_ref()
-            .is_none_or(|values| values.iter().any(|v| v == value))
-    }
-}
-
-fn producer_counts() -> Vec<usize> {
-    std::env::var("FANRING_BENCH_PRODUCERS")
-        .ok()
-        .map(|raw| {
-            raw.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| s.parse().expect("invalid producer count"))
-                .collect()
-        })
-        .unwrap_or_else(|| vec![1, 2, 4, 8])
-}
-
-fn selected_payload_count(filter: &Filter) -> usize {
-    ["u64", "bytes64", "bytes256"]
-        .into_iter()
-        .filter(|payload| filter.matches(payload))
-        .count()
 }
 
 fn selected_implementation_count(filter: &Filter, mode: Mode) -> usize {
@@ -499,32 +347,4 @@ fn selected_implementation_count(filter: &Filter, mode: Mode) -> usize {
     .into_iter()
     .filter(|(implementation, supported)| *supported && filter.matches(implementation))
     .count()
-}
-
-fn total_capacity() -> usize {
-    std::env::var("FANRING_BENCH_CAPACITY")
-        .ok()
-        .map(|value| value.parse().expect("invalid total capacity"))
-        .unwrap_or(8192)
-}
-
-fn capacity_per_sender(total_capacity: usize, producers: usize) -> usize {
-    assert!(producers > 0, "producer count must be > 0");
-    assert!(
-        total_capacity.is_multiple_of(producers),
-        "total capacity must divide producer count"
-    );
-    total_capacity / producers
-}
-
-fn cpu_name() -> String {
-    let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") else {
-        return "unknown CPU".to_string();
-    };
-
-    cpuinfo
-        .lines()
-        .find_map(|line| line.strip_prefix("model name\t: "))
-        .unwrap_or("unknown CPU")
-        .to_string()
 }

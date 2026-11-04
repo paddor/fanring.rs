@@ -4,11 +4,11 @@ mod support;
 
 use std::sync::mpsc::sync_channel;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use support::{Affinity, JsonlResults};
+use support::{Affinity, BenchReceiver, BenchSender, Filter, JsonlResults, RunContext};
 
 #[derive(Debug, Serialize)]
 struct Row {
@@ -30,27 +30,6 @@ struct Row {
     max_ns: u64,
 }
 
-#[derive(Debug)]
-struct RunContext {
-    run_id: String,
-    cpu: String,
-    affinity: Affinity,
-}
-impl RunContext {
-    /// Tags this run with the current time, the CPU, and the pinning policy.
-    fn from_env() -> Self {
-        Self {
-            run_id: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock before Unix epoch")
-                .as_nanos()
-                .to_string(),
-            cpu: cpu_name(),
-            affinity: Affinity::from_env(),
-        }
-    }
-}
-
 /// Round counts and settle behavior shared by every wake measurement.
 #[derive(Debug, Clone, Copy)]
 struct Wake {
@@ -65,110 +44,6 @@ struct Wake {
 struct Series {
     implementation: &'static str,
     spin_ns: Option<u64>,
-}
-
-trait BlockingSender: Send {
-    fn send(&mut self, value: u64) -> bool;
-}
-
-trait BlockingReceiver: Send {
-    fn recv(&mut self) -> Option<u64>;
-}
-
-impl BlockingSender for fanring::mpsc::Sender<u64> {
-    fn send(&mut self, value: u64) -> bool {
-        fanring::mpsc::Sender::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for fanring::mpsc::Receiver<u64> {
-    fn recv(&mut self) -> Option<u64> {
-        fanring::mpsc::Receiver::recv(self).ok()
-    }
-}
-
-impl BlockingSender for fanring::mpmc::Sender<u64> {
-    fn send(&mut self, value: u64) -> bool {
-        fanring::mpmc::Sender::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for fanring::mpmc::Receiver<u64> {
-    fn recv(&mut self) -> Option<u64> {
-        fanring::mpmc::Receiver::recv(self).ok()
-    }
-}
-
-impl BlockingSender for crossbeam_channel::Sender<u64> {
-    fn send(&mut self, value: u64) -> bool {
-        crossbeam_channel::Sender::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for crossbeam_channel::Receiver<u64> {
-    fn recv(&mut self) -> Option<u64> {
-        crossbeam_channel::Receiver::recv(self).ok()
-    }
-}
-
-impl BlockingSender for crossfire::MTx<crossfire::mpsc::Array<u64>> {
-    fn send(&mut self, value: u64) -> bool {
-        crossfire::BlockingTxTrait::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for crossfire::Rx<crossfire::mpsc::Array<u64>> {
-    fn recv(&mut self) -> Option<u64> {
-        crossfire::BlockingRxTrait::recv(self).ok()
-    }
-}
-
-impl BlockingSender for crossfire::MTx<crossfire::mpmc::Array<u64>> {
-    fn send(&mut self, value: u64) -> bool {
-        crossfire::BlockingTxTrait::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for crossfire::MRx<crossfire::mpmc::Array<u64>> {
-    fn recv(&mut self) -> Option<u64> {
-        crossfire::BlockingRxTrait::recv(self).ok()
-    }
-}
-
-impl BlockingSender for flume::Sender<u64> {
-    fn send(&mut self, value: u64) -> bool {
-        flume::Sender::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for flume::Receiver<u64> {
-    fn recv(&mut self) -> Option<u64> {
-        flume::Receiver::recv(self).ok()
-    }
-}
-
-impl BlockingSender for kanal::Sender<u64> {
-    fn send(&mut self, value: u64) -> bool {
-        kanal::Sender::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for kanal::Receiver<u64> {
-    fn recv(&mut self) -> Option<u64> {
-        kanal::Receiver::recv(self).ok()
-    }
-}
-
-impl BlockingSender for thingbuf::mpsc::blocking::Sender<u64> {
-    fn send(&mut self, value: u64) -> bool {
-        thingbuf::mpsc::blocking::Sender::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for thingbuf::mpsc::blocking::Receiver<u64> {
-    fn recv(&mut self) -> Option<u64> {
-        thingbuf::mpsc::blocking::Receiver::recv(self)
-    }
 }
 
 #[cfg(all(test, debug_assertions))]
@@ -345,8 +220,8 @@ fn run_implementation<S, R, F>(
     outputs: &mut [&mut JsonlResults],
     make_channel: F,
 ) where
-    S: BlockingSender + 'static,
-    R: BlockingReceiver + 'static,
+    S: BenchSender<u64>,
+    R: BenchReceiver<u64>,
     F: Fn() -> (S, R),
 {
     let (sender, receiver) = make_channel();
@@ -372,8 +247,8 @@ fn measure_recv_wake<S, R>(
     wake: Wake,
 ) -> Vec<u64>
 where
-    S: BlockingSender,
-    R: BlockingReceiver + 'static,
+    S: BenchSender<u64>,
+    R: BenchReceiver<u64>,
 {
     let Wake {
         rounds,
@@ -420,8 +295,8 @@ fn measure_send_wake<S, R>(
     wake: Wake,
 ) -> Vec<u64>
 where
-    S: BlockingSender + 'static,
-    R: BlockingReceiver,
+    S: BenchSender<u64>,
+    R: BenchReceiver<u64>,
 {
     let Wake {
         rounds,
@@ -575,40 +450,4 @@ impl SettleMode {
             }
         }
     }
-}
-
-#[derive(Debug)]
-struct Filter {
-    values: Option<Vec<String>>,
-}
-
-impl Filter {
-    fn from_env(name: &str) -> Self {
-        let values = std::env::var(name).ok().map(|raw| {
-            raw.split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .collect()
-        });
-        Self { values }
-    }
-
-    fn matches(&self, value: &str) -> bool {
-        self.values
-            .as_ref()
-            .is_none_or(|values| values.iter().any(|candidate| candidate == value))
-    }
-}
-
-fn cpu_name() -> String {
-    let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") else {
-        return "unknown CPU".to_string();
-    };
-
-    cpuinfo
-        .lines()
-        .find_map(|line| line.strip_prefix("model name\t: "))
-        .unwrap_or("unknown CPU")
-        .to_string()
 }

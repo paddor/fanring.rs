@@ -11,12 +11,15 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use fanring::mpsc::{Receiver, Sender, TryRecvError, TrySendError, channel};
 use serde::Serialize;
 
-use support::{Affinity, JsonlResults, Sampling, median_and_relative_mad};
+use support::{
+    Filter, JsonlResults, Payload, PayloadRun, RunContext, Sampling, bench_duration, env_counts,
+    for_each_payload, median_and_relative_mad, producer_counts, total_capacity,
+};
 
 const DEADLINE_CHECK_INTERVAL: u64 = 16;
 
@@ -48,27 +51,6 @@ struct Config {
     samples: usize,
 }
 
-#[derive(Debug)]
-struct RunContext {
-    run_id: String,
-    cpu: String,
-    affinity: Affinity,
-}
-impl RunContext {
-    /// Tags this run with the current time, the CPU, and the pinning policy.
-    fn from_env() -> Self {
-        Self {
-            run_id: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock before Unix epoch")
-                .as_nanos()
-                .to_string(),
-            cpu: cpu_name(),
-            affinity: Affinity::from_env(),
-        }
-    }
-}
-
 /// Configurations, receive modes, and sampling selected for this run.
 #[derive(Debug)]
 struct Plan {
@@ -92,17 +74,6 @@ struct PrefillSync {
     stop: Arc<AtomicBool>,
     start_barrier: Arc<Barrier>,
     filled_barrier: Arc<Barrier>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Payload<T> {
-    label: &'static str,
-    value: T,
-}
-
-#[derive(Debug)]
-struct Filter {
-    values: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,14 +110,14 @@ fn main() {}
 
 #[cfg(not(all(test, debug_assertions)))]
 fn main() {
-    let duration = Duration::from_secs_f64(env_f64("FANRING_BENCH_SECS", 1.0));
+    let duration = bench_duration();
     let sampling = Sampling::from_env();
     let mut results = JsonlResults::new("batch-mpsc.jsonl");
     let payload_filter = Filter::from_env("FANRING_BENCH_PAYLOADS");
     let receives = selected_receives();
     let profiles = selected_profiles();
     let context = RunContext::from_env();
-    let total_capacity = env_usize("FANRING_BENCH_CAPACITY", 8192);
+    let total_capacity = total_capacity();
 
     println!(
         "MPSC batch receive comparison ({} x {:.2}s, {:.2}s warmup, capacity {} items, affinity {}, results {})\n",
@@ -163,7 +134,14 @@ fn main() {
         receives,
         sampling,
     };
-    run_payloads(&context, &mut results, &plan, &payload_filter);
+    for_each_payload(
+        &payload_filter,
+        &mut Runner {
+            context: &context,
+            results: &mut results,
+            plan: &plan,
+        },
+    );
     results.flush();
 }
 
@@ -171,7 +149,7 @@ fn main() {
 /// only the default modes run.
 fn selected_receives() -> Vec<Receive> {
     let receive_filter = Filter::from_env("FANRING_BENCH_RECEIVES");
-    let receive_modes = if receive_filter.values.is_some() {
+    let receive_modes = if receive_filter.is_set() {
         Receive::ALL.as_slice()
     } else {
         Receive::DEFAULT.as_slice()
@@ -204,8 +182,8 @@ fn configs(
     duration: Duration,
     sampling: &Sampling,
 ) -> Vec<Config> {
-    let producer_counts = env_list("FANRING_BENCH_PRODUCERS", &[1, 2, 4, 8]);
-    let batch_limits = env_list("FANRING_BENCH_BATCH", &[64, 1024]);
+    let producer_counts = producer_counts();
+    let batch_limits = env_counts("FANRING_BENCH_BATCH", &[64, 1024]);
     let mut configs = Vec::new();
     for &profile in profiles {
         for &producers in &producer_counts {
@@ -225,45 +203,16 @@ fn configs(
     configs
 }
 
-/// Runs the plan once per payload that the payload filter selects.
-fn run_payloads(
-    context: &RunContext,
-    results: &mut JsonlResults,
-    plan: &Plan,
-    payload_filter: &Filter,
-) {
-    if payload_filter.matches("u64") {
-        run_payload(
-            context,
-            results,
-            plan,
-            Payload {
-                label: "u64",
-                value: 0u64,
-            },
-        );
-    }
-    if payload_filter.matches("bytes64") {
-        run_payload(
-            context,
-            results,
-            plan,
-            Payload {
-                label: "bytes64",
-                value: [0u64; 8],
-            },
-        );
-    }
-    if payload_filter.matches("bytes256") {
-        run_payload(
-            context,
-            results,
-            plan,
-            Payload {
-                label: "bytes256",
-                value: [0u64; 32],
-            },
-        );
+/// Runs the plan for one payload type.
+struct Runner<'a> {
+    context: &'a RunContext,
+    results: &'a mut JsonlResults,
+    plan: &'a Plan,
+}
+
+impl PayloadRun for Runner<'_> {
+    fn run<T: Copy + Default + Send + Sync + 'static>(&mut self, payload: Payload<T>) {
+        run_payload(self.context, self.results, self.plan, payload);
     }
 }
 
@@ -715,62 +664,4 @@ impl Profile {
             Self::Stream => "stream",
         }
     }
-}
-
-impl Filter {
-    fn from_env(name: &str) -> Self {
-        Self {
-            values: std::env::var(name).ok().map(|value| {
-                value
-                    .split(',')
-                    .map(|item| item.trim().to_string())
-                    .filter(|item| !item.is_empty())
-                    .collect()
-            }),
-        }
-    }
-
-    fn matches(&self, value: &str) -> bool {
-        self.values
-            .as_ref()
-            .is_none_or(|values| values.iter().any(|item| item == value))
-    }
-}
-
-fn env_list(name: &str, default: &[usize]) -> Vec<usize> {
-    std::env::var(name).map_or_else(
-        |_| default.to_vec(),
-        |value| {
-            value
-                .split(',')
-                .map(|item| item.trim().parse().expect("numeric list entry"))
-                .collect()
-        },
-    )
-}
-
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
-}
-
-fn env_f64(name: &str, default: f64) -> f64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
-}
-
-fn cpu_name() -> String {
-    std::fs::read_to_string("/proc/cpuinfo")
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .find(|line| line.starts_with("model name"))
-                .and_then(|line| line.split(':').nth(1))
-                .map(|name| name.trim().to_string())
-        })
-        .unwrap_or_else(|| "unknown".to_string())
 }

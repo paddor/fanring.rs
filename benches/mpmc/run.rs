@@ -7,9 +7,11 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Instant;
 
-use crate::adapters::{BenchReceiver, BenchSender, RecvAttempt, SendAttempt};
-use crate::support::Saturation;
-use crate::{Case, Config, Mode, Outcome, Profile, Row, clones, row};
+use crate::support::{
+    BenchReceiver, BenchSender, Mode, Outcome, Profile, RecvAttempt, Saturation, SendAttempt,
+    clones,
+};
+use crate::{Case, Config, Row, row};
 
 /// Stop flag, saturation phases, and barriers shared by saturated workers.
 struct SaturatedSync {
