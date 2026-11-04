@@ -335,6 +335,34 @@ fn paused_lane_stays_full_while_other_lanes_progress() {
 }
 
 #[test]
+fn pause_wakes_a_sender_blocked_on_consumed_slots() {
+    use std::time::Duration;
+
+    let (mut tx, mut rx) = channel(4);
+    let lane = tx.lane();
+    for value in 0..4 {
+        tx.try_send(value).unwrap();
+    }
+    assert_eq!(rx.try_recv(), Ok(0));
+    assert_eq!(rx.try_recv(), Ok(1));
+    std::thread::scope(|scope| {
+        let sender = scope.spawn(move || {
+            tx.send_timeout(4, Duration::from_secs(10)).unwrap();
+            tx
+        });
+        rx.pause(&lane).unwrap();
+        let mut tx = sender.join().unwrap();
+        // Both consumed slots are free; the unread values still hold the rest.
+        tx.try_send(5).unwrap();
+        assert_eq!(tx.try_send(6), Err(TrySendError::Full(6)));
+    });
+    rx.resume(&lane).unwrap();
+    for value in 2..6 {
+        assert_eq!(rx.try_recv(), Ok(value));
+    }
+}
+
+#[test]
 fn pause_covers_bulk_scan_iter_and_cached_fast_paths() {
     let (mut tx, mut rx) = channel(128);
     let lane = tx.lane();

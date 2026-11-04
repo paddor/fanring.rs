@@ -1,7 +1,7 @@
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::hint::black_box;
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -433,14 +433,8 @@ fn seconds(name: &str, default: f64) -> Duration {
     Duration::from_secs_f64(seconds)
 }
 
-fn main() {
-    let duration = seconds("YRING_BENCH_SECS", 2.0);
-    assert!(!duration.is_zero(), "measurement duration must be positive");
-    let samples = std::env::var("YRING_BENCH_SAMPLES")
-        .map_or(5, |value| value.parse().expect("invalid sample count"));
-    assert!(samples > 0, "sample count must be positive");
-    let cpus = cpu_pair();
-    let path = std::env::var_os("YRING_BENCH_RESULTS").map_or_else(
+fn results_path() -> PathBuf {
+    std::env::var_os("YRING_BENCH_RESULTS").map_or_else(
         || {
             PathBuf::from(
                 std::env::var_os("HOME").expect("set YRING_BENCH_RESULTS when HOME is absent"),
@@ -448,21 +442,27 @@ fn main() {
             .join(".cache/yring/comparison.jsonl")
         },
         PathBuf::from,
-    );
+    )
+}
+
+fn open_results(path: &Path) -> BufWriter<File> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
         fs::create_dir_all(parent).expect("create result directory");
     }
-    let results = BufWriter::new(
+    BufWriter::new(
         OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
+            .open(path)
             .expect("open results"),
-    );
-    let source_revision = std::env::var("YRING_BENCH_SOURCE_REVISION").unwrap_or_else(|_| {
+    )
+}
+
+fn source_revision() -> String {
+    std::env::var("YRING_BENCH_SOURCE_REVISION").unwrap_or_else(|_| {
         let output = std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
             .output()
@@ -475,7 +475,19 @@ fn main() {
             .expect("Git revision encoding")
             .trim()
             .to_owned()
-    });
+    })
+}
+
+fn main() {
+    let duration = seconds("YRING_BENCH_SECS", 2.0);
+    assert!(!duration.is_zero(), "measurement duration must be positive");
+    let samples = std::env::var("YRING_BENCH_SAMPLES")
+        .map_or(5, |value| value.parse().expect("invalid sample count"));
+    assert!(samples > 0, "sample count must be positive");
+    let cpus = cpu_pair();
+    let path = results_path();
+    let results = open_results(&path);
+    let source_revision = source_revision();
     println!(
         "SPSC comparison ({samples} x {:.2}s, cap=1024, producer CPU {}, consumer CPU {}, results {})",
         duration.as_secs_f64(),

@@ -9,32 +9,36 @@ Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off, all worke
 <text x="22" y="190" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E6EDF3" font-weight="bold" transform="rotate(270, 22, 190)">
 million items/s
 </text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,215 830,215 "/>
-<text x="62" y="215" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
-50
-</text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,112 830,112 "/>
-<text x="62" y="112" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,233 830,233 "/>
+<text x="62" y="233" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
 100
 </text>
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,148 830,148 "/>
+<text x="62" y="148" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+200
+</text>
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,62 830,62 "/>
+<text x="62" y="62" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#7D8590">
+300
+</text>
 <polyline fill="none" opacity="1" stroke="#30363D" stroke-width="2" points="70,318 830,318 "/>
-<rect x="77" y="127" width="44" height="191" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="123" y="133" width="44" height="185" opacity="1" fill="#C94B4B" stroke="none"/>
-<rect x="169" y="274" width="44" height="44" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="215" y="257" width="44" height="61" opacity="1" fill="#22D3EE" stroke="none"/>
-<rect x="261" y="300" width="44" height="18" opacity="1" fill="#4ADE80" stroke="none"/>
-<rect x="307" y="302" width="44" height="16" opacity="1" fill="#A78BFA" stroke="none"/>
-<rect x="353" y="309" width="44" height="9" opacity="1" fill="#F472B6" stroke="none"/>
-<rect x="399" y="267" width="44" height="51" opacity="1" fill="#F59E0B" stroke="none"/>
+<rect x="77" y="95" width="44" height="223" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="123" y="209" width="44" height="109" opacity="1" fill="#C94B4B" stroke="none"/>
+<rect x="169" y="299" width="44" height="19" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="215" y="294" width="44" height="24" opacity="1" fill="#22D3EE" stroke="none"/>
+<rect x="261" y="311" width="44" height="7" opacity="1" fill="#4ADE80" stroke="none"/>
+<rect x="307" y="312" width="44" height="6" opacity="1" fill="#A78BFA" stroke="none"/>
+<rect x="353" y="314" width="44" height="4" opacity="1" fill="#F472B6" stroke="none"/>
+<rect x="399" y="299" width="44" height="19" opacity="1" fill="#F59E0B" stroke="none"/>
 <text x="260" y="338" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E6EDF3" font-weight="bold">
 MPSC: 4 producers
 </text>
-<rect x="503" y="95" width="44" height="223" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="549" y="148" width="44" height="170" opacity="1" fill="#C94B4B" stroke="none"/>
-<rect x="595" y="255" width="44" height="63" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="641" y="259" width="44" height="59" opacity="1" fill="#22D3EE" stroke="none"/>
-<rect x="687" y="305" width="44" height="13" opacity="1" fill="#F472B6" stroke="none"/>
-<rect x="733" y="252" width="44" height="66" opacity="1" fill="#F59E0B" stroke="none"/>
+<rect x="503" y="206" width="44" height="112" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="549" y="241" width="44" height="77" opacity="1" fill="#C94B4B" stroke="none"/>
+<rect x="595" y="300" width="44" height="18" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="641" y="288" width="44" height="30" opacity="1" fill="#22D3EE" stroke="none"/>
+<rect x="687" y="312" width="44" height="6" opacity="1" fill="#F472B6" stroke="none"/>
+<rect x="733" y="291" width="44" height="27" opacity="1" fill="#F59E0B" stroke="none"/>
 <text x="640" y="338" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E6EDF3" font-weight="bold">
 MPMC: 4 producers / 4 consumers
 </text>

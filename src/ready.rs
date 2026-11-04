@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::compat::{Arc, AtomicU8, AtomicU64, Ordering};
-use crate::wait::{WaitCell, WaitRegistration};
+use crate::wait::{WaitCell, WaitRegistration, WaitSource};
 
 const IDLE: u8 = 0;
 const PENDING: u8 = 1;
@@ -186,13 +186,18 @@ impl LaneSignal {
         self.readiness.state.load(Ordering::Acquire) != IDLE
     }
 
-    pub(crate) fn prepare_space_wait(&self) -> WaitRegistration<'_> {
-        self.space_waiter.prepare()
-    }
-
     #[inline]
     pub(crate) fn notify_space(&self) {
         self.space_waiter.notify();
+    }
+}
+
+/// Senders park on their lane's capacity cell.
+impl WaitSource for LaneSignal {
+    type Registration<'a> = WaitRegistration<'a>;
+
+    fn register(&self) -> WaitRegistration<'_> {
+        self.space_waiter.prepare()
     }
 }
 

@@ -17,7 +17,7 @@ use std::fmt;
 use crate::compat::{Arc, AtomicBool, AtomicU64, AtomicUsize, Mutex, Ordering, lock};
 use crate::config::{WaitStrategy, validate_capacity};
 use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
-use crate::wait::WaitCell;
+use crate::wait::{WaitCell, WaitRegistration, WaitSource};
 
 #[cfg(feature = "async")]
 mod asynchronous;
@@ -70,10 +70,6 @@ const READY_POLL_INTERVAL: usize = 64;
 const MIN_RELEASE_BATCH: usize = 64;
 #[cfg(loom)]
 const MIN_RELEASE_BATCH: usize = 2;
-#[cfg(not(loom))]
-const PARK_SPINS: usize = 128;
-#[cfg(loom)]
-const PARK_SPINS: usize = 0;
 
 /// Create an MPSC channel with one bounded ring per sender.
 ///
@@ -197,13 +193,14 @@ fn build_channel<T, P: Teardown>(capacity_per_sender: usize) -> (Sender<T, P>, R
             ready_group_cursor: 0,
             seen_registry_generation: 0,
             items_until_ready_poll: READY_POLL_INTERVAL,
+            fast_slot: 0,
             capacity_per_sender: capacity_per_sender.next_power_of_two(),
             wait_strategy: WaitStrategy::default(),
         },
     )
 }
 
-struct Shared<T, P: Teardown> {
+pub(crate) struct Shared<T, P: Teardown> {
     registry: Mutex<Registry<T, P>>,
     registry_generation: AtomicUsize,
     registered_lanes: AtomicUsize,
@@ -229,6 +226,13 @@ impl<T, P: Teardown> Shared<T, P> {
         if !self.receiver_alive.load(Ordering::Acquire) {
             return Err(TryRegisterBoundedError::Disconnected);
         }
+        // Skip a ring allocation that the locked recheck would discard.
+        if self.registered_lanes.load(Ordering::Acquire) >= max_lanes {
+            return Err(TryRegisterBoundedError::AtCapacity);
+        }
+        // Allocate outside the registry lock; the receiver takes it to adopt
+        // lanes.
+        let (producer, consumer) = crate::ring::spsc(capacity);
 
         let mut registry = lock(&self.registry);
         if !self.receiver_alive.load(Ordering::Acquire) {
@@ -240,7 +244,6 @@ impl<T, P: Teardown> Shared<T, P> {
         }
         let (key, page) = registry.allocate_lane();
         let signal = Arc::new(LaneSignal::new(page, key.slot));
-        let (producer, consumer) = crate::ring::spsc(capacity);
         registry.pending.push(PendingLane {
             key,
             signal: signal.clone(),
@@ -256,6 +259,18 @@ impl<T, P: Teardown> Shared<T, P> {
     #[inline]
     fn mark_ready(&self, signal: &LaneSignal) -> bool {
         signal.mark()
+    }
+}
+
+/// Receivers park on the channel data cell.
+impl<T, P: Teardown> WaitSource for Shared<T, P> {
+    type Registration<'a>
+        = WaitRegistration<'a>
+    where
+        Self: 'a;
+
+    fn register(&self) -> WaitRegistration<'_> {
+        self.data_waiter.prepare()
     }
 }
 
@@ -277,7 +292,7 @@ impl<T, P: Teardown> fmt::Debug for Shared<T, P> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct LaneKey {
+pub(crate) struct LaneKey {
     slot: usize,
     generation: usize,
 }

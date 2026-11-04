@@ -67,6 +67,12 @@ fn queue_probe(name: &str, queue: concurrent_queue::ConcurrentQueue<Payload>) {
 }
 
 fn main() {
+    print_channel_table();
+    println!();
+    print_queue_table();
+}
+
+fn print_channel_table() {
     println!("| Channel | Destroyed after last receiver drop, sender alive | After sender drop |");
     println!("|---|---:|---:|");
     channel_probe!("fanring MPSC Deferred", fanring::mpsc::channel(QUEUED));
@@ -120,8 +126,9 @@ fn main() {
         tx.flush();
         (tx, rx)
     });
+}
 
-    println!();
+fn print_queue_table() {
     println!(
         "| Queue | Destroyed after close and one Arc drop, another alive | After last Arc drop |"
     );

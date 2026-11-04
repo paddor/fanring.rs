@@ -1,19 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use plotters::coord::Shift;
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 
 use super::hardware::chart_hardware;
+use super::plot::{
+    self, AXIS, Area, BG, Bar, Font, GRID, MUTED, Plot, TEXT, finish_svg, line, px, rect,
+};
 use super::render::measurement;
 use super::{ChartError, ChartResult, DrawResultExt, Row};
 
-const BG: RGBColor = RGBColor(0x0d, 0x11, 0x17);
-const GRID: RGBColor = RGBColor(0x21, 0x26, 0x2d);
-const AXIS: RGBColor = RGBColor(0x30, 0x36, 0x3d);
-const TEXT: RGBColor = RGBColor(0xe6, 0xed, 0xf3);
-const MUTED: RGBColor = RGBColor(0x7d, 0x85, 0x90);
 const FONT_BUMP: u32 = 1;
 
 const SERIES: &[Series] = &[
@@ -75,7 +72,8 @@ struct Series {
     color: RGBColor,
 }
 
-type Area<'a> = DrawingArea<SVGBackend<'a>, Shift>;
+/// Group label and median throughput per series label.
+type Group = (&'static str, BTreeMap<&'static str, f64>);
 
 pub(super) fn draw_summary_chart(
     mpsc_rows: &[Row],
@@ -83,6 +81,59 @@ pub(super) fn draw_summary_chart(
     output: &Path,
 ) -> ChartResult<()> {
     let nominal_capacity = summary_capacity(mpsc_rows, mpmc_rows)?;
+    let (groups, coordinated) = summary_groups(mpsc_rows, mpmc_rows)?;
+
+    let width = 850;
+    let height = 430;
+    let max_value = groups
+        .iter()
+        .flat_map(|(_, values)| values.values().copied())
+        .fold(0.0_f64, f64::max);
+    let plot = Plot {
+        left: 70.0,
+        right: 830.0,
+        top: 62.0,
+        bottom: 318.0,
+        y_max: (max_value * 1.15).max(1.0),
+    };
+
+    let area = root(output, width, height)?;
+    let title =
+        format!("u64 channel throughput with capacity={nominal_capacity} (higher is better)");
+    let subtitle = mpsc_rows.first().map(|row| {
+        format!(
+            "{}, {}, {}",
+            chart_hardware(&row.cpu),
+            row.affinity_label(),
+            row.throughput_profile_label()
+        )
+    });
+    chart_header(&area, width, &title, subtitle.as_deref(), 22)?;
+    vtext(
+        &area,
+        "million items/s",
+        (22, px((plot.top + plot.bottom) / 2.0)),
+        11,
+        TEXT,
+    )?;
+    draw_y_grid(&area, plot)?;
+    draw_groups(&area, plot, &groups)?;
+    draw_legend(
+        &area,
+        65.0,
+        plot.bottom + 52.0,
+        nominal_capacity,
+        coordinated,
+    )?;
+
+    area.present().chart()?;
+    drop(area);
+    finish_svg(output, width, height)
+}
+
+/// Returns both topology groups and whether they include fanring Coordinated.
+/// Fails when either group lacks an expected series.
+fn summary_groups(mpsc_rows: &[Row], mpmc_rows: &[Row]) -> ChartResult<([Group; 2], bool)> {
     let groups = [
         ("MPSC: 4 producers", summary_values(mpsc_rows, false)),
         (
@@ -103,43 +154,11 @@ pub(super) fn draw_summary_chart(
     {
         return Err(ChartError::NoRenderableRows);
     }
+    Ok((groups, coordinated))
+}
 
-    let width = 850;
-    let height = 430;
-    let x_left = 70.0;
-    let x_right = 830.0;
-    let plot_width = x_right - x_left;
-    let plot_top = 62.0;
-    let plot_bottom = 318.0;
-    let max_value = groups
-        .iter()
-        .flat_map(|(_, values)| values.values().copied())
-        .fold(0.0_f64, f64::max);
-    let y_max = (max_value * 1.15).max(1.0);
-
-    let area = root(output, width, height)?;
-    let title =
-        format!("u64 channel throughput with capacity={nominal_capacity} (higher is better)");
-    let subtitle = mpsc_rows.first().map(|row| {
-        format!(
-            "{}, {}, {}",
-            chart_hardware(&row.cpu),
-            row.affinity_label(),
-            row.throughput_profile_label()
-        )
-    });
-    chart_header(&area, width, &title, subtitle.as_deref(), 22)?;
-    vtext(
-        &area,
-        "million items/s",
-        22,
-        px((plot_top + plot_bottom) / 2.0),
-        11,
-        TEXT,
-    )?;
-    draw_y_grid(&area, x_left, x_right, plot_top, plot_bottom, y_max)?;
-
-    let group_width = plot_width / groups.len() as f64;
+fn draw_groups(area: &Area<'_>, plot: Plot, groups: &[Group]) -> ChartResult<()> {
+    let group_width = (plot.right - plot.left) / groups.len() as f64;
     let bar_width = 44.0;
     let bar_gap = 2.0;
     for (group_index, (group, values)) in groups.iter().enumerate() {
@@ -150,45 +169,26 @@ pub(super) fn draw_summary_chart(
         let cluster_width = active_series.len() as f64 * bar_width
             + active_series.len().saturating_sub(1) as f64 * bar_gap;
         let group_x =
-            x_left + group_index as f64 * group_width + (group_width - cluster_width) / 2.0;
+            plot.left + group_index as f64 * group_width + (group_width - cluster_width) / 2.0;
         for (series_index, series) in active_series.iter().enumerate() {
             let Some(value) = values.get(series.label) else {
                 continue;
             };
-            draw_bar(
-                &area,
-                group_x + series_index as f64 * (bar_width + bar_gap),
-                bar_width,
-                plot_top,
-                plot_bottom,
-                y_max,
-                *value,
-                series.color,
-            )?;
+            let bar = Bar {
+                x: group_x + series_index as f64 * (bar_width + bar_gap),
+                width: bar_width,
+                color: series.color,
+            };
+            draw_bar(area, plot, bar, *value)?;
         }
         text(
-            &area,
+            area,
             *group,
-            px(group_x + cluster_width / 2.0),
-            px(plot_bottom + 20.0),
-            11,
-            TEXT,
-            HPos::Center,
-            true,
+            (px(group_x + cluster_width / 2.0), px(plot.bottom + 20.0)),
+            Font::bold(11, TEXT, HPos::Center),
         )?;
     }
-
-    draw_legend(
-        &area,
-        65.0,
-        plot_bottom + 52.0,
-        nominal_capacity,
-        coordinated,
-    )?;
-
-    area.present().chart()?;
-    drop(area);
-    finish_svg(output, width, height)
+    Ok(())
 }
 
 fn summary_capacity(mpsc_rows: &[Row], mpmc_rows: &[Row]) -> ChartResult<usize> {
@@ -253,53 +253,24 @@ fn root(path: &Path, width: u32, height: u32) -> ChartResult<Area<'_>> {
     Ok(area)
 }
 
-fn finish_svg(path: &Path, width: u32, height: u32) -> ChartResult<()> {
-    let mut svg = std::fs::read_to_string(path).map_err(|source| ChartError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    svg = svg.replacen(
-        &format!("<svg width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\""),
-        &format!("<svg viewBox=\"0 0 {width} {height}\""),
-        1,
-    );
-    svg = svg.replacen(
-        "xmlns=\"http://www.w3.org/2000/svg\"",
-        "xmlns=\"http://www.w3.org/2000/svg\" font-family=\"system-ui, -apple-system, sans-serif\"",
-        1,
-    );
-    std::fs::write(path, svg).map_err(|source| ChartError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
+/// Draws a label one size step larger than the shared bar chart text.
 fn text(
     area: &Area<'_>,
     value: impl Into<String>,
-    x: i32,
-    y: i32,
-    size: u32,
-    color: RGBColor,
-    horizontal: HPos,
-    bold: bool,
+    position: (i32, i32),
+    font: Font,
 ) -> ChartResult<()> {
-    let mut font = ("sans-serif", size + FONT_BUMP).into_font();
-    if bold {
-        font = font.style(FontStyle::Bold);
-    }
-    let style = TextStyle::from(font)
-        .color(&color)
-        .pos(Pos::new(horizontal, VPos::Center));
-    area.draw(&Text::new(value.into(), (x, y), style)).chart()
+    let font = Font {
+        size: font.size + FONT_BUMP,
+        ..font
+    };
+    plot::text(area, value, position, font)
 }
 
 fn vtext(
     area: &Area<'_>,
     value: &str,
-    x: i32,
-    y: i32,
+    position: (i32, i32),
     size: u32,
     color: RGBColor,
 ) -> ChartResult<()> {
@@ -310,76 +281,41 @@ fn vtext(
     let style = TextStyle::from(font)
         .color(&color)
         .pos(Pos::new(HPos::Center, VPos::Center));
-    area.draw(&Text::new(value.to_string(), (x, y), style))
+    area.draw(&Text::new(value.to_string(), position, style))
         .chart()
 }
 
-fn rect(area: &Area<'_>, x1: f64, y1: f64, x2: f64, y2: f64, color: RGBColor) -> ChartResult<()> {
-    area.draw(&Rectangle::new(
-        [(px(x1), px(y1)), (px(x2), px(y2))],
-        ShapeStyle::from(&color).filled(),
-    ))
-    .chart()
+fn draw_bar(area: &Area<'_>, plot: Plot, bar: Bar, value: f64) -> ChartResult<()> {
+    let y = plot.y(value);
+    rect(
+        area,
+        (bar.x, y),
+        (bar.x + bar.width, plot.bottom),
+        bar.color,
+    )
 }
 
-fn line(
-    area: &Area<'_>,
-    x1: f64,
-    y1: f64,
-    x2: f64,
-    y2: f64,
-    color: RGBColor,
-    width: u32,
-) -> ChartResult<()> {
-    area.draw(&PathElement::new(
-        vec![(px(x1), px(y1)), (px(x2), px(y2))],
-        color.stroke_width(width),
-    ))
-    .chart()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_bar(
-    area: &Area<'_>,
-    x: f64,
-    width: f64,
-    plot_top: f64,
-    plot_bottom: f64,
-    y_max: f64,
-    value: f64,
-    color: RGBColor,
-) -> ChartResult<()> {
-    let y = plot_bottom - (value / y_max) * (plot_bottom - plot_top);
-    rect(area, x, y, x + width, plot_bottom, color)
-}
-
-fn draw_y_grid(
-    area: &Area<'_>,
-    x_left: f64,
-    x_right: f64,
-    plot_top: f64,
-    plot_bottom: f64,
-    y_max: f64,
-) -> ChartResult<()> {
-    let map_y = |value: f64| plot_bottom - (value / y_max) * (plot_bottom - plot_top);
-    let step = nice_step(y_max, 5);
+fn draw_y_grid(area: &Area<'_>, plot: Plot) -> ChartResult<()> {
+    let step = nice_step(plot.y_max, 5);
     let mut value = step;
-    while value <= y_max {
-        let y = map_y(value);
-        line(area, x_left, y, x_right, y, GRID, 1)?;
+    while value <= plot.y_max {
+        let y = plot.y(value);
+        line(area, (plot.left, y), (plot.right, y), GRID, 1)?;
         text(
             area,
             format!("{value:.0}"),
-            px(x_left - 8.0),
-            px(y),
-            10,
-            MUTED,
-            HPos::Right,
-            false,
+            (px(plot.left - 8.0), px(y)),
+            Font::regular(10, MUTED, HPos::Right),
         )?;
         value += step;
     }
-    line(area, x_left, plot_bottom, x_right, plot_bottom, AXIS, 2)
+    line(
+        area,
+        (plot.left, plot.bottom),
+        (plot.right, plot.bottom),
+        AXIS,
+        2,
+    )
 }
 
 fn chart_header(
@@ -390,17 +326,13 @@ fn chart_header(
     y: i32,
 ) -> ChartResult<()> {
     let middle = i32::try_from(width / 2).expect("chart width fits i32");
-    text(area, title, middle, y, 14, TEXT, HPos::Center, true)?;
+    text(area, title, (middle, y), Font::bold(14, TEXT, HPos::Center))?;
     if let Some(hardware) = hardware {
         text(
             area,
             hardware,
-            middle,
-            y + 18,
-            10,
-            MUTED,
-            HPos::Center,
-            false,
+            (middle, y + 18),
+            Font::regular(10, MUTED, HPos::Center),
         )?;
     }
     Ok(())
@@ -424,10 +356,8 @@ fn draw_legend(
         let legend_y = y + row as f64 * 20.0;
         rect(
             area,
-            legend_x,
-            legend_y - 6.0,
-            legend_x + 12.0,
-            legend_y + 6.0,
+            (legend_x, legend_y - 6.0),
+            (legend_x + 12.0, legend_y + 6.0),
             series.color,
         )?;
         text(
@@ -437,12 +367,8 @@ fn draw_legend(
             } else {
                 series.label.to_string()
             },
-            px(legend_x + 18.0),
-            px(legend_y),
-            10,
-            TEXT,
-            HPos::Left,
-            false,
+            (px(legend_x + 18.0), px(legend_y)),
+            Font::regular(10, TEXT, HPos::Left),
         )?;
     }
     Ok(())
@@ -461,10 +387,6 @@ fn nice_step(max_value: f64, target_lines: usize) -> f64 {
         }
     }
     magnitude * 10.0
-}
-
-fn px(value: f64) -> i32 {
-    value.round() as i32
 }
 
 #[cfg(test)]

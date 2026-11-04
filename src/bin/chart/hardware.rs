@@ -75,6 +75,7 @@ mod tests {
     use super::{join_hardware_parts, read_chart_hardware_from, simplify_cpu_name};
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri isolation blocks file system access")]
     fn reads_runtime_repo_hardware_after_relocated_build() {
         let root =
             std::env::temp_dir().join(format!("fanring-chart-hardware-{}", std::process::id()));

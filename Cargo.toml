@@ -61,6 +61,9 @@ unsafe_op_in_unsafe_fn = "deny"
 level = "warn"
 check-cfg = ["cfg(loom)"]
 
+[lints.clippy]
+too_many_lines = "warn"
+
 [features]
 default = []
 async = ["dep:atomic-waker"]
@@ -91,7 +94,7 @@ thingbuf = "0.1"
 
 [[bench]]
 name = "fanring_comparison"
-path = "benches/comparison.rs"
+path = "benches/comparison/main.rs"
 harness = false
 test = false
 
@@ -103,7 +106,7 @@ test = false
 
 [[bench]]
 name = "fanring_mpmc"
-path = "benches/mpmc.rs"
+path = "benches/mpmc/main.rs"
 harness = false
 test = false
 
@@ -116,3 +119,4 @@ test = false
 [[example]]
 name = "fanring-chart"
 path = "src/bin/chart.rs"
+test = true

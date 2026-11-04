@@ -14,6 +14,8 @@ use serde::Deserialize;
 mod hardware;
 #[path = "chart/latency.rs"]
 mod latency;
+#[path = "chart/plot.rs"]
+mod plot;
 #[path = "chart/render.rs"]
 mod render;
 #[path = "chart/summary.rs"]

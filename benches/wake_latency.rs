@@ -4,11 +4,11 @@ mod support;
 
 use std::sync::mpsc::sync_channel;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use support::{Affinity, JsonlResults};
+use support::{Affinity, BenchReceiver, BenchSender, Filter, JsonlResults, RunContext};
 
 #[derive(Debug, Serialize)]
 struct Row {
@@ -30,108 +30,20 @@ struct Row {
     max_ns: u64,
 }
 
-trait BlockingSender: Send {
-    fn send(&mut self, value: u64) -> bool;
+/// Round counts and settle behavior shared by every wake measurement.
+#[derive(Debug, Clone, Copy)]
+struct Wake {
+    rounds: usize,
+    warmup: usize,
+    settle: Duration,
+    settle_mode: SettleMode,
 }
 
-trait BlockingReceiver: Send {
-    fn recv(&mut self) -> Option<u64>;
-}
-
-impl BlockingSender for fanring::mpsc::Sender<u64> {
-    fn send(&mut self, value: u64) -> bool {
-        fanring::mpsc::Sender::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for fanring::mpsc::Receiver<u64> {
-    fn recv(&mut self) -> Option<u64> {
-        fanring::mpsc::Receiver::recv(self).ok()
-    }
-}
-
-impl BlockingSender for fanring::mpmc::Sender<u64> {
-    fn send(&mut self, value: u64) -> bool {
-        fanring::mpmc::Sender::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for fanring::mpmc::Receiver<u64> {
-    fn recv(&mut self) -> Option<u64> {
-        fanring::mpmc::Receiver::recv(self).ok()
-    }
-}
-
-impl BlockingSender for crossbeam_channel::Sender<u64> {
-    fn send(&mut self, value: u64) -> bool {
-        crossbeam_channel::Sender::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for crossbeam_channel::Receiver<u64> {
-    fn recv(&mut self) -> Option<u64> {
-        crossbeam_channel::Receiver::recv(self).ok()
-    }
-}
-
-impl BlockingSender for crossfire::MTx<crossfire::mpsc::Array<u64>> {
-    fn send(&mut self, value: u64) -> bool {
-        crossfire::BlockingTxTrait::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for crossfire::Rx<crossfire::mpsc::Array<u64>> {
-    fn recv(&mut self) -> Option<u64> {
-        crossfire::BlockingRxTrait::recv(self).ok()
-    }
-}
-
-impl BlockingSender for crossfire::MTx<crossfire::mpmc::Array<u64>> {
-    fn send(&mut self, value: u64) -> bool {
-        crossfire::BlockingTxTrait::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for crossfire::MRx<crossfire::mpmc::Array<u64>> {
-    fn recv(&mut self) -> Option<u64> {
-        crossfire::BlockingRxTrait::recv(self).ok()
-    }
-}
-
-impl BlockingSender for flume::Sender<u64> {
-    fn send(&mut self, value: u64) -> bool {
-        flume::Sender::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for flume::Receiver<u64> {
-    fn recv(&mut self) -> Option<u64> {
-        flume::Receiver::recv(self).ok()
-    }
-}
-
-impl BlockingSender for kanal::Sender<u64> {
-    fn send(&mut self, value: u64) -> bool {
-        kanal::Sender::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for kanal::Receiver<u64> {
-    fn recv(&mut self) -> Option<u64> {
-        kanal::Receiver::recv(self).ok()
-    }
-}
-
-impl BlockingSender for thingbuf::mpsc::blocking::Sender<u64> {
-    fn send(&mut self, value: u64) -> bool {
-        thingbuf::mpsc::blocking::Sender::send(self, value).is_ok()
-    }
-}
-
-impl BlockingReceiver for thingbuf::mpsc::blocking::Receiver<u64> {
-    fn recv(&mut self) -> Option<u64> {
-        thingbuf::mpsc::blocking::Receiver::recv(self)
-    }
+/// One measured implementation and its spin budget, if any.
+#[derive(Debug, Clone, Copy)]
+struct Series {
+    implementation: &'static str,
+    spin_ns: Option<u64>,
 }
 
 #[cfg(all(test, debug_assertions))]
@@ -145,260 +57,185 @@ fn main() {
     let settle = Duration::from_nanos(env_u64("FANRING_WAKE_SETTLE_NS", 50_000));
     let settle_mode = SettleMode::from_env();
     let spin_ns = env_optional_u64("FANRING_WAKE_SPIN_NS");
-    let mut mpsc_results = JsonlResults::new("latency-mpsc.jsonl");
-    let mut mpmc_results = JsonlResults::new("latency-mpmc.jsonl");
-    let filter = Filter::from_env("FANRING_BENCH_IMPLS");
-    let run_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before Unix epoch")
-        .as_nanos()
-        .to_string();
-    let cpu = cpu_name();
-    let affinity = Affinity::from_env();
+    let mut runner = Runner {
+        mpsc: JsonlResults::new("latency-mpsc.jsonl"),
+        mpmc: JsonlResults::new("latency-mpmc.jsonl"),
+        filter: Filter::from_env("FANRING_BENCH_IMPLS"),
+        context: RunContext::from_env(),
+        wake: Wake {
+            rounds,
+            warmup,
+            settle,
+            settle_mode,
+        },
+    };
 
     assert!(rounds > 0, "wake rounds must be > 0");
     println!(
         "Wake latency ({rounds} samples, {warmup} warmup, {} ns {} settle, affinity {}, results {})\n",
         settle.as_nanos(),
         settle_mode.label(),
-        affinity.description(),
-        mpsc_results.root().display()
+        runner.context.affinity.description(),
+        runner.mpsc.root().display()
     );
 
+    run_fanring(&mut runner, spin_ns);
+    run_external(&mut runner);
+    runner.mpsc.flush();
+    runner.mpmc.flush();
+}
+
+/// Run settings and result files shared by every measured implementation.
+struct Runner {
+    mpsc: JsonlResults,
+    mpmc: JsonlResults,
+    filter: Filter,
+    context: RunContext,
+    wake: Wake,
+}
+
+/// Measures the fanring channels, plus their spin-wait variants when
+/// `spin_ns` is set.
+fn run_fanring(runner: &mut Runner, spin_ns: Option<u64>) {
+    let Runner {
+        mpsc,
+        mpmc,
+        filter,
+        context,
+        wake,
+    } = runner;
     if filter.matches("fanring") {
         run_implementation(
-            &affinity,
-            &run_id,
-            &cpu,
-            "fanring",
-            None,
-            rounds,
-            warmup,
-            settle,
-            settle_mode,
-            &mut [&mut mpsc_results],
+            context,
+            *wake,
+            Series::new("fanring", None),
+            &mut [mpsc],
             || fanring::mpsc::channel(1),
         );
     }
     if filter.matches("fanring-mpmc") {
         run_implementation(
-            &affinity,
-            &run_id,
-            &cpu,
-            "fanring-mpmc",
-            None,
-            rounds,
-            warmup,
-            settle,
-            settle_mode,
-            &mut [&mut mpmc_results],
+            context,
+            *wake,
+            Series::new("fanring-mpmc", None),
+            &mut [mpmc],
             || fanring::mpmc::channel(1),
         );
     }
-    if let Some(spin_ns) = spin_ns {
-        let strategy = fanring::WaitStrategy::SpinFor(Duration::from_nanos(spin_ns));
-        if filter.matches("fanring-spin") {
-            run_implementation(
-                &affinity,
-                &run_id,
-                &cpu,
-                "fanring-spin",
-                Some(spin_ns),
-                rounds,
-                warmup,
-                settle,
-                settle_mode,
-                &mut [&mut mpsc_results],
-                || {
-                    let (mut sender, mut receiver) = fanring::mpsc::channel(1);
-                    sender.set_wait_strategy(strategy);
-                    receiver.set_wait_strategy(strategy);
-                    (sender, receiver)
-                },
-            );
-        }
-        if filter.matches("fanring-spin-mpmc") {
-            run_implementation(
-                &affinity,
-                &run_id,
-                &cpu,
-                "fanring-spin-mpmc",
-                Some(spin_ns),
-                rounds,
-                warmup,
-                settle,
-                settle_mode,
-                &mut [&mut mpmc_results],
-                || {
-                    let (mut sender, mut receiver) = fanring::mpmc::channel(1);
-                    sender.set_wait_strategy(strategy);
-                    receiver.set_wait_strategy(strategy);
-                    (sender, receiver)
-                },
-            );
-        }
-    }
-    if filter.matches("crossbeam-channel") {
+    let Some(spin_ns) = spin_ns else {
+        return;
+    };
+    let strategy = fanring::WaitStrategy::SpinFor(Duration::from_nanos(spin_ns));
+    if filter.matches("fanring-spin") {
         run_implementation(
-            &affinity,
-            &run_id,
-            &cpu,
-            "crossbeam-channel",
-            None,
-            rounds,
-            warmup,
-            settle,
-            settle_mode,
-            &mut [&mut mpsc_results, &mut mpmc_results],
-            || crossbeam_channel::bounded(1),
+            context,
+            *wake,
+            Series::new("fanring-spin", Some(spin_ns)),
+            &mut [mpsc],
+            || {
+                let (mut sender, mut receiver) = fanring::mpsc::channel(1);
+                sender.set_wait_strategy(strategy);
+                receiver.set_wait_strategy(strategy);
+                (sender, receiver)
+            },
         );
     }
-    if filter.matches("crossfire") {
+    if filter.matches("fanring-spin-mpmc") {
         run_implementation(
-            &affinity,
-            &run_id,
-            &cpu,
-            "crossfire",
-            None,
-            rounds,
-            warmup,
-            settle,
-            settle_mode,
-            &mut [&mut mpsc_results],
-            || crossfire::mpsc::bounded_blocking(1),
+            context,
+            *wake,
+            Series::new("fanring-spin-mpmc", Some(spin_ns)),
+            &mut [mpmc],
+            || {
+                let (mut sender, mut receiver) = fanring::mpmc::channel(1);
+                sender.set_wait_strategy(strategy);
+                receiver.set_wait_strategy(strategy);
+                (sender, receiver)
+            },
         );
     }
-    if filter.matches("crossfire-mpmc") {
-        run_implementation(
-            &affinity,
-            &run_id,
-            &cpu,
-            "crossfire-mpmc",
-            None,
-            rounds,
-            warmup,
-            settle,
-            settle_mode,
-            &mut [&mut mpmc_results],
-            || crossfire::mpmc::bounded_blocking(1),
-        );
-    }
-    if filter.matches("flume") {
-        run_implementation(
-            &affinity,
-            &run_id,
-            &cpu,
-            "flume",
-            None,
-            rounds,
-            warmup,
-            settle,
-            settle_mode,
-            &mut [&mut mpsc_results, &mut mpmc_results],
-            || flume::bounded(1),
-        );
-    }
-    if filter.matches("kanal") {
-        run_implementation(
-            &affinity,
-            &run_id,
-            &cpu,
-            "kanal",
-            None,
-            rounds,
-            warmup,
-            settle,
-            settle_mode,
-            &mut [&mut mpsc_results, &mut mpmc_results],
-            || kanal::bounded(1),
-        );
-    }
-    if filter.matches("thingbuf") {
-        run_implementation(
-            &affinity,
-            &run_id,
-            &cpu,
-            "thingbuf",
-            None,
-            rounds,
-            warmup,
-            settle,
-            settle_mode,
-            &mut [&mut mpsc_results],
-            || thingbuf::mpsc::blocking::channel(1),
-        );
-    }
-
-    mpsc_results.flush();
-    mpmc_results.flush();
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Measures the other channel crates.
+fn run_external(runner: &mut Runner) {
+    let Runner {
+        mpsc,
+        mpmc,
+        filter,
+        context,
+        wake,
+    } = runner;
+    let wake = *wake;
+    if filter.matches("crossbeam-channel") {
+        let series = Series::new("crossbeam-channel", None);
+        run_implementation(context, wake, series, &mut [mpsc, mpmc], || {
+            crossbeam_channel::bounded(1)
+        });
+    }
+    if filter.matches("crossfire") {
+        let series = Series::new("crossfire", None);
+        run_implementation(context, wake, series, &mut [mpsc], || {
+            crossfire::mpsc::bounded_blocking(1)
+        });
+    }
+    if filter.matches("crossfire-mpmc") {
+        let series = Series::new("crossfire-mpmc", None);
+        run_implementation(context, wake, series, &mut [mpmc], || {
+            crossfire::mpmc::bounded_blocking(1)
+        });
+    }
+    if filter.matches("flume") {
+        let series = Series::new("flume", None);
+        run_implementation(context, wake, series, &mut [mpsc, mpmc], || {
+            flume::bounded(1)
+        });
+    }
+    if filter.matches("kanal") {
+        let series = Series::new("kanal", None);
+        run_implementation(context, wake, series, &mut [mpsc, mpmc], || {
+            kanal::bounded(1)
+        });
+    }
+    if filter.matches("thingbuf") {
+        let series = Series::new("thingbuf", None);
+        run_implementation(context, wake, series, &mut [mpsc], || {
+            thingbuf::mpsc::blocking::channel(1)
+        });
+    }
+}
+
+impl Series {
+    const fn new(implementation: &'static str, spin_ns: Option<u64>) -> Self {
+        Self {
+            implementation,
+            spin_ns,
+        }
+    }
+}
+
 fn run_implementation<S, R, F>(
-    affinity: &Affinity,
-    run_id: &str,
-    cpu: &str,
-    implementation: &'static str,
-    spin_ns: Option<u64>,
-    rounds: usize,
-    warmup: usize,
-    settle: Duration,
-    settle_mode: SettleMode,
+    context: &RunContext,
+    wake: Wake,
+    series: Series,
     outputs: &mut [&mut JsonlResults],
     make_channel: F,
 ) where
-    S: BlockingSender + 'static,
-    R: BlockingReceiver + 'static,
+    S: BenchSender<u64>,
+    R: BenchReceiver<u64>,
     F: Fn() -> (S, R),
 {
     let (sender, receiver) = make_channel();
-    let recv_samples = measure_recv_wake(
-        affinity,
-        sender,
-        receiver,
-        rounds,
-        warmup,
-        settle,
-        settle_mode,
-    );
+    let recv_samples = measure_recv_wake(&context.affinity, sender, receiver, wake);
     write_row(
         outputs,
-        &summarize(
-            affinity,
-            run_id,
-            cpu,
-            implementation,
-            "recv_wake",
-            spin_ns,
-            settle,
-            settle_mode,
-            recv_samples,
-        ),
+        &summarize(context, series, "recv_wake", wake, recv_samples),
     );
 
     let (sender, receiver) = make_channel();
-    let send_samples = measure_send_wake(
-        affinity,
-        sender,
-        receiver,
-        rounds,
-        warmup,
-        settle,
-        settle_mode,
-    );
+    let send_samples = measure_send_wake(&context.affinity, sender, receiver, wake);
     write_row(
         outputs,
-        &summarize(
-            affinity,
-            run_id,
-            cpu,
-            implementation,
-            "send_wake",
-            spin_ns,
-            settle,
-            settle_mode,
-            send_samples,
-        ),
+        &summarize(context, series, "send_wake", wake, send_samples),
     );
     println!();
 }
@@ -407,15 +244,18 @@ fn measure_recv_wake<S, R>(
     affinity: &Affinity,
     mut sender: S,
     mut receiver: R,
-    rounds: usize,
-    warmup: usize,
-    settle: Duration,
-    settle_mode: SettleMode,
+    wake: Wake,
 ) -> Vec<u64>
 where
-    S: BlockingSender,
-    R: BlockingReceiver + 'static,
+    S: BenchSender<u64>,
+    R: BenchReceiver<u64>,
 {
+    let Wake {
+        rounds,
+        warmup,
+        settle,
+        settle_mode,
+    } = wake;
     let total = rounds + warmup;
     affinity.pin(0);
     let affinity = affinity.clone();
@@ -452,15 +292,18 @@ fn measure_send_wake<S, R>(
     affinity: &Affinity,
     mut sender: S,
     mut receiver: R,
-    rounds: usize,
-    warmup: usize,
-    settle: Duration,
-    settle_mode: SettleMode,
+    wake: Wake,
 ) -> Vec<u64>
 where
-    S: BlockingSender + 'static,
-    R: BlockingReceiver,
+    S: BenchSender<u64>,
+    R: BenchReceiver<u64>,
 {
+    let Wake {
+        rounds,
+        warmup,
+        settle,
+        settle_mode,
+    } = wake;
     let total = rounds + warmup;
     affinity.pin(0);
     let affinity = affinity.clone();
@@ -495,32 +338,27 @@ where
     samples
 }
 
-#[allow(clippy::too_many_arguments)]
 fn summarize(
-    affinity: &Affinity,
-    run_id: &str,
-    cpu: &str,
-    implementation: &'static str,
+    context: &RunContext,
+    series: Series,
     operation: &'static str,
-    spin_ns: Option<u64>,
-    settle: Duration,
-    settle_mode: SettleMode,
+    wake: Wake,
     mut samples: Vec<u64>,
 ) -> Row {
     samples.sort_unstable();
     let sum = samples.iter().map(|&value| u128::from(value)).sum::<u128>();
     let sample_count = u128::try_from(samples.len()).expect("sample count fits u128");
     let row = Row {
-        run_id: run_id.to_string(),
-        cpu: cpu.to_string(),
-        affinity: affinity.description().to_string(),
-        implementation,
+        run_id: context.run_id.clone(),
+        cpu: context.cpu.clone(),
+        affinity: context.affinity.description().to_string(),
+        implementation: series.implementation,
         operation,
-        spin_ns,
+        spin_ns: series.spin_ns,
         capacity: 1,
         rounds: samples.len(),
-        settle_mode: settle_mode.label(),
-        settle_ns: duration_ns(settle),
+        settle_mode: wake.settle_mode.label(),
+        settle_ns: duration_ns(wake.settle),
         mean_ns: u64::try_from(sum / sample_count).expect("mean of u64 samples fits u64"),
         p50_ns: percentile(&samples, 500),
         p95_ns: percentile(&samples, 950),
@@ -612,40 +450,4 @@ impl SettleMode {
             }
         }
     }
-}
-
-#[derive(Debug)]
-struct Filter {
-    values: Option<Vec<String>>,
-}
-
-impl Filter {
-    fn from_env(name: &str) -> Self {
-        let values = std::env::var(name).ok().map(|raw| {
-            raw.split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .collect()
-        });
-        Self { values }
-    }
-
-    fn matches(&self, value: &str) -> bool {
-        self.values
-            .as_ref()
-            .is_none_or(|values| values.iter().any(|candidate| candidate == value))
-    }
-}
-
-fn cpu_name() -> String {
-    let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") else {
-        return "unknown CPU".to_string();
-    };
-
-    cpuinfo
-        .lines()
-        .find_map(|line| line.strip_prefix("model name\t: "))
-        .unwrap_or("unknown CPU")
-        .to_string()
 }

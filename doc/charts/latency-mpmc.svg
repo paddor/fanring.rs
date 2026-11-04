@@ -6,58 +6,54 @@ MPMC blocking wake latency (lower is better)
 <text x="512" y="40" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
 Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off; capacity 1; 10000 rounds; 25 µs spin settle
 </text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,225 1000,225 "/>
-<text x="62" y="225" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,207 1000,207 "/>
+<text x="62" y="207" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
+5 µs
+</text>
+<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,118 1000,118 "/>
+<text x="62" y="118" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
 10 µs
 </text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,155 1000,155 "/>
-<text x="62" y="155" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
-20 µs
-</text>
-<polyline fill="none" opacity="1" stroke="#21262D" stroke-width="1" points="70,84 1000,84 "/>
-<text x="62" y="84" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
-30 µs
-</text>
 <polyline fill="none" opacity="1" stroke="#30363D" stroke-width="2" points="70,296 1000,296 "/>
-<rect x="151" y="230" width="44" height="66" opacity="0.3" fill="#F87171" stroke="none"/>
-<rect x="151" y="230" width="44" height="66" opacity="0.7" fill="none" stroke="#F87171"/>
-<rect x="151" y="241" width="44" height="55" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="203" y="292" width="44" height="4" opacity="0.3" fill="#C94B4B" stroke="none"/>
-<rect x="203" y="292" width="44" height="4" opacity="0.7" fill="none" stroke="#C94B4B"/>
-<rect x="203" y="292" width="44" height="4" opacity="1" fill="#C94B4B" stroke="none"/>
-<rect x="255" y="93" width="44" height="203" opacity="0.3" fill="#60A5FA" stroke="none"/>
-<rect x="255" y="93" width="44" height="203" opacity="0.7" fill="none" stroke="#60A5FA"/>
-<rect x="255" y="242" width="44" height="54" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="307" y="232" width="44" height="64" opacity="0.3" fill="#22D3EE" stroke="none"/>
-<rect x="307" y="232" width="44" height="64" opacity="0.7" fill="none" stroke="#22D3EE"/>
-<rect x="307" y="242" width="44" height="54" opacity="1" fill="#22D3EE" stroke="none"/>
-<rect x="359" y="232" width="44" height="64" opacity="0.3" fill="#F472B6" stroke="none"/>
-<rect x="359" y="232" width="44" height="64" opacity="0.7" fill="none" stroke="#F472B6"/>
-<rect x="359" y="243" width="44" height="53" opacity="1" fill="#F472B6" stroke="none"/>
-<rect x="411" y="287" width="44" height="9" opacity="0.3" fill="#F59E0B" stroke="none"/>
-<rect x="411" y="287" width="44" height="9" opacity="0.7" fill="none" stroke="#F59E0B"/>
-<rect x="411" y="289" width="44" height="7" opacity="1" fill="#F59E0B" stroke="none"/>
+<rect x="151" y="109" width="44" height="187" opacity="0.3" fill="#F87171" stroke="none"/>
+<rect x="151" y="109" width="44" height="187" opacity="0.7" fill="none" stroke="#F87171"/>
+<rect x="151" y="136" width="44" height="160" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="203" y="283" width="44" height="13" opacity="0.3" fill="#C94B4B" stroke="none"/>
+<rect x="203" y="283" width="44" height="13" opacity="0.7" fill="none" stroke="#C94B4B"/>
+<rect x="203" y="285" width="44" height="11" opacity="1" fill="#C94B4B" stroke="none"/>
+<rect x="255" y="115" width="44" height="181" opacity="0.3" fill="#60A5FA" stroke="none"/>
+<rect x="255" y="115" width="44" height="181" opacity="0.7" fill="none" stroke="#60A5FA"/>
+<rect x="255" y="159" width="44" height="137" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="307" y="103" width="44" height="193" opacity="0.3" fill="#22D3EE" stroke="none"/>
+<rect x="307" y="103" width="44" height="193" opacity="0.7" fill="none" stroke="#22D3EE"/>
+<rect x="307" y="121" width="44" height="175" opacity="1" fill="#22D3EE" stroke="none"/>
+<rect x="359" y="136" width="44" height="160" opacity="0.3" fill="#F472B6" stroke="none"/>
+<rect x="359" y="136" width="44" height="160" opacity="0.7" fill="none" stroke="#F472B6"/>
+<rect x="359" y="163" width="44" height="133" opacity="1" fill="#F472B6" stroke="none"/>
+<rect x="411" y="275" width="44" height="21" opacity="0.3" fill="#F59E0B" stroke="none"/>
+<rect x="411" y="275" width="44" height="21" opacity="0.7" fill="none" stroke="#F59E0B"/>
+<rect x="411" y="279" width="44" height="17" opacity="1" fill="#F59E0B" stroke="none"/>
 <text x="303" y="318" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E6EDF3" font-weight="bold">
 blocked receiver
 </text>
-<rect x="616" y="224" width="44" height="72" opacity="0.3" fill="#F87171" stroke="none"/>
-<rect x="616" y="224" width="44" height="72" opacity="0.7" fill="none" stroke="#F87171"/>
-<rect x="616" y="241" width="44" height="55" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="668" y="292" width="44" height="4" opacity="0.3" fill="#C94B4B" stroke="none"/>
-<rect x="668" y="292" width="44" height="4" opacity="0.7" fill="none" stroke="#C94B4B"/>
-<rect x="668" y="292" width="44" height="4" opacity="1" fill="#C94B4B" stroke="none"/>
-<rect x="720" y="231" width="44" height="65" opacity="0.3" fill="#60A5FA" stroke="none"/>
-<rect x="720" y="231" width="44" height="65" opacity="0.7" fill="none" stroke="#60A5FA"/>
-<rect x="720" y="242" width="44" height="54" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="772" y="224" width="44" height="72" opacity="0.3" fill="#22D3EE" stroke="none"/>
-<rect x="772" y="224" width="44" height="72" opacity="0.7" fill="none" stroke="#22D3EE"/>
-<rect x="772" y="235" width="44" height="61" opacity="1" fill="#22D3EE" stroke="none"/>
-<rect x="824" y="232" width="44" height="64" opacity="0.3" fill="#F472B6" stroke="none"/>
-<rect x="824" y="232" width="44" height="64" opacity="0.7" fill="none" stroke="#F472B6"/>
-<rect x="824" y="243" width="44" height="53" opacity="1" fill="#F472B6" stroke="none"/>
-<rect x="876" y="287" width="44" height="9" opacity="0.3" fill="#F59E0B" stroke="none"/>
-<rect x="876" y="287" width="44" height="9" opacity="0.7" fill="none" stroke="#F59E0B"/>
-<rect x="876" y="290" width="44" height="6" opacity="1" fill="#F59E0B" stroke="none"/>
+<rect x="616" y="110" width="44" height="186" opacity="0.3" fill="#F87171" stroke="none"/>
+<rect x="616" y="110" width="44" height="186" opacity="0.7" fill="none" stroke="#F87171"/>
+<rect x="616" y="131" width="44" height="165" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="668" y="285" width="44" height="11" opacity="0.3" fill="#C94B4B" stroke="none"/>
+<rect x="668" y="285" width="44" height="11" opacity="0.7" fill="none" stroke="#C94B4B"/>
+<rect x="668" y="286" width="44" height="10" opacity="1" fill="#C94B4B" stroke="none"/>
+<rect x="720" y="116" width="44" height="180" opacity="0.3" fill="#60A5FA" stroke="none"/>
+<rect x="720" y="116" width="44" height="180" opacity="0.7" fill="none" stroke="#60A5FA"/>
+<rect x="720" y="142" width="44" height="154" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="772" y="93" width="44" height="203" opacity="0.3" fill="#22D3EE" stroke="none"/>
+<rect x="772" y="93" width="44" height="203" opacity="0.7" fill="none" stroke="#22D3EE"/>
+<rect x="772" y="102" width="44" height="194" opacity="1" fill="#22D3EE" stroke="none"/>
+<rect x="824" y="136" width="44" height="160" opacity="0.3" fill="#F472B6" stroke="none"/>
+<rect x="824" y="136" width="44" height="160" opacity="0.7" fill="none" stroke="#F472B6"/>
+<rect x="824" y="164" width="44" height="132" opacity="1" fill="#F472B6" stroke="none"/>
+<rect x="876" y="275" width="44" height="21" opacity="0.3" fill="#F59E0B" stroke="none"/>
+<rect x="876" y="275" width="44" height="21" opacity="0.7" fill="none" stroke="#F59E0B"/>
+<rect x="876" y="280" width="44" height="16" opacity="1" fill="#F59E0B" stroke="none"/>
 <text x="768" y="318" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E6EDF3" font-weight="bold">
 blocked sender
 </text>

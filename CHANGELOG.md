@@ -4,6 +4,37 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- MPMC receives return values already staged by the receiver before any lane
+  maintenance, skipping per-value effect bookkeeping and payload copies.
+- MPSC `try_recv`, and `try_recv_fair` with one active lane, serve a lane's
+  prefetched values from a fast window that skips lane lookup and per-value
+  release, rotation, and burst checks. The window ends where the next
+  release, rotation, or readiness poll is due, so scheduling and slot release
+  are unchanged.
+- Waking a parked thread moves out of line, so send paths that inline the
+  wake check stay small enough to inline into the caller's loop.
+- MPSC `try_recv` runs a due readiness poll itself and opens the next fast
+  window in the same call, instead of taking the full receive path.
+- MPSC readiness polls load each ready group before swapping it and advance
+  the group cursor without a division.
+- `WaitStrategy::Park` spins for about ten microseconds before untimed
+  operations park, instead of 128 retries. The retry window varied with
+  payload size and code generation, from about 1.5 to 14 microseconds.
+
+### Fixed
+
+- MPSC `Receiver::pause` publishes slots already consumed from the lane, so
+  its sender can fill the whole ring while the lane stays paused.
+- Blocking sends and receives recheck the queue without holding the wait
+  mutex. Notifiers and receiver teardown no longer wait for a racing recheck,
+  including payload destructors that a coordinated close runs inside it.
+- Sender registration allocates its ring before taking the registry lock.
+- MPMC blocking and timed receives keep retiring dead sender lanes instead of
+  parking. After many senders dropped, `recv` could hang and `recv_timeout`
+  could report `Timeout` instead of `Disconnected`.
+
 ## [0.3.9] - 2026-10-06
 
 ### Added

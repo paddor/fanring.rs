@@ -15,7 +15,7 @@ use crate::compat::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock};
 use crate::config::{WaitStrategy, validate_capacity};
 use crate::publication::PublicationTracker;
 use crate::ready::{LANES_PER_PAGE, LaneSignal, PAGES_PER_GROUP, ReadyGroup, ReadyPage};
-use crate::wait::MultiWaitCell;
+use crate::wait::{MultiWaitCell, MultiWaitRegistration, WaitSource};
 
 mod receiver;
 mod sender;
@@ -39,10 +39,6 @@ const PREFETCH_LIMIT: usize = 64;
 #[cfg(loom)]
 const PREFETCH_LIMIT: usize = 2;
 const TRY_RECV_RETRIES: usize = 1;
-#[cfg(not(loom))]
-const PARK_SPINS: usize = 128;
-#[cfg(loom)]
-const PARK_SPINS: usize = 0;
 
 /// Create an MPMC channel with one bounded ring per sender.
 ///
@@ -180,7 +176,7 @@ fn build_channel<T, P: Teardown>(capacity_per_sender: usize) -> (Sender<T, P>, R
     )
 }
 
-struct Shared<T, P: Teardown> {
+pub(crate) struct Shared<T, P: Teardown> {
     registry: Mutex<Registry<T, P>>,
     #[cfg(not(loom))]
     work_queues: ArcSwap<Vec<(usize, WorkQueue<T>)>>,
@@ -210,6 +206,9 @@ impl<T, P: Teardown> Shared<T, P> {
         if !self.receiver_alive.load(Ordering::Acquire) {
             return Err(TryRegisterError::Disconnected);
         }
+        // Allocate outside the registry lock; receivers take it to claim and
+        // park lanes.
+        let (producer, consumer) = crate::ring::spsc(self.capacity_per_sender);
 
         let mut registry = lock(&self.registry);
         if !self.receiver_alive.load(Ordering::Acquire) {
@@ -218,7 +217,6 @@ impl<T, P: Teardown> Shared<T, P> {
 
         let (key, page, topology_changed) = registry.allocate_lane();
         let signal = Arc::new(LaneSignal::new(page, key.slot));
-        let (producer, consumer) = crate::ring::spsc(self.capacity_per_sender);
         registry.install_lane(LaneToken::new(Lane::new(key, signal.clone(), consumer)));
         if topology_changed {
             self.ready
@@ -323,6 +321,18 @@ impl<T, P: Teardown> Shared<T, P> {
         }
         while self.orphaned_work.pop().is_some() {}
         self.data_waiters.notify_all();
+    }
+}
+
+/// Receivers park on the channel data cell.
+impl<T, P: Teardown> WaitSource for Shared<T, P> {
+    type Registration<'a>
+        = MultiWaitRegistration<'a>
+    where
+        Self: 'a;
+
+    fn register(&self) -> MultiWaitRegistration<'_> {
+        self.data_waiters.prepare()
     }
 }
 

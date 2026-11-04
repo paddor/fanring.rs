@@ -7,7 +7,7 @@ fanring MPSC throughput comparison
 Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off; all workers pinned, physical cores first; try operations; 5 samples; nominal capacity 8192 items; natural queue occupancy
 </text>
 <text x="512" y="73" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-u64 (8 B); median M items/s (+/- MAD); color scale 0-100; white outline = winner
+u64 (8 B); median M items/s (+/- MAD); color scale 0-300; white outline = winner
 </text>
 <text x="28" y="104" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 implementation
@@ -30,68 +30,68 @@ producer threads
 <text x="28" y="138" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#FACC15">
 fanring Deferred
 </text>
-<rect x="186" y="128" width="200" height="21" opacity="1" fill="#426FA7" stroke="none"/>
+<rect x="186" y="128" width="200" height="21" opacity="1" fill="#253955" stroke="none"/>
 <rect x="186" y="128" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
 <text x="286" y="134" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
-59.0
+55.4
 </text>
 <text x="286" y="145" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
-+/-1.1%
++/-3.5%
 </text>
-<rect x="390" y="128" width="200" height="21" opacity="1" fill="#5998E6" stroke="none"/>
+<rect x="390" y="128" width="200" height="21" opacity="1" fill="#325078" stroke="none"/>
 <rect x="390" y="128" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
-<text x="490" y="134" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
-90.2
+<text x="490" y="134" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
+107.3
 </text>
-<text x="490" y="145" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
-+/-5.4%
+<text x="490" y="145" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
++/-0.6%
 </text>
-<rect x="594" y="128" width="200" height="21" opacity="1" fill="#5B9CEC" stroke="none"/>
+<rect x="594" y="128" width="200" height="21" opacity="1" fill="#5591DB" stroke="none"/>
 <rect x="594" y="128" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
 <text x="694" y="134" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
-93.1
+254.0
 </text>
 <text x="694" y="145" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
 +/-0.2%
 </text>
-<rect x="798" y="128" width="200" height="21" opacity="1" fill="#5A99E8" stroke="none"/>
+<rect x="798" y="128" width="200" height="21" opacity="1" fill="#548ED8" stroke="none"/>
 <rect x="798" y="128" width="200" height="21" opacity="1" fill="none" stroke="#E5E7EB"/>
 <text x="898" y="134" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
-91.2
+249.1
 </text>
 <text x="898" y="145" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
-+/-0.9%
++/-0.2%
 </text>
 <text x="28" y="163" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#FACC15">
 fanring Coordinated
 </text>
-<rect x="186" y="153" width="200" height="21" opacity="1" fill="#283D5C" stroke="none"/>
+<rect x="186" y="153" width="200" height="21" opacity="1" fill="#1E2B40" stroke="none"/>
 <text x="286" y="159" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
-21.9
+24.5
 </text>
 <text x="286" y="170" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
-+/-5.6%
++/-1.1%
 </text>
-<rect x="390" y="153" width="200" height="21" opacity="1" fill="#385C8A" stroke="none"/>
+<rect x="390" y="153" width="200" height="21" opacity="1" fill="#202E45" stroke="none"/>
 <text x="490" y="159" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
-44.8
+31.3
 </text>
 <text x="490" y="170" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
-+/-1.8%
++/-3.3%
 </text>
-<rect x="594" y="153" width="200" height="21" opacity="1" fill="#5998E6" stroke="none"/>
-<text x="694" y="159" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
-90.1
+<rect x="594" y="153" width="200" height="21" opacity="1" fill="#365885" stroke="none"/>
+<text x="694" y="159" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
+126.7
 </text>
-<text x="694" y="170" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
-+/-0.9%
+<text x="694" y="170" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
++/-1.3%
 </text>
-<rect x="798" y="153" width="200" height="21" opacity="1" fill="#5795E1" stroke="none"/>
-<text x="898" y="159" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#000000">
-87.8
+<rect x="798" y="153" width="200" height="21" opacity="1" fill="#40699F" stroke="none"/>
+<text x="898" y="159" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E5E7EB">
+165.2
 </text>
-<text x="898" y="170" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#000000">
-+/-0.4%
+<text x="898" y="170" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="5.645161290322581" opacity="1" fill="#E5E7EB">
++/-3.3%
 </text>
 <polyline fill="none" opacity="1" stroke="#374151" stroke-width="1" points="24,210 1000,210 "/>
 <text x="512" y="201" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="7.258064516129032" opacity="1" fill="#9CA3AF">

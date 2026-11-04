@@ -74,7 +74,8 @@ only the tagged view constructs source IDs.
 Consumed slots are published in batches independently of lane rotation. Empty
 lane handling publishes partial batches. `release_consumed()` explicitly
 publishes consumed capacity across lanes. Bulk and async receives do so before
-returning. Pausing and resuming do not free unread slots.
+returning. Pausing publishes the lane's partial batch. Pausing and resuming do
+not free unread slots.
 
 ## MPMC work distribution
 
@@ -97,7 +98,9 @@ A publication tracker covers transfers that temporarily hide work: lane
 claims, drainage, requeue, stealing, and receiver handoff. A final empty scan
 reports `Disconnected` only when there are no senders, lanes, or transfers left
 and the publication generation stayed stable. Otherwise bounded maintenance
-can report transient `Empty`.
+can report transient `Empty`. Blocking receives retry instead of parking while
+that maintenance progresses: retiring a lane or seeing work move notifies no
+one, so a parked receiver could miss the final disconnect.
 
 ## Waiting
 
@@ -105,13 +108,15 @@ Each sender lane has one capacity wait cell. MPSC has one receiver data wait
 cell; MPMC shares data notifications among receiver waiters.
 
 Blocking operations try the queue, register a waiter, and recheck before
-sleeping. The wait registration bridges the recheck and condition-variable
-sleep. Opposite-direction notifications are delivered after releasing the
-current wait registration, avoiding data/space lock inversion.
+sleeping. The registration snapshots a notification generation, and the
+sleep starts only if no notification arrived since. The recheck runs
+without the condition mutex, so notifiers and teardown never wait for it.
 
-Wait strategy belongs to the endpoint. Default parking has a short retry
-phase; bounded spinning uses the same registration protocol when its budget
-expires. Timeout operations share this protocol and stop at their deadline.
+Wait strategy belongs to the endpoint. Untimed default parking first retries
+for about one park and wake round trip, measured in time rather than
+attempts. Bounded spinning uses the same registration protocol when its
+budget expires. Timeout operations share this protocol and stop at their
+deadline.
 
 Async MPSC uses per-sender capacity wakers and one receiver data waker.
 Registration precedes a queue recheck. Futures remove retained registrations

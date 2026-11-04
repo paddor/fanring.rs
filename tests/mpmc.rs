@@ -318,3 +318,32 @@ fn consumed_slots_return_once_the_receiver_catches_up() {
         assert_eq!(rx.try_recv().unwrap(), 8);
     }
 }
+
+#[test]
+fn timed_recv_reports_disconnect_after_many_senders_drop() {
+    let (tx, mut rx) = channel::<u8>(1);
+    let senders: Vec<_> = (0..200).map(|_| tx.try_clone().unwrap()).collect();
+    drop(tx);
+    drop(senders);
+    // Each receive retires a bounded number of dead lanes. No sender remains
+    // to notify a parked receiver, so the wait must keep retiring instead.
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(5)),
+        Err(RecvTimeoutError::Disconnected)
+    );
+}
+
+#[test]
+fn blocking_recv_returns_after_many_senders_drop() {
+    let (tx, mut rx) = channel::<u8>(1);
+    let senders: Vec<_> = (0..2000).map(|_| tx.try_clone().unwrap()).collect();
+    drop(tx);
+    drop(senders);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    // A detached thread keeps a hang from stalling the test harness.
+    std::thread::spawn(move || done_tx.send(rx.recv()).unwrap());
+    assert_eq!(
+        done_rx.recv_timeout(Duration::from_secs(10)),
+        Ok(Err(RecvError))
+    );
+}
