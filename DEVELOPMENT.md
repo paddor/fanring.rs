@@ -208,6 +208,16 @@ receives. These modes include constructing and passing each Copy lane ID. They
 are excluded from the default mode list. Use `prefilled` to isolate consumer
 cost and pin threads with `FANRING_BENCH_AFFINITY=auto`.
 
+`stream` with one producer and small payloads is bistable. A consumer slower
+than the producer stays behind it and drains large prefetch windows. A faster
+one catches up and reads right behind the producer, so tail, slot, and
+readiness cache lines move between cores on almost every value. A faster
+receive path can therefore lower this cell, and its rate can shift between
+runs of one binary. To tell this regime from a code regression, compare
+per-core cross-core misses (`perf stat -C 0,1 -A` with
+`mem_load_l3_hit_retired.xsnp_hitm` and `offcore_requests.demand_rfo` on
+Intel), and confirm consumer cost with `prefilled`.
+
 Short smoke run:
 
 ```sh
