@@ -1,7 +1,11 @@
 # Benchmarks
 
-Measurements collected on 2026-10-06 from library sources at `31a8c5c`.
-Dependency versions and benchmark source hashes are recorded in run provenance.
+The SPSC comparison, the saturated-occupancy charts, and the fanring,
+crossbeam-channel, and crossfire measurements were collected on 2026-11-04
+from library sources at `b6568ae`. flume, kanal, concurrent-queue, and
+thingbuf rows in the other MPSC and MPMC charts come from the 2026-10-06 runs
+on a second VM of the same model, CPU topology, and affinity; their versions
+are unchanged since.
 The charted values are medians of repeated samples.
 Hardware and affinity are shown in each chart.
 
@@ -15,7 +19,7 @@ Hardware and affinity are shown in each chart.
 | Producers | 1, 2, 4, 8 |
 | MPMC consumers | 1, 2, 4, 8 |
 | Payloads | `u64`, 64 bytes, 256 bytes |
-| Queue occupancy | Natural; nonblocking operations |
+| Queue occupancy | Natural, or saturated at 50-100%; nonblocking operations |
 | Affinity | Workers pinned to CPUs 0-5; configurations with more workers share CPUs |
 
 Implementation order rotates between samples. Every sample drains accepted
@@ -36,6 +40,19 @@ median absolute deviation alongside median throughput.
 ### MPMC
 
 ![MPMC throughput](doc/charts/throughput-mpmc.svg)
+
+### Saturated occupancy
+
+These runs keep every queue between half and full capacity. Producers send
+until they see a full queue. Consumers then drain half of nominal capacity and
+wait until every producer has seen a full queue again. Every channel always
+has a backlog, so these charts measure send and receive cost without
+empty-queue handoffs. With natural occupancy, as above, a consumer that
+catches up with its producers also pays for those handoffs.
+
+![MPSC saturated throughput](doc/charts/throughput-mpsc-saturated.svg)
+
+![MPMC saturated throughput](doc/charts/throughput-mpmc-saturated.svg)
 
 ## Blocking wake latency
 

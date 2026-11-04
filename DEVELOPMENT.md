@@ -242,6 +242,20 @@ Saturated occupancy run:
 FANRING_BENCH_PROFILE=saturated cargo bench -p fanring --bench fanring_comparison
 ```
 
+Keep saturated rows in their own result root. The chart tool charts the shape
+of the newest complete run, so mixed roots switch the default charts.
+
+```sh
+FANRING_BENCH_CACHE_DIR=target/saturated-results FANRING_BENCH_PROFILE=saturated \
+  cargo bench -p fanring --bench fanring_comparison
+FANRING_BENCH_CACHE_DIR=target/saturated-results FANRING_BENCH_PROFILE=saturated \
+  cargo bench -p fanring --bench fanring_mpmc
+cargo run --example fanring-chart -- --results-dir target/saturated-results \
+  --output doc/charts/throughput-mpsc-saturated.svg
+cargo run --example fanring-chart -- --mpmc --results-dir target/saturated-results \
+  --output doc/charts/throughput-mpmc-saturated.svg
+```
+
 ## Charts
 
 ### SPSC comparison
