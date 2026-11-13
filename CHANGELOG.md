@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- MPSC receives no longer underflow the readiness-poll budget when lane
+  control (`try_recv_from`, `pause`, `close_lane`) empties the rotation
+  right as a poll is due. Debug builds panicked in the receiver. Release
+  builds stopped polling for newly ready lanes while another lane stayed
+  busy, which starved them until `try_recv_fair` ran.
+
 ## [0.3.10] - 2026-11-04
 
 ### Changed

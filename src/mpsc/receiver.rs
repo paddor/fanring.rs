@@ -228,6 +228,9 @@ impl<T, P: Teardown> Receiver<T, P> {
                         None,
                     );
                 }
+                // That was a full collect. Lane control can empty the
+                // rotation with the budget spent; start a fresh interval.
+                self.items_until_ready_poll = READY_POLL_INTERVAL;
             } else if self.items_until_ready_poll == 0 {
                 self.collect_ready(false);
                 self.items_until_ready_poll = READY_POLL_INTERVAL;
