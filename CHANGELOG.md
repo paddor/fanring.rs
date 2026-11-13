@@ -11,6 +11,13 @@ All notable changes to this project are documented here.
   right as a poll is due. Debug builds panicked in the receiver. Release
   builds stopped polling for newly ready lanes while another lane stayed
   busy, which starved them until `try_recv_fair` ran.
+- A blocked MPMC `recv` no longer misses the final disconnect. A receiver
+  that scanned while another receiver's lane claim or steal was in flight
+  parked, and nothing woke it when that ended with the channel drained.
+  `recv` then hung, and `recv_timeout` reported the disconnect only at
+  its deadline.
+- Values left in a receiver's queue by a steal wake one parked receiver.
+  Before, they waited for the thief's next receive.
 
 ## [0.3.10] - 2026-11-04
 
