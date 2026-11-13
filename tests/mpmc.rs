@@ -6,6 +6,22 @@ use fanring::mpmc::{
     RecvError, RecvTimeoutError, SendTimeoutError, TryRecvError, TrySendError, channel,
 };
 
+/// 2^61 slots is a valid count, but 2^61 `u64` slots are not a valid
+/// allocation.
+#[test]
+fn try_channel_rejects_a_ring_too_large_to_allocate() {
+    let capacity = fanring::mpmc::MAX_CAPACITY_PER_SENDER / 2;
+    assert_eq!(
+        fanring::mpmc::try_channel::<u64>(capacity)
+            .map(drop)
+            .unwrap_err(),
+        fanring::mpmc::ChannelError::CapacityTooLarge {
+            requested: capacity,
+            max: fanring::mpmc::MAX_CAPACITY_PER_SENDER / 8,
+        }
+    );
+}
+
 #[test]
 fn cloned_receivers_distribute_messages() {
     let (mut tx, mut rx0) = channel(8);

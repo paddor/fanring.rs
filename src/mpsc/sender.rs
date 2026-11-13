@@ -88,7 +88,7 @@ impl<T, P: Teardown> Sender<T, P> {
     ///
     /// Panics when capacity is zero or exceeds [`super::MAX_CAPACITY_PER_SENDER`].
     pub fn try_register_with_capacity(&self, capacity: usize) -> Result<Self, TryRegisterError> {
-        crate::config::validate_capacity(capacity, super::MAX_CAPACITY_PER_SENDER)
+        crate::config::validate_capacity::<T>(capacity, super::MAX_CAPACITY_PER_SENDER)
             .unwrap_or_else(|error| panic!("{error}"));
         self.register_with_capacity(usize::MAX, capacity)
             .map_err(|error| match error {
