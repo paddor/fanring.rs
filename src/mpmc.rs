@@ -314,17 +314,20 @@ impl<T, P: Teardown> Shared<T, P> {
             let mut registry = lock(&self.registry);
             registry.take_all_lanes()
         };
+        // Closing a lane and emptying the orphaned work drop payloads.
+        let mut panic = crate::ring::FirstPanic::default();
         for lane in idle {
-            close_lane(lane);
+            panic.run(|| close_lane(lane));
         }
         let ready = self.ready.load();
         for page in &ready.pages {
             while let Some(lane) = page.pop_direct() {
-                close_lane(lane);
+                panic.run(|| close_lane(lane));
             }
         }
-        while self.orphaned_work.pop().is_some() {}
+        panic.run(|| while self.orphaned_work.pop().is_some() {});
         self.data_waiters.notify_all();
+        panic.resume();
     }
 }
 

@@ -211,14 +211,65 @@ impl<T, P: Teardown> Consumer<T, P> {
             // Dispose of the current window even if a producer is paused.
             // The ownership handoff covers writes published after this drain.
             if P::COORDINATED {
-                discard(&mut consumer);
-                self.cleanup
-                    .as_ref()
-                    .expect("coordinated cleanup")
-                    .close(consumer);
+                let mut handoff = Handoff {
+                    consumer: Some(consumer),
+                    cleanup: self.cleanup.as_ref().expect("coordinated cleanup"),
+                };
+                discard(handoff.consumer.as_mut().expect("consumer in handoff"));
             } else {
                 consumer.close();
             }
+        }
+    }
+
+    /// Close the lane and wake its sender. The wake also runs if a payload
+    /// destructor panics in the close.
+    pub(crate) fn close_and_wake(&mut self, signal: &crate::ready::LaneSignal) {
+        let _wake = WakeSpace(signal);
+        self.close();
+    }
+}
+
+/// Hands the ring to its cleanup when dropped, also if a payload
+/// destructor panics in the drain before it. Without the handoff the lane
+/// never reads as closed to its sender.
+struct Handoff<'a, T> {
+    consumer: Option<yring::Consumer<T>>,
+    cleanup: &'a Cleanup<T>,
+}
+
+impl<T> Drop for Handoff<'_, T> {
+    fn drop(&mut self) {
+        if let Some(consumer) = self.consumer.take() {
+            self.cleanup.close(consumer);
+        }
+    }
+}
+
+struct WakeSpace<'a>(&'a crate::ready::LaneSignal);
+
+impl Drop for WakeSpace<'_> {
+    fn drop(&mut self) {
+        self.0.notify_space();
+    }
+}
+
+/// Runs teardown steps that can panic in a payload destructor. Every step
+/// runs; the first panic resumes once all are done. So one lane's panic
+/// cannot leave another lane open with its sender parked.
+#[derive(Default)]
+pub(crate) struct FirstPanic(Option<Box<dyn std::any::Any + Send>>);
+
+impl FirstPanic {
+    pub(crate) fn run(&mut self, step: impl FnOnce()) {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(step)) {
+            self.0.get_or_insert(payload);
+        }
+    }
+
+    pub(crate) fn resume(self) {
+        if let Some(payload) = self.0 {
+            std::panic::resume_unwind(payload);
         }
     }
 }

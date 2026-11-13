@@ -200,8 +200,7 @@ impl<T, P: Teardown> Receiver<T, P> {
     /// Returns `RecvError` for a retired lane or an ID from another channel.
     pub fn close_lane(&mut self, id: &LaneId) -> Result<(), RecvError> {
         let lane = self.lane_mut(id).ok_or(RecvError)?;
-        lane.consumer.close();
-        lane.signal.notify_space();
+        lane.consumer.close_and_wake(&lane.signal);
         self.active.retain(|key| *key != id.key);
         self.retire_lane(id.key);
         Ok(())

@@ -73,6 +73,6 @@ pub(in crate::mpmc) enum FinishLane<T, P: Teardown> {
 }
 
 pub(in crate::mpmc) fn close_lane<T, P: Teardown>(mut lane: LaneToken<T, P>) {
-    lane.consumer.close();
-    lane.signal.notify_space();
+    let signal = lane.signal.clone();
+    lane.consumer.close_and_wake(&signal);
 }

@@ -29,6 +29,16 @@ fn counted(drops: &Arc<Vec<AtomicUsize>>, id: usize) -> Counted {
     }
 }
 
+/// Panics in `drop` when armed.
+#[derive(Debug)]
+struct Bomb(bool);
+
+impl Drop for Bomb {
+    fn drop(&mut self) {
+        assert!(!self.0, "payload destructor panics");
+    }
+}
+
 fn assert_drops(drops: &[AtomicUsize], expected: usize) {
     for (id, count) in drops.iter().enumerate() {
         assert_eq!(count.load(Ordering::Relaxed), expected, "payload {id}");
@@ -48,6 +58,38 @@ macro_rules! receiver_drop_tests {
                 fanring::$kind::Receiver<T, Coordinated>,
             ) {
                 channel_with_policy(capacity)
+            }
+
+            /// Discarding a lane drops its payloads. A destructor that
+            /// panics there must not leave the sender of any lane parked.
+            #[test]
+            fn panicking_payload_drop_still_disconnects_every_sender() {
+                use fanring::$kind::SendTimeoutError;
+                use std::time::Duration;
+
+                let (mut first, rx) = channel::<Bomb>(1);
+                let mut second = first.try_clone().unwrap();
+                first.try_send(Bomb(true)).unwrap();
+                second.try_send(Bomb(true)).unwrap();
+                std::thread::scope(|scope| {
+                    // Both lanes are full, so both sends park until the
+                    // receiver is gone.
+                    let blocked = [first, second].map(|mut sender| {
+                        scope
+                            .spawn(move || sender.send_timeout(Bomb(false), Duration::from_secs(5)))
+                    });
+                    // Let them park, so that only a wake ends the wait.
+                    std::thread::sleep(Duration::from_millis(50));
+                    let dropped =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(rx)));
+                    assert!(dropped.is_err(), "the payload panic must propagate");
+                    for sender in blocked {
+                        assert!(matches!(
+                            sender.join().unwrap(),
+                            Err(SendTimeoutError::Disconnected(_))
+                        ));
+                    }
+                });
             }
 
             #[test]

@@ -457,18 +457,18 @@ impl<T, P: Teardown> Drop for Receiver<T, P> {
         #[cfg(feature = "async")]
         self.cancel_recv_wait();
         self.shared.receiver_alive.store(false, Ordering::Release);
+        let mut panic = crate::ring::FirstPanic::default();
         for lane in self.lanes.iter_mut().flatten() {
-            lane.consumer.close();
-            lane.signal.notify_space();
+            panic.run(|| lane.consumer.close_and_wake(&lane.signal));
         }
         let pending = {
             let mut registry = lock(&self.shared.registry);
             mem::take(&mut registry.pending)
         };
         for mut lane in pending {
-            lane.consumer.close();
-            lane.signal.notify_space();
+            panic.run(|| lane.consumer.close_and_wake(&lane.signal));
         }
+        panic.resume();
     }
 }
 
