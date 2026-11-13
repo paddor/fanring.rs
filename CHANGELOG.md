@@ -18,10 +18,15 @@ All notable changes to this project are documented here.
   its deadline.
 - Values left in a receiver's queue by a steal wake one parked receiver.
   Before, they waited for the thief's next receive.
-- `try_channel`, `try_channel_with_policy` and `try_register_with_capacity`
-  reject a capacity whose ring of `T` exceeds `isize::MAX` bytes, such as
+- `try_channel` and `try_channel_with_policy` return `CapacityTooLarge`
+  for a capacity whose ring of `T` exceeds `isize::MAX` bytes, such as
   `try_channel::<u64>(1 << 61)`. Before, the allocation panicked with
-  `capacity overflow`.
+  `capacity overflow`. The panicking constructors report the same limit.
+- With `Coordinated` teardown, a payload destructor that panics while a
+  receiver is dropped no longer leaves senders parked. Every lane is still
+  closed and its sender woken, and the first panic resumes afterwards.
+  Before, the lanes after the panicking one stayed open, and a second
+  panicking payload aborted the process.
 
 ## [0.3.10] - 2026-11-04
 
