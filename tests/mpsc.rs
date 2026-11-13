@@ -227,6 +227,23 @@ fn try_channel_validates_config() {
     );
 }
 
+/// 2^61 slots is a valid count, but 2^61 `u64` slots are not a valid
+/// allocation.
+#[test]
+fn try_channel_rejects_a_ring_too_large_to_allocate() {
+    let capacity = MAX_CAPACITY_PER_SENDER / 2;
+    let max = MAX_CAPACITY_PER_SENDER / 8;
+    assert_eq!(
+        try_channel::<u64>(capacity).map(drop).unwrap_err(),
+        ChannelError::CapacityTooLarge {
+            requested: capacity,
+            max,
+        }
+    );
+    // A zero-sized payload needs no storage.
+    assert!(try_channel::<()>(MAX_CAPACITY_PER_SENDER + 1).is_err());
+}
+
 #[test]
 fn capacity_reports_yring_rounding() {
     let (tx, rx) = try_channel::<u8>(3).unwrap();

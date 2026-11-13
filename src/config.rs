@@ -118,10 +118,16 @@ impl SpinWait {
     }
 }
 
-pub(crate) const fn validate_capacity(capacity: usize, max: usize) -> Result<(), ChannelError> {
+/// Check the capacity of one ring of `T`. `limit` bounds the slot count;
+/// the slots must also fit one allocation.
+pub(crate) const fn validate_capacity<T>(
+    capacity: usize,
+    limit: usize,
+) -> Result<(), ChannelError> {
     if capacity == 0 {
         return Err(ChannelError::ZeroCapacity);
     }
+    let max = max_capacity::<T>(limit);
     if capacity > max {
         return Err(ChannelError::CapacityTooLarge {
             requested: capacity,
@@ -129,6 +135,20 @@ pub(crate) const fn validate_capacity(capacity: usize, max: usize) -> Result<(),
         });
     }
     Ok(())
+}
+
+/// The largest capacity up to `limit` whose ring of `T` can be allocated.
+/// A ring rounds its slot count up to a power of two, and an allocation
+/// holds at most `isize::MAX` bytes.
+const fn max_capacity<T>(limit: usize) -> usize {
+    let size = size_of::<T>();
+    if size == 0 {
+        return limit;
+    }
+    // A type is at most `isize::MAX` bytes, so at least one slot fits.
+    let slots = isize::MAX.unsigned_abs() / size;
+    let fit = 1 << slots.ilog2();
+    if fit < limit { fit } else { limit }
 }
 
 #[cfg(test)]

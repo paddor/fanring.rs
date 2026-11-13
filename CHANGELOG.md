@@ -18,6 +18,10 @@ All notable changes to this project are documented here.
   its deadline.
 - Values left in a receiver's queue by a steal wake one parked receiver.
   Before, they waited for the thief's next receive.
+- `try_channel`, `try_channel_with_policy` and `try_register_with_capacity`
+  reject a capacity whose ring of `T` exceeds `isize::MAX` bytes, such as
+  `try_channel::<u64>(1 << 61)`. Before, the allocation panicked with
+  `capacity overflow`.
 
 ## [0.3.10] - 2026-11-04
 

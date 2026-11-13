@@ -60,6 +60,10 @@ fn allocate_channel_id(counter: &AtomicU64) -> u64 {
 ///
 /// `yring` rounds capacity up to a power of two and requires the rounded value
 /// to fit in half the cursor range.
+///
+/// A ring must also fit one allocation of at most `isize::MAX` bytes. For a
+/// large `T` that lowers the limit; [`ChannelError::CapacityTooLarge`] reports
+/// the one that applies.
 pub const MAX_CAPACITY_PER_SENDER: usize = 1usize << (usize::BITS - 2);
 
 const PREFETCH_LIMIT: usize = 64;
@@ -145,7 +149,7 @@ pub fn channel_with_policy<T, P: Teardown>(
 pub fn try_channel_with_policy<T, P: Teardown>(
     capacity_per_sender: usize,
 ) -> Result<(Sender<T, P>, Receiver<T, P>), ChannelError> {
-    validate_capacity(capacity_per_sender, MAX_CAPACITY_PER_SENDER)?;
+    validate_capacity::<T>(capacity_per_sender, MAX_CAPACITY_PER_SENDER)?;
     Ok(build_channel(capacity_per_sender))
 }
 
