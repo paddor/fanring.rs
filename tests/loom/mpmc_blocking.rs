@@ -101,3 +101,28 @@ fn mpmc_blocked_sender_survives_nonfinal_receiver_drop() {
         assert_eq!(rx1.recv(), Err(mpmc::RecvError));
     });
 }
+
+/// Every blocked receiver sees the disconnect, also while the others stay
+/// alive. A receiver dropped at thread exit wakes the rest, which would
+/// hide a missed wake.
+#[test]
+fn mpmc_disconnect_wakes_receivers_that_stay_alive() {
+    model(|| {
+        let (tx, rx0) = mpmc::channel::<u8>(1);
+        let rx1 = rx0.clone();
+        drop(tx);
+
+        let receive = |mut rx: mpmc::Receiver<u8>| {
+            thread::spawn(move || {
+                let result = rx.recv();
+                (rx, result)
+            })
+        };
+        let (first, second) = (receive(rx0), receive(rx1));
+        let (rx0, first) = first.join().unwrap();
+        let (rx1, second) = second.join().unwrap();
+        assert_eq!(first, Err(mpmc::RecvError));
+        assert_eq!(second, Err(mpmc::RecvError));
+        drop((rx0, rx1));
+    });
+}

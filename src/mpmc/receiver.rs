@@ -134,14 +134,19 @@ impl<T, P: Teardown> Receiver<T, P> {
                         return (Err(TryRecvError::Empty), Effects::progressed_if(progressed));
                     }
                     EmptyScan::Drained => {
-                        return (Err(TryRecvError::Disconnected), Effects::default());
+                        return (Err(TryRecvError::Disconnected), Effects::drained());
                     }
                 }
             };
             let drained = self.drain_lane(lane);
             drop(publication);
             match drained {
-                LaneDrain::Item { value, effects } => return (Ok(value), effects),
+                LaneDrain::Item { value, mut effects } => {
+                    if self.is_drained() {
+                        effects.wake = Wake::All;
+                    }
+                    return (Ok(value), effects);
+                }
                 LaneDrain::Empty(effects) => {
                     if effects.has_effect() {
                         return (Err(TryRecvError::Empty), effects);
@@ -194,6 +199,7 @@ impl<T, P: Teardown> Receiver<T, P> {
             drop(publication);
             if let Some(value) = stolen {
                 self.steal_cursor = index.wrapping_add(1);
+                self.wake_after_steal();
                 return WorkPop::Item(value);
             }
         }
@@ -201,6 +207,18 @@ impl<T, P: Teardown> Receiver<T, P> {
             self.steal_cursor = self.steal_cursor.wrapping_add(1) % len;
         }
         WorkPop::Empty { generation }
+    }
+
+    /// Wake receivers that parked while this steal was in flight. They saw
+    /// the victim's queue empty and a publication under way. No sender or
+    /// publication wakes them for the values left in this receiver's queue,
+    /// or for a channel that is drained by now.
+    fn wake_after_steal(&self) {
+        if self.is_drained() {
+            self.shared.data_waiters.notify_all();
+        } else if self.local.len() != 0 {
+            self.shared.data_waiters.notify_one();
+        }
     }
 
     fn has_ready_lane(&self) -> bool {
@@ -359,7 +377,7 @@ impl<T, P: Teardown> Blocking<()> for Receiver<T, P> {
         let (result, effects) = self.try_recv_inner();
         match result {
             Ok(value) => Recheck::Done(Ok(value), effects),
-            Err(TryRecvError::Disconnected) => Recheck::Done(Err(RecvError), Effects::default()),
+            Err(TryRecvError::Disconnected) => Recheck::Done(Err(RecvError), effects),
             Err(TryRecvError::Empty) if effects.must_retry() => Recheck::Progressed((), effects),
             Err(TryRecvError::Empty) => Recheck::Pending(()),
         }

@@ -50,6 +50,17 @@ impl Effects {
         }
     }
 
+    /// The channel is drained. A receiver can park on a publication that
+    /// was in flight during its scan, and nothing notifies when that
+    /// publication ends. So each receiver that sees the final state wakes
+    /// the rest.
+    pub(super) fn drained() -> Self {
+        Self {
+            wake: Wake::All,
+            ..Self::default()
+        }
+    }
+
     /// Whether there are notifications to send.
     pub(super) fn has_effect(&self) -> bool {
         self.released.is_some() || self.wake != Wake::None
