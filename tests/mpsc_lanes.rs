@@ -511,3 +511,30 @@ fn coordinated_close_reclaims_paused_values_with_sender_alive() {
         Err(TrySendError::Disconnected(_))
     ));
 }
+
+/// A targeted receive that empties the rotation right when a readiness poll
+/// is due must not carry the spent poll budget into the next receive.
+#[test]
+fn ready_poll_budget_survives_a_targeted_empty_receive() {
+    let (mut tx, mut rx) = channel::<u32>(256);
+    let lane = tx.lane();
+    for value in 0..64 {
+        tx.try_send(value).unwrap();
+    }
+    for value in 0..64 {
+        assert_eq!(rx.try_recv(), Ok(value));
+    }
+    assert_eq!(rx.try_recv_from(&lane), Err(TryRecvError::Empty));
+
+    tx.try_send(64).unwrap();
+    assert_eq!(rx.try_recv(), Ok(64));
+
+    // A lane that becomes ready later is still found within one interval.
+    let mut quiet = tx.try_clone().unwrap();
+    quiet.try_send(7).unwrap();
+    let found = (0..256).any(|_| {
+        let _ = tx.try_send(1_000);
+        rx.try_recv() == Ok(7)
+    });
+    assert!(found, "a newly ready lane starved behind a busy one");
+}
