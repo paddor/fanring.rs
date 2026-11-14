@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-11-14
+
 ### Fixed
 
 - MPSC receives no longer underflow the readiness-poll budget when lane
