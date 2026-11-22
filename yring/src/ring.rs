@@ -116,8 +116,7 @@ impl<T> Ring<T> {
         let start = segment.start;
         let mut writer = WriteCursor::new(seg, start);
         writer.limit = self.limit(segment, start, start);
-        let growing = segment.capacity() < self.capacity;
-        (writer, ReadCursor::new(seg, start, growing))
+        (writer, ReadCursor::new(seg, start))
     }
 
     pub(crate) fn capacity(&self) -> usize {
@@ -155,30 +154,43 @@ impl<T> Ring<T> {
     /// or after growth.
     #[inline]
     fn refill(&self, writer: &mut WriteCursor<T>, grow: bool) -> bool {
-        let refill = self.make_room(writer.seg(), writer.cursor, grow);
+        // A full ring and a newer `head` freeing room in this segment are
+        // both checked inline, as a fixed ring would. Only a full segment
+        // in a ring that can still grow takes the out-of-line path.
+        let head = self.head.0.load(Ordering::Acquire);
+        let cursor = writer.cursor;
+        if Self::distance(cursor, head) >= self.capacity {
+            return false;
+        }
+        writer.limit = self.limit(writer.segment(), cursor, head);
+        if cursor != writer.limit {
+            return true;
+        }
+        let refill = self.make_room(writer.seg(), cursor, head, grow);
         writer.apply(refill)
     }
 
-    /// Reload `head` and recompute the limit. When only the segment is
-    /// full, link a larger one if `grow` is set.
+    /// Handle a producer whose segment is full for a `head` it just loaded:
+    /// link a larger segment if `grow` is set.
     ///
     /// Values in and out: a `&mut` cursor passed to an out-of-line call
     /// would force the hot path to keep it in memory.
     #[cold]
     #[inline(never)]
-    fn make_room(&self, seg: NonNull<Segment<T>>, cursor: Cursor, grow: bool) -> Refill<T> {
-        let head = self.head.0.load(Ordering::Acquire);
+    fn make_room(
+        &self,
+        seg: NonNull<Segment<T>>,
+        cursor: Cursor,
+        head: Cursor,
+        grow: bool,
+    ) -> Refill<T> {
         // SAFETY: the producer's segment stays live while the producer runs.
         let segment = unsafe { seg.as_ref() };
         let mut refill = Refill {
             seg,
-            limit: self.limit(segment, cursor, head),
+            limit: cursor,
             fits: true,
         };
-        if cursor != refill.limit {
-            return refill;
-        }
-
         let full = Self::distance(cursor, head) >= self.capacity;
         if full || segment.capacity() == self.capacity {
             refill.fits = false;
@@ -218,7 +230,11 @@ impl<T> Ring<T> {
             return FlushResult::NothingToFlush;
         }
         let count = Self::distance(cursor, prev_tail);
-        let was_empty = prev_tail == self.head.0.load(Ordering::Acquire);
+        let head = self.head.0.load(Ordering::Acquire);
+        let was_empty = prev_tail == head;
+        // Reuse the load to refresh the free space, so later pushes rarely
+        // stop at a stale limit.
+        writer.limit = self.limit(writer.segment(), cursor, head);
         self.tail.0.store(cursor, Ordering::Release);
         // Pair with the consumer's register-then-recheck exchange. Either
         // this sees its registration, or its recheck sees our publication.
@@ -277,11 +293,13 @@ impl<T> Ring<T> {
         let count = tail.wrapping_sub(reader.cached_tail);
         reader.cached_tail = tail;
         reader.limit = tail;
-        // The segment header shares a cache line with the slot pointer every
-        // read uses, so this load rarely misses. Acquire pairs with `grow`. A
-        // tail past a link's start was published after the link, so the tail
-        // load above guarantees this load sees it.
-        if reader.growing && !reader.segment().next.load(Ordering::Acquire).is_null() {
+        // Only a segment below the ring capacity can have a successor, so
+        // fixed and fully grown rings skip the header load. Acquire pairs
+        // with `grow`. A tail past a link's start was published after the
+        // link, so the tail load above guarantees this load sees it.
+        if reader.segment_capacity() < self.capacity
+            && !reader.segment().next.load(Ordering::Acquire).is_null()
+        {
             reader.apply(self.window(reader.seg(), reader.head, tail));
         }
         count
@@ -294,13 +312,24 @@ impl<T> Ring<T> {
     )]
     #[inline(always)]
     pub(crate) fn pop(&self, reader: &mut ReadCursor<T>) -> Option<T> {
-        while reader.head == reader.limit {
-            if !self.advance(reader) {
+        if reader.head == reader.limit {
+            if reader.head == reader.cached_tail {
                 return None;
             }
+            self.next_segment(reader);
         }
-        // SAFETY: head is below limit.
+        // SAFETY: head is below limit: `next_segment` moves to the segment
+        // that stores `head` and sets a limit past it.
         Some(unsafe { reader.take() })
+    }
+
+    /// Move a consumer at a segment end inside its window into the next
+    /// segment. Out of line so callers that inline [`pop`](Self::pop) stay
+    /// small, and value-free so the item takes one path out of the slot.
+    #[cold]
+    #[inline(never)]
+    fn next_segment(&self, reader: &mut ReadCursor<T>) {
+        reader.apply(self.window(reader.seg(), reader.head, reader.cached_tail));
     }
 
     /// At the end of the consumer's segment, move into the next one.
@@ -334,11 +363,7 @@ impl<T> Ring<T> {
                 std::ptr::null_mut()
             };
             let Some(next) = NonNull::new(next) else {
-                return Window {
-                    seg,
-                    limit: tail,
-                    growing,
-                };
+                return Window { seg, limit: tail };
             };
 
             // SAFETY: as above.
@@ -351,11 +376,7 @@ impl<T> Ring<T> {
                 } else {
                     tail
                 };
-                return Window {
-                    seg,
-                    limit,
-                    growing,
-                };
+                return Window { seg, limit };
             }
 
             self.chain.set_oldest(next);

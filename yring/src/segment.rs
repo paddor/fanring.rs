@@ -14,6 +14,36 @@ use crate::Cursor;
 use crate::compat::UnsafeCellExt;
 use crate::compat::{AtomicPtr, Ordering, UnsafeCell};
 
+/// A segment's slot array and index mask. Each cursor caches the view of
+/// its segment, so a read or write skips the segment header and the bounds
+/// check.
+struct Slots<T> {
+    base: NonNull<UnsafeCell<MaybeUninit<T>>>,
+    mask: usize,
+}
+
+impl<T> Clone for Slots<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for Slots<T> {}
+
+impl<T> Slots<T> {
+    /// The slot that stores `cursor`.
+    ///
+    /// # Safety
+    ///
+    /// The segment these slots belong to is still allocated.
+    #[inline]
+    unsafe fn slot(&self, cursor: Cursor) -> &UnsafeCell<MaybeUninit<T>> {
+        // SAFETY: the mask keeps the index inside the array, and the caller
+        // guarantees the array is live.
+        unsafe { &*self.base.as_ptr().add(cursor & self.mask) }
+    }
+}
+
 pub(crate) struct Segment<T> {
     buf: Box<[UnsafeCell<MaybeUninit<T>>]>,
     mask: usize,
@@ -77,6 +107,15 @@ impl<T> Segment<T> {
     #[inline]
     fn slot(&self, cursor: Cursor) -> &UnsafeCell<MaybeUninit<T>> {
         &self.buf[cursor & self.mask]
+    }
+
+    /// The slot array and index mask, for a cursor to cache.
+    #[inline]
+    fn slots(&self) -> Slots<T> {
+        Slots {
+            base: NonNull::from(&*self.buf).cast(),
+            mask: self.mask,
+        }
     }
 
     /// The live segment after `segment` that stores `cursor`.
@@ -210,6 +249,8 @@ impl<T> Copy for Refill<T> {}
 pub(crate) struct WriteCursor<T> {
     /// The newest segment, the only one the producer writes.
     seg: NonNull<Segment<T>>,
+    /// The slots of `seg`.
+    slots: Slots<T>,
     /// Private write position.
     pub(crate) cursor: Cursor,
     /// First cursor that needs a refresh before a write: the ring is full
@@ -218,9 +259,13 @@ pub(crate) struct WriteCursor<T> {
 }
 
 impl<T> WriteCursor<T> {
+    /// A producer position at `cursor` in the live segment `seg`.
     pub(crate) fn new(seg: NonNull<Segment<T>>, cursor: Cursor) -> Self {
+        // SAFETY: the ring hands out a live segment before any endpoint runs.
+        let slots = unsafe { seg.as_ref() }.slots();
         Self {
             seg,
+            slots,
             cursor,
             limit: cursor,
         }
@@ -240,7 +285,10 @@ impl<T> WriteCursor<T> {
     /// Take a refreshed state. Returns whether a write fits.
     #[inline]
     pub(crate) fn apply(&mut self, refill: Refill<T>) -> bool {
-        self.seg = refill.seg;
+        if refill.seg != self.seg {
+            self.seg = refill.seg;
+            self.slots = self.segment().slots();
+        }
         self.limit = refill.limit;
         refill.fits
     }
@@ -253,10 +301,9 @@ impl<T> WriteCursor<T> {
     /// cannot see it.
     #[inline]
     pub(crate) unsafe fn write(&mut self, val: T) {
-        // SAFETY: guaranteed by the caller.
-        self.segment()
-            .slot(self.cursor)
-            .with_mut(|ptr| unsafe { (*ptr).write(val) });
+        // SAFETY: the producer's segment stays live while the producer runs,
+        // and the caller guarantees the slot is free.
+        unsafe { self.slots.slot(self.cursor) }.with_mut(|ptr| unsafe { (*ptr).write(val) });
         self.cursor = self.cursor.wrapping_add(1);
     }
 }
@@ -265,7 +312,6 @@ impl<T> WriteCursor<T> {
 pub(crate) struct Window<T> {
     pub(crate) seg: NonNull<Segment<T>>,
     pub(crate) limit: Cursor,
-    pub(crate) growing: bool,
 }
 
 impl<T> Clone for Window<T> {
@@ -280,6 +326,8 @@ impl<T> Copy for Window<T> {}
 pub(crate) struct ReadCursor<T> {
     /// The oldest live segment, the one the consumer reads.
     seg: NonNull<Segment<T>>,
+    /// The slots of `seg`.
+    slots: Slots<T>,
     /// Private read position.
     pub(crate) head: Cursor,
     /// End of the prefetched window. It may reach into newer segments.
@@ -287,19 +335,19 @@ pub(crate) struct ReadCursor<T> {
     /// End of the window inside `seg`: `cached_tail`, or the start of the
     /// next segment when that comes first. Reads stop here.
     pub(crate) limit: Cursor,
-    /// `seg` is smaller than the ring capacity, so a larger segment may
-    /// follow it. Fixed rings and grown rings skip the link check.
-    pub(crate) growing: bool,
 }
 
 impl<T> ReadCursor<T> {
-    pub(crate) fn new(seg: NonNull<Segment<T>>, head: Cursor, growing: bool) -> Self {
+    /// A consumer position at `head` in the live segment `seg`.
+    pub(crate) fn new(seg: NonNull<Segment<T>>, head: Cursor) -> Self {
+        // SAFETY: the ring hands out a live segment before any endpoint runs.
+        let slots = unsafe { seg.as_ref() }.slots();
         Self {
             seg,
+            slots,
             head,
             cached_tail: head,
             limit: head,
-            growing,
         }
     }
 
@@ -317,9 +365,18 @@ impl<T> ReadCursor<T> {
     /// Take a checked window.
     #[inline]
     pub(crate) fn apply(&mut self, window: Window<T>) {
-        self.seg = window.seg;
+        if window.seg != self.seg {
+            self.seg = window.seg;
+            self.slots = self.segment().slots();
+        }
         self.limit = window.limit;
-        self.growing = window.growing;
+    }
+
+    /// Slots in this segment. Below the ring capacity, a larger segment
+    /// may follow it.
+    #[inline]
+    pub(crate) fn segment_capacity(&self) -> usize {
+        self.slots.mask + 1
     }
 
     /// Prefetched items left in this segment.
@@ -340,14 +397,15 @@ impl<T> ReadCursor<T> {
     )]
     #[inline(always)]
     pub(crate) unsafe fn take(&mut self) -> T {
-        // SAFETY: guaranteed by the caller; the Acquire load of `tail` in
-        // `prefetch` ordered the producer's write before this read.
-        let val = self
-            .segment()
-            .slot(self.head)
-            .with_mut(|ptr| unsafe { (*ptr).assume_init_read() });
-        self.head = self.head.wrapping_add(1);
-        val
+        // Advance before the read: the cursor store then cannot sit between
+        // the slot load and the caller's store, which kept large items on
+        // the stack.
+        let head = self.head;
+        self.head = head.wrapping_add(1);
+        // SAFETY: the consumer's segment stays live until the consumer moves
+        // off it. The caller guarantees the slot is published; the Acquire
+        // load of `tail` in `prefetch` ordered the producer's write first.
+        unsafe { self.slots.slot(head) }.with_mut(|ptr| unsafe { (*ptr).assume_init_read() })
     }
 
     /// Move `count` published items starting at `head` to the end of `output`.
