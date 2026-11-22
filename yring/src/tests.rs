@@ -1,6 +1,11 @@
 use super::*;
 use crate::compat::Ordering;
 
+/// A ring whose cursors start at `cursor`, to cross the wrap boundary.
+fn spsc_at<T>(initial: usize, capacity: usize, cursor: Cursor) -> (Producer<T>, Consumer<T>) {
+    endpoints(Ring::new(initial, capacity, cursor))
+}
+
 // CI runs Miri with many seeds. Keep cross-thread coverage without turning
 // per-seed validation into a throughput test.
 fn miri_sized(n: u64) -> u64 {
@@ -350,14 +355,8 @@ fn pop_into_handles_zero_sized_values() {
 
 #[test]
 fn pop_into_crosses_cursor_wrap_boundary() {
-    let (mut p, mut c) = spsc::<u32>(4);
     let base: Cursor = usize::MAX - 1;
-    p.cursor = base;
-    p.cached_head = base;
-    c.head = base;
-    c.cached_tail = base;
-    p.ring.head.0.store(base, Ordering::Relaxed);
-    p.ring.tail.0.store(base, Ordering::Relaxed);
+    let (mut p, mut c) = spsc_at::<u32>(4, 4, base);
 
     for i in 1..=4 {
         p.push(i).unwrap();
@@ -367,7 +366,7 @@ fn pop_into_crosses_cursor_wrap_boundary() {
     let mut out = Vec::new();
     assert_eq!(c.pop_into(&mut out, 4), 4);
     assert_eq!(out, [1, 2, 3, 4]);
-    assert_eq!(c.head, base.wrapping_add(4));
+    assert_eq!(c.reader.head, base.wrapping_add(4));
     c.release();
     assert!(p.is_empty());
 }
@@ -577,14 +576,8 @@ fn capacity_half_range_panics_with_message() {
 
 #[test]
 fn counters_wrap_without_panicking() {
-    let (mut p, mut c) = spsc::<u32>(4);
     let base: Cursor = usize::MAX - 1;
-    p.cursor = base;
-    p.cached_head = base;
-    c.head = base;
-    c.cached_tail = base;
-    p.ring.head.0.store(base, Ordering::Relaxed);
-    p.ring.tail.0.store(base, Ordering::Relaxed);
+    let (mut p, mut c) = spsc_at::<u32>(4, 4, base);
 
     p.push(1).unwrap();
     p.push(2).unwrap();
@@ -608,14 +601,8 @@ fn counters_wrap_without_panicking() {
 
 #[test]
 fn counters_cross_u32_boundary_without_aliasing() {
-    let (mut p, mut c) = spsc::<u32>(4);
     let base: Cursor = u32::MAX as usize - 1;
-    p.cursor = base;
-    p.cached_head = base;
-    c.head = base;
-    c.cached_tail = base;
-    p.ring.head.0.store(base, Ordering::Relaxed);
-    p.ring.tail.0.store(base, Ordering::Relaxed);
+    let (mut p, mut c) = spsc_at::<u32>(4, 4, base);
 
     for i in 0..4 {
         p.push(i).unwrap();
@@ -673,14 +660,8 @@ fn drop_remaining_handles_wrapped_counters() {
     }
 
     DROPS.store(0, Ordering::Relaxed);
-    let (mut p, mut c) = spsc::<Counted>(4);
     let base: Cursor = usize::MAX - 1;
-    p.cursor = base;
-    p.cached_head = base;
-    c.head = base;
-    c.cached_tail = base;
-    p.ring.head.0.store(base, Ordering::Relaxed);
-    p.ring.tail.0.store(base, Ordering::Relaxed);
+    let (mut p, c) = spsc_at::<Counted>(4, 4, base);
 
     p.push(Counted).unwrap();
     p.push(Counted).unwrap();

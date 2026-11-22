@@ -5,12 +5,27 @@ use std::time::{Duration, Instant};
 
 const DURATION: Duration = Duration::from_secs(2);
 
-fn bench<T: Copy + Send + 'static>(cap: usize, batch_size: usize, val: T) {
+/// A fixed ring of `cap` slots, or with `max`, a ring that starts at `cap`
+/// and may grow to `max`.
+#[derive(Clone, Copy)]
+struct Shape {
+    cap: usize,
+    max: Option<usize>,
+}
+
+fn bench<T: Copy + Send + 'static>(shape: Shape, batch_size: usize, val: T) {
     let size = std::mem::size_of::<T>();
     let stop = Arc::new(AtomicBool::new(false));
     let sent = Arc::new(AtomicU64::new(0));
 
-    let (mut producer, mut consumer) = yring::spsc::<T>(cap);
+    let (mut producer, mut consumer) = match shape.max {
+        Some(max) => yring::spsc_growing::<T>(shape.cap, max),
+        None => yring::spsc::<T>(shape.cap),
+    };
+    let cap = shape.cap;
+    let grows = shape
+        .max
+        .map_or(String::new(), |max| format!(" grows to {max}"));
 
     let stop2 = stop.clone();
     let sent2 = sent.clone();
@@ -54,36 +69,45 @@ fn bench<T: Copy + Send + 'static>(cap: usize, batch_size: usize, val: T) {
     let mb_per_sec = received as f64 * size as f64 / elapsed.as_secs_f64() / 1_000_000.0;
 
     println!(
-        "  cap={cap:<6} batch={batch_size:<4} {:>7.1}M items/s  {:>5.0} MB/s",
+        "  cap={cap:<6} batch={batch_size:<4} {:>7.1}M items/s  {:>5.0} MB/s{grows}",
         items_per_sec / 1_000_000.0,
         mb_per_sec,
     );
 }
 
+fn section<T: Copy + Send + 'static>(title: &str, val: T, shapes: &[Shape]) {
+    println!("--- {title} ---");
+    for &shape in shapes {
+        for batch in [1, 16, 64, 256] {
+            bench(shape, batch, val);
+        }
+        println!();
+    }
+}
+
 fn main() {
     println!("yring throughput (2s per config)\n");
 
-    println!("--- u64 (8 bytes) ---");
-    for cap in [1024, 4096] {
-        for batch in [1, 16, 64, 256] {
-            bench(cap, batch, 0u64);
-        }
-        println!();
-    }
+    let fixed = [
+        Shape {
+            cap: 1024,
+            max: None,
+        },
+        Shape {
+            cap: 4096,
+            max: None,
+        },
+    ];
+    section("u64 (8 bytes)", 0u64, &fixed);
+    section("[u8; 64] (64 bytes)", [0u8; 64], &fixed);
+    section("[u8; 128] (128 bytes)", [0u8; 128], &fixed);
 
-    println!("--- [u8; 64] (64 bytes) ---");
-    for cap in [1024, 4096] {
-        for batch in [1, 16, 64, 256] {
-            bench(cap, batch, [0u8; 64]);
-        }
-        println!();
-    }
-
-    println!("--- [u8; 128] (128 bytes) ---");
-    for cap in [1024, 4096] {
-        for batch in [1, 16, 64, 256] {
-            bench(cap, batch, [0u8; 128]);
-        }
-        println!();
-    }
+    // Starts at 1024 slots and may grow to 1M: a consumer that keeps up
+    // never leaves the first segment and checks for a link on each prefetch.
+    let growing = [Shape {
+        cap: 1024,
+        max: Some(1 << 20),
+    }];
+    section("u64 (8 bytes), growing", 0u64, &growing);
+    section("[u8; 64] (64 bytes), growing", [0u8; 64], &growing);
 }

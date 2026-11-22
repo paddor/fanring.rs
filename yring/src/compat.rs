@@ -11,9 +11,9 @@ pub(crate) use loom::sync::Arc;
 pub(crate) use std::sync::Arc;
 
 #[cfg(all(loom, target_pointer_width = "64"))]
-pub(crate) use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+pub(crate) use loom::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 #[cfg(not(all(loom, target_pointer_width = "64")))]
-pub(crate) use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+pub(crate) use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 #[cfg(not(all(loom, target_pointer_width = "64")))]
 pub(crate) trait UnsafeCellExt<T> {

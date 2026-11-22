@@ -2,6 +2,7 @@
 #![cfg(all(loom, target_pointer_width = "64"))]
 
 mod async_endpoints;
+mod growth;
 mod pop_into;
 mod publication;
 mod transitions;

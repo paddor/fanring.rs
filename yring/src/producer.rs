@@ -4,15 +4,14 @@ use std::sync::OnceLock;
 #[cfg(not(all(loom, target_pointer_width = "64")))]
 use crate::compat::UnsafeCellExt;
 use crate::compat::{Arc, Ordering, UnsafeCell};
-use crate::{Cursor, FlushResult, Ring};
+use crate::segment::WriteCursor;
+use crate::{FlushResult, Ring};
 
 /// Sending half. Mutation requires exclusive access.
 pub struct Producer<T> {
     pub(crate) ring: Arc<Ring<T>>,
-    /// Private write position. No atomic; only the producer touches it.
-    pub(crate) cursor: Cursor,
-    /// Cached copy of the consumer's `head` to avoid Acquire loads.
-    pub(crate) cached_head: Cursor,
+    /// Private write position and segment. No atomics.
+    pub(crate) writer: WriteCursor<T>,
 }
 
 impl<T> Producer<T> {
@@ -32,6 +31,10 @@ impl<T> Drop for Producer<T> {
 // SAFETY: Producer mutations require &mut self and the underlying Ring is
 // Send+Sync. Moving the producer to another thread is safe.
 unsafe impl<T: Send> Send for Producer<T> {}
+// SAFETY: shared access reads the ring's atomics and the cursor's plain
+// fields and never dereferences the segment, so it is as safe as with the
+// single fixed buffer.
+unsafe impl<T: Send> Sync for Producer<T> {}
 
 /// Single-thread owner handle for a producer shared through an `Arc`.
 ///
@@ -159,26 +162,29 @@ impl<T> Producer<T> {
     /// The value is NOT visible to the consumer until [`flush`](Self::flush).
     #[inline]
     pub fn push(&mut self, val: T) -> Result<(), T> {
-        match self.ring.push(&mut self.cursor, &mut self.cached_head, val) {
+        match self.ring.push(&mut self.writer, val) {
             Ok(()) => Ok(()),
             Err(val) => self.push_after_full(val),
         }
     }
 
-    #[cold]
+    #[inline]
     fn push_after_full(&mut self, val: T) -> Result<(), T> {
-        if !self.ring.producer_waiting.0.register() {
+        if !self.ring.register_producer() {
             return Err(val);
         }
-        self.ring.push(&mut self.cursor, &mut self.cached_head, val)
+        self.ring.push(&mut self.writer, val)
     }
 
     /// Make all pushed items visible to the consumer. One Release store.
-    /// Does NOT load `head`; `push()` refreshes `cached_head` on demand
+    /// Does NOT load `head`; `push()` reloads it on demand
     /// when the ring appears full.
     #[inline]
     pub fn flush(&mut self) {
-        self.ring.tail.0.store(self.cursor, Ordering::Release);
+        self.ring
+            .tail
+            .0
+            .store(self.writer.cursor, Ordering::Release);
     }
 
     /// Flush and report whether the consumer needs a wake.
@@ -193,7 +199,7 @@ impl<T> Producer<T> {
     /// [`Consumer::is_empty`]: crate::Consumer::is_empty
     #[inline]
     pub fn flush_and_check(&mut self) -> FlushResult {
-        self.ring.flush_to(self.cursor, &mut self.cached_head)
+        self.ring.flush_to(&mut self.writer)
     }
 
     /// Push + flush in one call (convenience for single-item sends).
@@ -207,17 +213,18 @@ impl<T> Producer<T> {
     #[inline]
     /// Return whether the ring cannot accept another item.
     pub fn is_full(&mut self) -> bool {
-        if !self.ring.is_full(self.cursor, &mut self.cached_head) {
+        if !self.ring.is_full(&mut self.writer) {
             return false;
         }
-        if !self.ring.producer_waiting.0.register() {
+        if !self.ring.register_producer() {
             return true;
         }
-        self.ring.is_full(self.cursor, &mut self.cached_head)
+        self.ring.is_full(&mut self.writer)
     }
 
     #[inline]
-    /// Return the ring capacity after power-of-two rounding.
+    /// Return the ring capacity after power-of-two rounding. A growing ring
+    /// reports the bound it grows to.
     pub fn capacity(&self) -> usize {
         self.ring.capacity()
     }
@@ -225,13 +232,13 @@ impl<T> Producer<T> {
     #[inline]
     /// Return the number of flushed and pending items owned by the producer.
     pub fn len(&self) -> usize {
-        self.ring.producer_len(self.cursor)
+        self.ring.producer_len(self.writer.cursor)
     }
 
     #[inline]
     /// Return whether the producer has no pending or flushed items.
     pub fn is_empty(&self) -> bool {
-        self.ring.producer_is_empty(self.cursor)
+        self.ring.producer_is_empty(self.writer.cursor)
     }
 
     /// The consumer half has been dropped or explicitly closed.
