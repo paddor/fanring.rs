@@ -444,6 +444,32 @@ fn space_waiter_wakes_after_a_retire() {
 }
 
 #[test]
+fn flush_and_check_room_reuses_only_released_slots() {
+    // `flush_and_check` refreshes the producer's limit from the `head` it
+    // loads. When it sees the consumer release item 1, the third push reuses
+    // that slot without another refill: in a fixed ring, and in the first
+    // segment of a growing one.
+    for capacity in [2, 4] {
+        bounded(3, move || {
+            let (mut p, mut c) = yring::spsc_growing::<u32>(2, capacity);
+            let h = thread::spawn(move || {
+                p.push_and_flush(1).unwrap();
+                p.push(2).unwrap();
+                p.flush_and_check();
+                let mut value = 3;
+                while let Err(back) = p.push(value) {
+                    value = back;
+                    thread::yield_now();
+                }
+                p.flush();
+            });
+            assert_eq!(collect(&mut c, 3), [1, 2, 3]);
+            h.join().unwrap();
+        });
+    }
+}
+
+#[test]
 fn single_prefetch_sees_every_segment_the_producer_linked() {
     bounded(3, || {
         let (mut p, mut c) = yring::spsc_growing::<u32>(1, 8);
