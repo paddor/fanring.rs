@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-11-22
+
 ### Changed
 
 - Sender rings above 1024 slots start at 1024 and grow to their capacity as
