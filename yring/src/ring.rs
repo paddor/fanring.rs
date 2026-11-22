@@ -1,8 +1,7 @@
-use std::mem::MaybeUninit;
+use std::ptr::NonNull;
 
-#[cfg(not(all(loom, target_pointer_width = "64")))]
-use crate::compat::UnsafeCellExt;
-use crate::compat::{AtomicBool, Ordering, UnsafeCell};
+use crate::compat::{AtomicBool, Ordering};
+use crate::segment::{Chain, ReadCursor, Refill, Segment, Window, WriteCursor};
 use crate::{AtomicCursor, Cursor, FlushResult, Padded};
 
 // Enabled by the notifying endpoint on first use of a wakeup-hint helper.
@@ -54,8 +53,8 @@ impl Waiter {
 }
 
 pub(crate) struct Ring<T> {
-    pub(crate) buf: Box<[UnsafeCell<MaybeUninit<T>>]>,
-    pub(crate) mask: usize,
+    /// Bound on queued items: the producer stops at `head + capacity`.
+    capacity: usize,
     /// Consumer read position. Written by consumer, read by producer.
     pub(crate) head: Padded<AtomicCursor>,
     /// Last flushed position. Written by producer, read by consumer.
@@ -70,43 +69,59 @@ pub(crate) struct Ring<T> {
     /// Set by `Consumer::drop` / `AsyncConsumer::drop`. Lets the producer
     /// detect that the consumer is gone.
     pub(crate) consumer_dropped: AtomicBool,
+    /// Every live segment, from the consumer's on.
+    chain: Chain<T>,
 }
 
 // SAFETY: Ring<T> is Send because all shared mutable state is accessed through
-// atomics (head, tail) and UnsafeCell slots follow the SPSC protocol: the
-// producer writes cursor..tail, the consumer reads head..tail, non-overlapping.
+// atomics (head, tail, segment links) and UnsafeCell slots follow the SPSC
+// protocol: the producer writes cursor..tail, the consumer reads head..tail,
+// non-overlapping. A segment is freed only by its last user.
 unsafe impl<T: Send> Send for Ring<T> {}
 // SAFETY: Ring<T> is Sync for the same reason: concurrent access is mediated
 // by atomics and the SPSC single-producer/single-consumer invariant.
 unsafe impl<T: Send> Sync for Ring<T> {}
 
 impl<T> Ring<T> {
-    pub(crate) fn new(capacity: usize) -> Self {
+    /// A ring bounded at `capacity` items whose first segment holds
+    /// `initial` of them, with both cursors at `start`. Both sizes round up
+    /// to a power of two, and `initial` never exceeds `capacity`.
+    pub(crate) fn new(initial: usize, capacity: usize, start: Cursor) -> Self {
         assert!(capacity > 0, "capacity must be > 0");
-        let cap = capacity
+        let capacity = capacity
             .checked_next_power_of_two()
             .expect("capacity must fit in the next power of two");
         assert!(
-            cap <= usize::MAX / 2,
+            capacity <= usize::MAX / 2,
             "capacity must be <= half the cursor range"
         );
-        let buf: Vec<UnsafeCell<MaybeUninit<T>>> = (0..cap)
-            .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
-            .collect();
+        let initial = initial.clamp(1, capacity).next_power_of_two();
         Self {
-            buf: buf.into_boxed_slice(),
-            mask: cap - 1,
-            head: Padded(AtomicCursor::new(0)),
-            tail: Padded(AtomicCursor::new(0)),
+            capacity,
+            head: Padded(AtomicCursor::new(start)),
+            tail: Padded(AtomicCursor::new(start)),
             consumer_waiting: Padded(Waiter::new()),
             producer_waiting: Padded(Waiter::new()),
             producer_dropped: AtomicBool::new(false),
             consumer_dropped: AtomicBool::new(false),
+            chain: Chain::new(Segment::allocate(initial, start)),
         }
     }
 
+    /// Cursors for a new producer and consumer at the ring's start.
+    pub(crate) fn cursors(&self) -> (WriteCursor<T>, ReadCursor<T>) {
+        let seg = self.chain.oldest();
+        // SAFETY: no endpoint exists yet, so the first segment is live.
+        let segment = unsafe { seg.as_ref() };
+        let start = segment.start;
+        let mut writer = WriteCursor::new(seg, start);
+        writer.limit = self.limit(segment, start, start);
+        let growing = segment.capacity() < self.capacity;
+        (writer, ReadCursor::new(seg, start, growing))
+    }
+
     pub(crate) fn capacity(&self) -> usize {
-        self.mask + 1
+        self.capacity
     }
 
     #[inline]
@@ -114,71 +129,133 @@ impl<T> Ring<T> {
         from.wrapping_sub(to)
     }
 
+    /// First cursor the producer cannot write while the consumer is at
+    /// `head`: the ring bound or the end of its segment, whichever comes
+    /// first.
     #[inline]
-    fn count(n: Cursor) -> usize {
-        n
+    fn limit(&self, segment: &Segment<T>, cursor: Cursor, head: Cursor) -> Cursor {
+        let queued = Self::distance(cursor, head);
+        let in_segment = queued.min(Self::distance(cursor, segment.start));
+        let room = (self.capacity - queued).min(segment.capacity() - in_segment);
+        cursor.wrapping_add(room)
     }
 
     #[inline]
-    fn index(&self, cursor: Cursor) -> usize {
-        cursor & self.mask
-    }
-
-    #[inline]
-    pub(crate) fn push(
-        &self,
-        cursor: &mut Cursor,
-        cached_head: &mut Cursor,
-        val: T,
-    ) -> Result<(), T> {
-        if Self::distance(*cursor, *cached_head) >= self.capacity() {
-            *cached_head = self.head.0.load(Ordering::Acquire);
-            if Self::distance(*cursor, *cached_head) >= self.capacity() {
-                return Err(val);
-            }
+    pub(crate) fn push(&self, writer: &mut WriteCursor<T>, val: T) -> Result<(), T> {
+        if writer.cursor == writer.limit && !self.refill(writer, true) {
+            return Err(val);
         }
-        // SAFETY: capacity check above guarantees this slot is not
-        // visible to the consumer (cursor < head + capacity).
-        self.buf[self.index(*cursor)].with_mut(|ptr| unsafe {
-            (*ptr).write(val);
-        });
-        *cursor = cursor.wrapping_add(1);
+        // SAFETY: the cursor is below `limit`, so the slot is free and not
+        // visible to the consumer.
+        unsafe { writer.write(val) };
         Ok(())
     }
 
+    /// Refresh the producer at its limit. Returns whether a write fits now
+    /// or after growth.
     #[inline]
-    pub(crate) fn flush_to(&self, cursor: Cursor, cached_head: &mut Cursor) -> FlushResult {
+    fn refill(&self, writer: &mut WriteCursor<T>, grow: bool) -> bool {
+        let refill = self.make_room(writer.seg(), writer.cursor, grow);
+        writer.apply(refill)
+    }
+
+    /// Reload `head` and recompute the limit. When only the segment is
+    /// full, link a larger one if `grow` is set.
+    ///
+    /// Values in and out: a `&mut` cursor passed to an out-of-line call
+    /// would force the hot path to keep it in memory.
+    #[cold]
+    #[inline(never)]
+    fn make_room(&self, seg: NonNull<Segment<T>>, cursor: Cursor, grow: bool) -> Refill<T> {
+        let head = self.head.0.load(Ordering::Acquire);
+        // SAFETY: the producer's segment stays live while the producer runs.
+        let segment = unsafe { seg.as_ref() };
+        let mut refill = Refill {
+            seg,
+            limit: self.limit(segment, cursor, head),
+            fits: true,
+        };
+        if cursor != refill.limit {
+            return refill;
+        }
+
+        let full = Self::distance(cursor, head) >= self.capacity;
+        if full || segment.capacity() == self.capacity {
+            refill.fits = false;
+        } else if grow {
+            let size = (segment.capacity() * 2).min(self.capacity);
+            refill.seg = Self::grow(seg, size, cursor);
+            // SAFETY: just allocated and owned by the chain.
+            refill.limit = self.limit(unsafe { refill.seg.as_ref() }, cursor, head);
+        }
+        refill
+    }
+
+    /// Link a segment of `size` slots after the full `seg`, starting at
+    /// `cursor`. Nothing is copied; the consumer drains the old one first.
+    ///
+    /// Takes a pointer, not a reference: once the link is visible, the
+    /// consumer may drain and free `seg` before this function returns.
+    fn grow(seg: NonNull<Segment<T>>, size: usize, cursor: Cursor) -> NonNull<Segment<T>> {
+        let next = Segment::allocate(size, cursor);
+        // SAFETY: the producer's segment is live until the link below is
+        // visible. Only the `next` field is borrowed, so no reference to the
+        // segment outlives the store.
+        let link = unsafe { &(*seg.as_ptr()).next };
+        // Release publishes the initialized segment. Every tail store that
+        // covers its items comes later, so a consumer that acquires such a
+        // tail also sees this link.
+        link.store(next.as_ptr(), Ordering::Release);
+        next
+    }
+
+    #[inline]
+    pub(crate) fn flush_to(&self, writer: &mut WriteCursor<T>) -> FlushResult {
         self.consumer_waiting.0.enable();
+        let cursor = writer.cursor;
         let prev_tail = self.tail.0.load(Ordering::Relaxed);
         if cursor == prev_tail {
             return FlushResult::NothingToFlush;
         }
         let count = Self::distance(cursor, prev_tail);
-        *cached_head = self.head.0.load(Ordering::Acquire);
-        let was_empty = prev_tail == *cached_head;
+        let was_empty = prev_tail == self.head.0.load(Ordering::Acquire);
         self.tail.0.store(cursor, Ordering::Release);
         // Pair with the consumer's register-then-recheck exchange. Either
         // this sees its registration, or its recheck sees our publication.
         let wake = self.consumer_waiting.0.take(was_empty);
         FlushResult::Flushed {
-            count: Self::count(count),
+            count,
             was_empty: wake,
         }
     }
 
+    /// Whether a push would fail now. A ring that can still grow is not
+    /// full; the next push grows it.
     #[inline]
-    pub(crate) fn is_full(&self, cursor: Cursor, cached_head: &mut Cursor) -> bool {
-        if Self::distance(cursor, *cached_head) >= self.capacity() {
-            *cached_head = self.head.0.load(Ordering::Acquire);
-            Self::distance(cursor, *cached_head) >= self.capacity()
-        } else {
-            false
-        }
+    pub(crate) fn is_full(&self, writer: &mut WriteCursor<T>) -> bool {
+        writer.cursor == writer.limit && !self.refill(writer, false)
+    }
+
+    /// Register a producer waiting for space. Out of line and value-only, so
+    /// the producer's cursor stays in registers.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn register_producer(&self) -> bool {
+        self.producer_waiting.0.register()
+    }
+
+    /// Register a consumer waiting for data. See [`register_producer`].
+    ///
+    /// [`register_producer`]: Self::register_producer
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn register_consumer(&self) -> bool {
+        self.consumer_waiting.0.register()
     }
 
     #[inline]
     pub(crate) fn producer_len(&self, cursor: Cursor) -> usize {
-        Self::count(cursor.wrapping_sub(self.head.0.load(Ordering::Acquire)))
+        cursor.wrapping_sub(self.head.0.load(Ordering::Acquire))
     }
 
     #[inline]
@@ -186,129 +263,108 @@ impl<T> Ring<T> {
         cursor == self.head.0.load(Ordering::Acquire)
     }
 
-    // Fold the Option into the caller's return value instead of copying a
-    // payload-sized return buffer through this internal helper.
-    #[expect(
-        clippy::inline_always,
-        reason = "profiling shows payload copies through out-of-line pop returns"
-    )]
-    #[inline(always)]
-    pub(crate) fn pop(&self, head: &mut Cursor, cached_tail: Cursor) -> Option<T> {
-        if *head == cached_tail {
-            return None;
-        }
-        // SAFETY: head < cached_tail, so this slot was written by the
-        // producer and made visible via flush (Release store).
-        let val = self.buf[self.index(*head)].with_mut(|ptr| unsafe { (*ptr).assume_init_read() });
-        *head = head.wrapping_add(1);
-        Some(val)
-    }
-
-    /// Move `count` published items starting at `head` to the end of `output`.
-    ///
-    /// # Safety
-    ///
-    /// `count` must not exceed the consumer's prefetched window, so every slot
-    /// in `head..head + count` holds a value the producer published before the
-    /// consumer's Acquire load of `tail`. The consumer must own those slots
-    /// exclusively until it releases them.
-    #[inline]
-    pub(crate) unsafe fn pop_into(&self, head: &mut Cursor, count: usize, output: &mut Vec<T>) {
-        debug_assert!(count <= self.capacity());
-        output.reserve(count);
-        let start = self.index(*head);
-        let first = count.min(self.capacity() - start);
-        let len = output.len();
-        // SAFETY: `reserve` provides `count` spare slots after `len`. The
-        // first segment ends at the buffer end and the wrapped segment holds
-        // at most `start` items, so both stay inside the buffer and do not
-        // overlap. The caller guarantees the slots are initialized and owned.
-        unsafe {
-            let dst = output.as_mut_ptr().add(len);
-            self.move_slots(start, first, dst);
-            self.move_slots(0, count - first, dst.add(first));
-            output.set_len(len + count);
-        }
-        *head = head.wrapping_add(count);
-    }
-
-    /// Count the longest prefix of `limit` published items starting at `head`
-    /// that `admit` accepts, reading each item in place.
-    ///
-    /// # Safety
-    ///
-    /// Same contract as [`pop_into`](Self::pop_into): every slot in
-    /// `head..head + limit` holds a published value that the consumer owns
-    /// until it releases them.
-    #[inline]
-    pub(crate) unsafe fn accepted_prefix(
-        &self,
-        head: Cursor,
-        limit: usize,
-        admit: &mut impl FnMut(&T) -> bool,
-    ) -> usize {
-        let mut accepted = 0;
-        while accepted < limit {
-            let slot = &self.buf[self.index(head.wrapping_add(accepted))];
-            // SAFETY: the caller guarantees the slot is initialized and owned
-            // by the consumer, so a shared borrow of the value is valid for
-            // the duration of the call.
-            let accept = slot.with_mut(|ptr| unsafe { admit((*ptr).assume_init_ref()) });
-            if !accept {
-                break;
-            }
-            accepted += 1;
-        }
-        accepted
-    }
-
-    /// Move `len` initialized slots starting at buffer index `start` to `dst`.
-    ///
-    /// # Safety
-    ///
-    /// `start + len` must not exceed the capacity, the slots must hold
-    /// initialized values owned by the caller, and `dst` must be valid for
-    /// `len` writes.
-    #[cfg(not(all(loom, target_pointer_width = "64")))]
-    #[inline]
-    unsafe fn move_slots(&self, start: usize, len: usize, dst: *mut T) {
-        // SAFETY: `UnsafeCell` and `MaybeUninit` are both `repr(transparent)`,
-        // so a slot pointer reads as a `T` pointer. The caller guarantees the
-        // source range is inside the buffer and initialized, and `dst` has
-        // room for `len` values. Moving out of the slots is a bitwise copy,
-        // exactly as `pop` does one value at a time.
-        unsafe {
-            let src = UnsafeCell::raw_get(self.buf.as_ptr().add(start)).cast::<T>();
-            std::ptr::copy_nonoverlapping(src, dst, len);
-        }
-    }
-
-    /// Move `len` initialized slots starting at buffer index `start` to `dst`.
-    ///
-    /// # Safety
-    ///
-    /// Same contract as the non-loom implementation. Loom tracks each cell
-    /// access separately, so this moves one slot at a time.
-    #[cfg(all(loom, target_pointer_width = "64"))]
-    unsafe fn move_slots(&self, start: usize, len: usize, dst: *mut T) {
-        for (offset, slot) in self.buf[start..start + len].iter().enumerate() {
-            // SAFETY: the caller guarantees the slot is initialized and owned
-            // by the consumer, and that `dst` has room for `len` values.
-            slot.with_mut(|ptr| unsafe { dst.add(offset).write((*ptr).assume_init_read()) });
-        }
-    }
-
     #[inline]
     pub(crate) fn release(&self, head: Cursor) {
         self.head.0.store(head, Ordering::Release);
     }
 
+    /// Load the items flushed since the last prefetch and return how many
+    /// are new. The window may span segments; reads stop at each segment end
+    /// until [`advance`](Self::advance) moves on.
     #[inline]
-    pub(crate) fn prefetch(&self, cached_tail: &mut Cursor) -> usize {
-        let new_tail = self.tail.0.load(Ordering::Acquire);
-        let count = new_tail.wrapping_sub(*cached_tail);
-        *cached_tail = new_tail;
-        Self::count(count)
+    pub(crate) fn prefetch(&self, reader: &mut ReadCursor<T>) -> usize {
+        let tail = self.tail.0.load(Ordering::Acquire);
+        let count = tail.wrapping_sub(reader.cached_tail);
+        reader.cached_tail = tail;
+        reader.limit = tail;
+        // The segment header shares a cache line with the slot pointer every
+        // read uses, so this load rarely misses. Acquire pairs with `grow`. A
+        // tail past a link's start was published after the link, so the tail
+        // load above guarantees this load sees it.
+        if reader.growing && !reader.segment().next.load(Ordering::Acquire).is_null() {
+            reader.apply(self.window(reader.seg(), reader.head, tail));
+        }
+        count
+    }
+
+    /// Pop one item, moving to the next segment at a segment end.
+    #[expect(
+        clippy::inline_always,
+        reason = "profiling shows payload copies through out-of-line pop returns"
+    )]
+    #[inline(always)]
+    pub(crate) fn pop(&self, reader: &mut ReadCursor<T>) -> Option<T> {
+        while reader.head == reader.limit {
+            if !self.advance(reader) {
+                return None;
+            }
+        }
+        // SAFETY: head is below limit.
+        Some(unsafe { reader.take() })
+    }
+
+    /// At the end of the consumer's segment, move into the next one.
+    /// Returns false when the prefetched window is exhausted.
+    #[inline]
+    pub(crate) fn advance(&self, reader: &mut ReadCursor<T>) -> bool {
+        if reader.head == reader.cached_tail {
+            return false;
+        }
+        reader.apply(self.window(reader.seg(), reader.head, reader.cached_tail));
+        true
+    }
+
+    /// The consumer's window part in its segment, for a window ending at
+    /// `tail`. A drained segment with a newer one linked is freed, and the
+    /// window continues in the newer one. Values only, as in
+    /// [`make_room`](Self::make_room).
+    #[cold]
+    #[inline(never)]
+    fn window(&self, mut seg: NonNull<Segment<T>>, head: Cursor, tail: Cursor) -> Window<T> {
+        loop {
+            // SAFETY: the consumer's segment and the segments linked after
+            // it stay allocated until the consumer retires them here.
+            let segment = unsafe { seg.as_ref() };
+            let growing = segment.capacity() < self.capacity;
+            let next = if growing {
+                // Acquire pairs with `grow` and makes the linked segment
+                // readable; see `prefetch` for why it is visible.
+                segment.next.load(Ordering::Acquire)
+            } else {
+                std::ptr::null_mut()
+            };
+            let Some(next) = NonNull::new(next) else {
+                return Window {
+                    seg,
+                    limit: tail,
+                    growing,
+                };
+            };
+
+            // SAFETY: as above.
+            let start = unsafe { next.as_ref() }.start;
+            if head != start {
+                // Items before `start` remain here; the producer may not
+                // have flushed all of them yet.
+                let limit = if Self::distance(start, head) < Self::distance(tail, head) {
+                    start
+                } else {
+                    tail
+                };
+                return Window {
+                    seg,
+                    limit,
+                    growing,
+                };
+            }
+
+            self.chain.set_oldest(next);
+            // SAFETY: the producer moved to `next` before publishing anything
+            // past this segment and never touches it again. The consumer has
+            // popped every item stored here.
+            unsafe { Segment::free(seg) };
+            seg = next;
+        }
     }
 
     #[inline]
@@ -318,7 +374,7 @@ impl<T> Ring<T> {
 
     #[inline]
     pub(crate) fn consumer_len(&self, head: Cursor) -> usize {
-        Self::count(self.tail.0.load(Ordering::Acquire).wrapping_sub(head))
+        self.tail.0.load(Ordering::Acquire).wrapping_sub(head)
     }
 
     /// Drop all items between head and tail. Must only be called with
@@ -336,20 +392,40 @@ impl<T> Ring<T> {
         // Advance head before the loop so a panicking T::drop cannot
         // cause a second call to re-drop the same items.
         self.head.0.store(tail, Ordering::Relaxed);
-        let mut i = head;
-        while i != tail {
-            // SAFETY: &mut self guarantees exclusive access. Slots
-            // [head..tail] were written by the producer and flushed.
-            self.buf[self.index(i)].with_mut(|ptr| unsafe {
-                (*ptr).assume_init_drop();
-            });
-            i = i.wrapping_add(1);
+        let mut segment = self.chain.oldest();
+        let mut cursor = head;
+        while cursor != tail {
+            // SAFETY: &mut self guarantees exclusive access to the chain, and
+            // every cursor in head..tail is stored in it, in order.
+            unsafe {
+                segment = Segment::holding(segment, cursor);
+                segment.as_ref().drop_slot(cursor);
+            }
+            cursor = cursor.wrapping_add(1);
         }
+    }
+}
+
+#[cfg(test)]
+impl<T> Ring<T> {
+    /// Sizes of the live segments, oldest first.
+    pub(crate) fn segment_sizes(&self) -> Vec<usize> {
+        let mut sizes = Vec::new();
+        let mut segment = self.chain.oldest().as_ptr();
+        while let Some(current) = NonNull::new(segment) {
+            // SAFETY: tests call this while both endpoints are idle.
+            let current = unsafe { current.as_ref() };
+            sizes.push(current.capacity());
+            segment = current.next.load(Ordering::Acquire);
+        }
+        sizes
     }
 }
 
 impl<T> Drop for Ring<T> {
     fn drop(&mut self) {
+        // The chain frees the segments afterwards, even if an item drop
+        // panics here.
         self.drop_remaining();
     }
 }

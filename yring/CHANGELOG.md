@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `spsc_growing(initial, capacity)` creates a ring that starts with `initial`
+  slots and doubles up to `capacity` as the producer runs ahead. The producer
+  links a larger segment instead of copying, and the consumer frees each old
+  segment once drained. Windows, batch pops, and wakeup hints behave as with
+  a fixed ring.
+
 ## [0.3.21] - 2026-11-04
 
 ### Changed

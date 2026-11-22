@@ -1,13 +1,12 @@
+use crate::Ring;
 use crate::compat::{Arc, Ordering};
-use crate::{Cursor, Ring};
+use crate::segment::ReadCursor;
 
 /// Receiving half. Mutation requires exclusive access.
 pub struct Consumer<T> {
     pub(crate) ring: Arc<Ring<T>>,
-    /// Private read position. Only the consumer touches it.
-    pub(crate) head: Cursor,
-    /// Cached copy of `tail`. Updated by `prefetch()`.
-    pub(crate) cached_tail: Cursor,
+    /// Private read position, prefetched window, and segment.
+    pub(crate) reader: ReadCursor<T>,
 }
 
 impl<T> Consumer<T> {
@@ -21,6 +20,9 @@ impl<T> Consumer<T> {
 // SAFETY: Consumer mutations require &mut self and the underlying Ring is
 // Send+Sync. Moving the consumer to another thread is safe.
 unsafe impl<T: Send> Send for Consumer<T> {}
+// SAFETY: shared access reads the ring's atomics and the cursor's plain
+// fields and never dereferences the segment.
+unsafe impl<T: Send> Sync for Consumer<T> {}
 
 impl<T> Consumer<T> {
     /// Pop one item. Zero atomics; reads from the prefetched window.
@@ -30,7 +32,7 @@ impl<T> Consumer<T> {
     /// producer.
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
-        self.ring.pop(&mut self.head, self.cached_tail)
+        self.ring.pop(&mut self.reader)
     }
 
     /// Move up to `limit` prefetched items to the end of `output`.
@@ -42,16 +44,29 @@ impl<T> Consumer<T> {
     /// afterward to publish the consumed slots.
     #[inline]
     pub fn pop_into(&mut self, output: &mut Vec<T>, limit: usize) -> usize {
-        let count = self.cached_tail.wrapping_sub(self.head).min(limit);
-        if count == 0 {
-            return 0;
+        let mut moved = 0;
+        while moved < limit {
+            if self.reader.head == self.reader.limit && !self.ring.advance(&mut self.reader) {
+                break;
+            }
+            let count = self.reader.in_segment().min(limit - moved);
+            if count == 0 {
+                break;
+            }
+            // SAFETY: `count` is bounded by the window part in this segment.
+            // The producer published those slots with a Release store that
+            // `prefetch` acquired, and the consumer owns them until `release`
+            // advances `head` past them.
+            unsafe { self.reader.pop_into(count, output) };
+            moved += count;
         }
-        // SAFETY: `count` is bounded by the prefetched window. The producer
-        // published those slots with a Release store that `prefetch`
-        // acquired, and the consumer owns them until `release` advances
-        // `head` past them.
-        unsafe { self.ring.pop_into(&mut self.head, count, output) };
-        count
+        moved
+    }
+
+    /// Items left in the prefetched window.
+    #[inline]
+    fn window(&self) -> usize {
+        self.reader.cached_tail.wrapping_sub(self.reader.head)
     }
 
     /// Move the accepted prefix of up to `limit` prefetched items to the end
@@ -60,10 +75,10 @@ impl<T> Consumer<T> {
     /// `admit` sees each item in place, in FIFO order, and the move stops at
     /// the first item it rejects. That item stays at the front of the window
     /// for a later pop. Zero atomics; the accepted prefix moves with the same
-    /// two contiguous copies as [`pop_into`](Self::pop_into). Returns the
-    /// number moved, which is zero when the window is exhausted or the first
-    /// item was rejected. Call [`release`](Self::release) afterward to
-    /// publish the consumed slots.
+    /// contiguous copies as [`pop_into`](Self::pop_into). Returns the number
+    /// moved, which is zero when the window is exhausted or the first item
+    /// was rejected. Call [`release`](Self::release) afterward to publish the
+    /// consumed slots.
     ///
     /// `admit` may see an item more than once: a rejected item is offered
     /// again by the next call, and if `admit` panics, nothing has moved and
@@ -75,19 +90,18 @@ impl<T> Consumer<T> {
         limit: usize,
         mut admit: impl FnMut(&T) -> bool,
     ) -> usize {
-        let window = self.cached_tail.wrapping_sub(self.head).min(limit);
+        let window = self.window().min(limit);
         if window == 0 {
             return 0;
         }
-        // SAFETY: `window` is bounded by the prefetched window, exactly as in
-        // `pop_into`, and the consumer owns those slots until `release`.
-        let count = unsafe { self.ring.accepted_prefix(self.head, window, &mut admit) };
+        // SAFETY: `window` is bounded by the prefetched window, and the
+        // consumer owns those slots until `release`. Counting first keeps a
+        // panicking `admit` from moving anything.
+        let count = unsafe { self.reader.accepted_prefix(window, &mut admit) };
         if count == 0 {
             return 0;
         }
-        // SAFETY: `count <= window`, so the same bound holds.
-        unsafe { self.ring.pop_into(&mut self.head, count, output) };
-        count
+        self.pop_into(output, count)
     }
 
     /// Publish consumed position so the producer can reuse slots.
@@ -97,7 +111,7 @@ impl<T> Consumer<T> {
     /// Prefetched-but-unpopped values stay reserved and remain readable.
     #[inline]
     pub fn release(&mut self) {
-        self.ring.release(self.head);
+        self.ring.release(self.reader.head);
     }
 
     /// Publish consumed slots and report whether the producer needs a wake.
@@ -119,11 +133,11 @@ impl<T> Consumer<T> {
     pub fn release_with_full(&mut self) -> bool {
         self.ring.producer_waiting.0.enable();
         let published_head = self.ring.head.0.load(Ordering::Relaxed);
-        if self.head == published_head {
+        if self.reader.head == published_head {
             return false;
         }
-        let was_full = self.cached_tail.wrapping_sub(published_head) >= self.capacity();
-        self.ring.release(self.head);
+        let was_full = self.reader.cached_tail.wrapping_sub(published_head) >= self.capacity();
+        self.ring.release(self.reader.head);
         self.ring.producer_waiting.0.take(was_full)
     }
 
@@ -132,26 +146,21 @@ impl<T> Consumer<T> {
     /// an empty window registers a waiter and rechecks before returning.
     #[inline]
     pub fn prefetch(&mut self) -> usize {
-        let count = self.ring.prefetch(&mut self.cached_tail);
-        if self.head != self.cached_tail {
+        let count = self.ring.prefetch(&mut self.reader);
+        if self.reader.head != self.reader.cached_tail {
             return count;
         }
-        self.prefetch_after_empty()
-    }
-
-    #[cold]
-    fn prefetch_after_empty(&mut self) -> usize {
-        if !self.ring.consumer_waiting.0.register() {
+        if !self.ring.register_consumer() {
             return 0;
         }
-        self.ring.prefetch(&mut self.cached_tail)
+        self.ring.prefetch(&mut self.reader)
     }
 
     /// Convenience: prefetch + pop + release. For callers that don't
     /// need batching.
     #[inline]
     pub fn prefetch_and_pop(&mut self) -> Option<T> {
-        if self.head == self.cached_tail {
+        if self.reader.head == self.reader.cached_tail {
             self.prefetch();
         }
         let val = self.pop();
@@ -173,12 +182,12 @@ impl<T> Consumer<T> {
     #[inline]
     pub fn prefetch_and_pop_with_full(&mut self) -> Option<(T, bool)> {
         self.ring.producer_waiting.0.enable();
-        if self.head == self.cached_tail {
+        if self.reader.head == self.reader.cached_tail {
             self.prefetch();
         }
         // A refilled ring can exceed this cached window. The producer's
         // full registration covers that case without a tail load per pop.
-        let was_full = self.cached_tail.wrapping_sub(self.head) >= self.capacity();
+        let was_full = self.window() >= self.capacity();
         let val = self.pop()?;
         self.release();
         let wake = self.ring.producer_waiting.0.take(was_full);
@@ -188,13 +197,17 @@ impl<T> Consumer<T> {
     #[inline]
     /// Return whether the consumer has no visible items.
     pub fn is_empty(&self) -> bool {
-        if !self.ring.consumer_is_empty(self.head, self.cached_tail) {
+        if !self
+            .ring
+            .consumer_is_empty(self.reader.head, self.reader.cached_tail)
+        {
             return false;
         }
         if !self.ring.consumer_waiting.0.register() {
             return true;
         }
-        self.ring.consumer_is_empty(self.head, self.cached_tail)
+        self.ring
+            .consumer_is_empty(self.reader.head, self.reader.cached_tail)
     }
 
     /// The producer has been dropped and all flushed items have been
@@ -202,11 +215,12 @@ impl<T> Consumer<T> {
     #[inline]
     pub fn is_disconnected(&self) -> bool {
         self.ring.producer_dropped.load(Ordering::Acquire)
-            && self.head == self.ring.tail.0.load(Ordering::Acquire)
+            && self.reader.head == self.ring.tail.0.load(Ordering::Acquire)
     }
 
     #[inline]
-    /// Return the ring capacity after power-of-two rounding.
+    /// Return the ring capacity after power-of-two rounding. A growing ring
+    /// reports the bound it grows to.
     pub fn capacity(&self) -> usize {
         self.ring.capacity()
     }
@@ -214,7 +228,7 @@ impl<T> Consumer<T> {
     #[inline]
     /// Return the number of items visible to the consumer.
     pub fn len(&self) -> usize {
-        self.ring.consumer_len(self.head)
+        self.ring.consumer_len(self.reader.head)
     }
 
     /// Mark the consumer side closed and release consumed slots.

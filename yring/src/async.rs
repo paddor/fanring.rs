@@ -17,6 +17,7 @@ use crate::compat::AtomicWaker;
 use atomic_waker::AtomicWaker;
 use futures_core::Stream;
 
+use crate::segment::{ReadCursor, WriteCursor};
 use crate::{Cursor, Padded, Ring};
 
 struct AsyncRing<T> {
@@ -44,45 +45,48 @@ impl<T> Drop for AsyncRing<T> {
 /// Async sending half. Wakes the consumer on flush.
 pub struct AsyncProducer<T> {
     ring: Arc<AsyncRing<T>>,
-    cursor: Cursor,
-    cached_head: Cursor,
+    writer: WriteCursor<T>,
 }
 
 // SAFETY: Mutations require &mut self and the underlying AsyncRing is Send+Sync.
 unsafe impl<T: Send> Send for AsyncProducer<T> {}
+// SAFETY: shared access never dereferences the segment; see `Producer`.
+unsafe impl<T: Send> Sync for AsyncProducer<T> {}
 
 /// Async receiving half. Implements [`Stream`], releasing each returned item.
 /// For batched slot release, use [`Self::prefetch`], [`Self::pop`] and
 /// [`Self::release`] explicitly.
 pub struct AsyncConsumer<T> {
     ring: Arc<AsyncRing<T>>,
-    head: Cursor,
-    cached_tail: Cursor,
+    reader: ReadCursor<T>,
     released_head: Cursor,
 }
 
 // SAFETY: Mutations require &mut self and the underlying AsyncRing is Send+Sync.
 unsafe impl<T: Send> Send for AsyncConsumer<T> {}
+// SAFETY: shared access never dereferences the segment; see `Consumer`.
+unsafe impl<T: Send> Sync for AsyncConsumer<T> {}
 
 /// Create an async bounded SPSC ring with the given capacity (rounded up to
 /// next power of two).
 pub fn async_spsc<T>(capacity: usize) -> (AsyncProducer<T>, AsyncConsumer<T>) {
+    let ring = Ring::new(capacity, capacity, 0);
+    let (writer, reader) = ring.cursors();
+    let released_head = reader.head;
     let ring = Arc::new(AsyncRing {
-        ring: Ring::new(capacity),
+        ring,
         consumer_waker: Padded(AtomicWaker::new()),
         producer_waker: Padded(AtomicWaker::new()),
     });
     (
         AsyncProducer {
             ring: ring.clone(),
-            cursor: 0,
-            cached_head: 0,
+            writer,
         },
         AsyncConsumer {
             ring,
-            head: 0,
-            cached_tail: 0,
-            released_head: 0,
+            reader,
+            released_head,
         },
     )
 }
@@ -91,9 +95,7 @@ impl<T> AsyncProducer<T> {
     /// Write without atomics while cached space remains. Returns `Err(val)` if full.
     #[inline]
     pub fn push(&mut self, val: T) -> Result<(), T> {
-        self.ring
-            .ring
-            .push(&mut self.cursor, &mut self.cached_head, val)
+        self.ring.ring.push(&mut self.writer, val)
     }
 
     /// Make all pushed items visible and wake the consumer unconditionally.
@@ -106,7 +108,11 @@ impl<T> AsyncProducer<T> {
     /// (a no-op when no waker is registered) but is race-free.
     #[inline]
     pub fn flush(&mut self) {
-        self.ring.ring.tail.0.store(self.cursor, Ordering::Release);
+        self.ring
+            .ring
+            .tail
+            .0
+            .store(self.writer.cursor, Ordering::Release);
         self.ring.consumer_waker.0.wake();
     }
 
@@ -168,7 +174,7 @@ impl<T> AsyncProducer<T> {
 
     #[inline]
     pub fn is_full(&mut self) -> bool {
-        self.ring.ring.is_full(self.cursor, &mut self.cached_head)
+        self.ring.ring.is_full(&mut self.writer)
     }
 
     #[inline]
@@ -178,12 +184,12 @@ impl<T> AsyncProducer<T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.ring.ring.producer_len(self.cursor)
+        self.ring.ring.producer_len(self.writer.cursor)
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.ring.ring.producer_is_empty(self.cursor)
+        self.ring.ring.producer_is_empty(self.writer.cursor)
     }
 
     /// The consumer half has been dropped.
@@ -257,18 +263,18 @@ impl<T> AsyncConsumer<T> {
     /// Call [`release`](Self::release) after draining a batch.
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
-        self.ring.ring.pop(&mut self.head, self.cached_tail)
+        self.ring.ring.pop(&mut self.reader)
     }
 
     /// Publish consumed position so the producer can reuse slots,
     /// and wake the producer if it is waiting for space.
     #[inline]
     pub fn release(&mut self) {
-        if self.head == self.released_head {
+        if self.reader.head == self.released_head {
             return;
         }
-        self.ring.ring.release(self.head);
-        self.released_head = self.head;
+        self.ring.ring.release(self.reader.head);
+        self.released_head = self.reader.head;
         if self
             .ring
             .ring
@@ -284,13 +290,13 @@ impl<T> AsyncConsumer<T> {
     /// Load all items flushed since the last prefetch. One Acquire load.
     #[inline]
     pub fn prefetch(&mut self) -> usize {
-        self.ring.ring.prefetch(&mut self.cached_tail)
+        self.ring.ring.prefetch(&mut self.reader)
     }
 
     /// Prefetch + pop + release in one call.
     #[inline]
     pub fn prefetch_and_pop(&mut self) -> Option<T> {
-        if self.head == self.cached_tail {
+        if self.reader.head == self.reader.cached_tail {
             self.prefetch();
         }
         let val = self.pop();
@@ -304,7 +310,7 @@ impl<T> AsyncConsumer<T> {
     pub fn is_empty(&self) -> bool {
         self.ring
             .ring
-            .consumer_is_empty(self.head, self.cached_tail)
+            .consumer_is_empty(self.reader.head, self.reader.cached_tail)
     }
 
     #[inline]
@@ -314,7 +320,7 @@ impl<T> AsyncConsumer<T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.ring.ring.consumer_len(self.head)
+        self.ring.ring.consumer_len(self.reader.head)
     }
 }
 
@@ -324,7 +330,7 @@ impl<T> Stream for AsyncConsumer<T> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
-        if this.head == this.cached_tail {
+        if this.reader.head == this.reader.cached_tail {
             this.prefetch();
         }
         if let Some(val) = this.pop() {
@@ -339,7 +345,7 @@ impl<T> Stream for AsyncConsumer<T> {
         this.ring.consumer_waker.0.register(cx.waker());
 
         // Re-check after registering to avoid lost wakes.
-        if this.head == this.cached_tail {
+        if this.reader.head == this.reader.cached_tail {
             this.prefetch();
         }
         if let Some(val) = this.pop() {

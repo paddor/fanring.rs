@@ -77,6 +77,29 @@ assert_eq!(consumer.pop(), Some(3));
 consumer.release();
 ```
 
+## Growing rings
+
+`spsc_growing(initial, capacity)` allocates `initial` slots and doubles its
+storage up to `capacity` when the producer runs ahead. A full segment is not
+copied: the producer links a larger one and the consumer frees the old one
+after draining it. A ring that has reached `capacity` costs nothing extra.
+
+```rust
+let (mut producer, mut consumer) = yring::spsc_growing(4, 1 << 20);
+for i in 0..100 {
+    producer.push(i).unwrap(); // links segments of 8, 16, 32, and 64 slots
+}
+producer.flush();
+while consumer.prefetch() > 0 {
+    while let Some(_val) = consumer.pop() {}
+    consumer.release();
+}
+```
+
+A prefetched window can span segments. `pop()`, `pop_into()`, and
+`pop_into_while()` cross segment ends, so consumers see the same windows as
+with a fixed ring.
+
 ## Sharing the producer handle
 
 `Producer` needs `&mut self` for writes. To write through a handle stored in
@@ -161,7 +184,7 @@ cargo +nightly miri test -p yring
 ```
 
 The Loom suite models SPSC cursor ordering, wraparound, producer drop,
-`push_async` wakeups, and upper-layer readiness patterns:
+segment growth, `push_async` wakeups, and upper-layer readiness patterns:
 
 ```sh
 RUSTFLAGS="--cfg loom" cargo test -p yring --features async --test loom
