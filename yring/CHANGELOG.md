@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.22] - 2026-11-22
+
 ### Added
 
 - `spsc_growing(initial, capacity)` creates a ring that starts with `initial`
