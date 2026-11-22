@@ -386,6 +386,26 @@ fn full_is_per_sender() {
 }
 
 #[test]
+fn lane_grows_to_its_full_capacity_in_order() {
+    let (mut tx, mut rx) = channel(4096);
+
+    for value in 0..4096 {
+        tx.try_send(value).unwrap();
+    }
+    assert_eq!(tx.try_send(4096), Err(TrySendError::Full(4096)));
+
+    for value in 0..4096 {
+        assert_eq!(rx.try_recv(), Ok(value));
+    }
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+    for value in 0..4096 {
+        tx.try_send(value).unwrap();
+    }
+    assert_eq!(tx.try_send(4096), Err(TrySendError::Full(4096)));
+}
+
+#[test]
 fn drained_sender_lane_is_reused() {
     let (tx0, mut rx) = channel::<u8>(2);
     let old_slot = {

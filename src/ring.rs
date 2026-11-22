@@ -11,9 +11,11 @@ use crate::teardown::Teardown;
 
 const ACTIVE: u8 = 1;
 const CLOSED: u8 = 2;
+/// Slots a lane starts with. Larger lanes grow to their capacity on demand.
+const LANE_INITIAL_SLOTS: usize = 1024;
 
 pub(crate) fn spsc<T, P: Teardown>(capacity: usize) -> (Producer<T, P>, Consumer<T, P>) {
-    let (producer, consumer) = yring::spsc(capacity);
+    let (producer, consumer) = yring::spsc_growing(LANE_INITIAL_SLOTS, capacity);
     let cleanup = P::COORDINATED.then(|| {
         Arc::new(Cleanup {
             state: AtomicU8::new(0),

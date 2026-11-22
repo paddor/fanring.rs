@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Sender rings above 1024 slots start at 1024 and grow to their capacity as
+  a backlog builds, instead of allocating the full capacity up front. Idle
+  senders with large capacities hold far less memory.
+
 ## [0.3.11] - 2026-11-14
 
 ### Fixed

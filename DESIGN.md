@@ -11,6 +11,7 @@ The producer owns its write cursor. Receive-side ownership differs by channel:
 | Lane control | Receiver-owned pause state | No per-lane pause API |
 
 Capacity belongs to each sender ring. Adding a sender adds another ring.
+Rings above 1024 slots start at 1024 and grow to their capacity on demand.
 MPMC staging holds values outside those ring bounds, so their sum is not an
 exact bound on total resident items. MPSC preserves per-lane FIFO; MPMC permits
 batches from one lane to be processed concurrently and has relaxed ordering.
